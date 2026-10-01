@@ -1,157 +1,37 @@
-# Everything Lite v0.2.0 架构设计
+# Everything Lite 当前架构（0.4.11）
 
-## 1. 目标
+Core 不依赖 Qt，CLI 和 GUI 共用 `SearchService`。文件索引保存在 SQLite；macOS 文件监听由 `FileWatcher` 接口隔离，非 macOS 当前使用 NullWatcher。旧版本架构说明原文保留在 [history/ARCHITECTURE_legacy.md](history/ARCHITECTURE_legacy.md)，其中 100 ms、QtConcurrent 和永久 1000 条上限等描述属于旧实现。
 
-Everything Lite 首先解决“按文件名/路径极快找到本地文件”。架构优先保证索引一致性、交互响应和跨平台边界清晰，而不是提前加入全文内容、OCR 或 AI。
-
-## 2. 分层
+## 搜索链路
 
 ```text
-Qt UI
-├── Search input / table / context actions
-├── QSettings persistence
-└── QtConcurrent async query
-        ↓
-SearchEngine
-        ↓
-SearchQuery parser ──→ Database search
-                         ↓
-                       SQLite
-                         ↑
-IndexManager ← FileScanner
-      ↑
-FileWatcher abstraction
-      ↑
-macOS FSEvents
+GUI 编辑 / 过滤选项 / Enter
+  → 800 ms 单次计时与 IME 组词保护
+  → MainWindow 提交 request ID、query、options、limit、offset
+  → SearchWorker / 专用 QThread
+  → SearchService（在工作线程首次使用时初始化并复用）
+  → SearchEngine / SearchQuery
+  → Database / SQLite files + 可用时的 FTS5 trigram
+  → 主线程核对 request ID 后更新 SearchResultModel
+
+CLI search
+  → 同一 SearchService
+  → 同一 SearchEngine / Database
 ```
 
-Qt 不进入 Core。CLI、Docker 和测试都可在无 GUI 环境构建。
+MainWindow 启动时不执行空关键词查询。输入变化使旧 request ID 失效；旧查询完成时，其过期结果不能覆盖新输入。后台一次执行一项查询，正在执行期间最多保留一次“查询最新状态”的 pending 请求。分页与结果模型更新由 UI 协调，每批加载 1000 条；数据库匹配总量与 UI 当前持有数量分开。
 
-## 3. 索引流程
+普通 terms 默认匹配名称，`path:` 或 Match Path 才匹配完整路径。UTF-8 拆词仅识别 ASCII 空白分隔符，避免中文字符内部字节被 locale 的空白判断拆开。默认共享搜索入口及诊断路径的具体策略以 `src/core/search_service.cpp`、`search_engine.cpp`、`database.cpp` 为准。
 
-完整重建使用 generation，而不是先清库：
+## 索引链路
 
 ```text
-beginRootScan(new generation)
-→ FileScanner 递归扫描
-→ batch UPSERT
-→ delete stale rows where generation != current
-→ completeRootScan
+配置的 roots → FileScanner → IndexManager → Database
+macOS FSEvents → 事件聚合 → 增量路径更新或 root 重扫
 ```
 
-这样扫描期间旧数据仍可读；只有成功完成扫描后才清理旧项。
+完整扫描使用 generation 标识旧记录；成功完成后清理未在本轮出现的记录。增量更新重新读取存在的路径，删除消失的路径及其子项；FSEvents 要求重扫时回到 root 扫描。索引与前台搜索刷新分开调度，避免文件事件直接抢占输入。未来 Exclude 应发生在扫描与事件索引阶段，现阶段尚未实现。
 
-增量变化：
+## 开发边界
 
-```text
-FSEvents
-→ debounce / event aggregation
-→ IndexManager::applyPathChange
-→ 文件存在：重新读取并 UPSERT
-→ 文件不存在：删除 path + descendants
-```
-
-目录变化会重新扫描该子树。FSEvents 报告事件丢失或必须重扫时，回退到完整 root rebuild，优先保证最终一致。
-
-## 4. SQLite
-
-SQLite 采用 WAL、NORMAL synchronous、busy timeout。核心字段包含 path、name、ext、root、size、modified_time、is_dir、search_name、search_path、scan_generation。
-
-索引包含：
-
-```text
-search_name
-ext
-size
-(root, scan_generation)
-modified_time
-```
-
-单普通关键词执行两段查询：先 `keyword%` 前缀，再 `%keyword%` 包含并去重；多关键词使用 AND 包含。过滤条件由 `SearchQuery` 转换为 SQL WHERE。
-
-## 5. SearchQuery
-
-v0.2.0 解析：
-
-```text
-ext:
-path:
-size:
-modified:
-type:
-```
-
-过滤词不参与普通关键词匹配；剩余 terms 同时匹配 `search_name` 与 `search_path`。
-
-## 6. GUI 异步查询
-
-GUI 线程不直接执行 SQLite search。输入后 100 ms debounce，再由 QtConcurrent 执行查询。若查询运行期间继续输入，不并发启动无限任务，而是记录“存在更新查询”；当前查询结束后立即执行最新输入，中间过时输入不会逐条执行。
-
-这保证输入框和窗口事件循环不会因为慢查询卡住，同时避免持续打字产生大量并发 SQLite 读取。
-
-## 7. 多 root
-
-用户可配置多个目录。`IndexManager::rebuildRoots` 会规范化、去重，并在核心层消除被父 root 覆盖的嵌套 root。数据库中已不再配置的 root 会被清理。Watcher 同时监听用户当前配置 root。
-
-## 8. UI Model/View
-
-结果使用 `QTableView + QAbstractTableModel`。不使用 `QTableWidget`，避免大量结果时逐 item 控件开销。v0.2.0 模型最多接收 1000 条结果，并支持四列本地排序。
-
-## 9. 平台边界
-
-当前：macOS 使用 FSEvents；非 macOS 暂为 NullWatcher。后续 Windows 应实现 USN Journal/ReadDirectoryChangesW，Linux 实现 inotify/fanotify，并保持 `FileWatcher` 接口稳定。
-
-系统级 global hotkey 也应进入 platform 层，而不是把第三方 Qt hotkey 依赖写进核心。
-
-## 10. 性能决策原则
-
-当前不引入 Trie。原因是：B-tree 前缀查询、SQLite WAL 和 1000 条上限已足以支撑 MVP；真正风险在 `%keyword%` 和 `path:%keyword%`。只有真实 10 万/50 万/100 万数据 benchmark 表明这些查询无法接受时，再引入 trigram、自定义倒排结构、mmap 或内存索引。
-
-## v0.3 查询优化补充
-
-### 默认名称搜索
-
-普通查询只作用于 `search_name`。完整路径匹配是显式模式，避免父目录名称导致大量假阳性结果。
-
-### FTS5 trigram
-
-当 SQLite 支持 FTS5 trigram 且 basename 查询词不少于 3 个 Unicode 字符时：
-
-```text
-SearchQuery
-  ↓
-files_name_fts MATCH ...
-  ↓ join rowid
-files
-```
-
-`files_name_fts` 是 external-content FTS5 表，主内容仍保存在 `files` 表。首次从旧版本升级时执行一次 FTS `rebuild`；之后 insert/delete/update trigger 同步维护。
-
-### 结果窗口
-
-SearchEngine 对外提供 `limit + offset`。Qt 首批加载 1000 条，滚动接近底部再请求下一批。这样数据库匹配数量与 UI 当前持有数量解耦。
-
-## v0.4 Desktop Shell
-
-v0.4 不修改 Core 边界，新增的是 Qt Desktop Shell：
-
-```text
-macOS Native Menu Bar / Qt MenuBar
-             ↓
-      MainWindow actions
-             ↓
-Search controls / Bookmarks / Export / Finder / Quick Look
-             ↓
-        SearchEngine
-             ↓
-      SQLite / FTS5
-```
-
-菜单只调用 Service/Core 已存在的能力，不允许 UI 直接修改 SQLite。Bookmarks 与窗口布局属于 UI 状态，使用 QSettings；文件索引仍只由 Database / IndexManager 管理。
-
-macOS 特定行为目前保持在 UI 边缘（`open -R`、`qlmanage -p`），长期会抽象到 platform 层。v0.8 计划将 Quick Look、Open With 和全局快捷键改成正式 macOS 后端。
-
-
-## v0.4.6 搜索入口统一
-
-从 v0.4.6 起增加 `SearchService` 作为 CLI 与 GUI 共用的应用层搜索入口。GUI 不再直接选择 FTS/INSTR/fallback，也不再通过 QtConcurrent cancellation 改变查询生命周期。当前阶段优先保证：同一数据库、同一查询、同一选项时，GUI backend 与 CLI 返回相同结果。
+QSettings 保存 UI 状态与书签，不替代索引数据库。Finder、Quick Look 等 macOS 操作目前位于 UI 边缘；其他系统的文件监听与原生交互仍需单独实现。现有核心测试覆盖查询解析、中文检索、过滤、分页、取消与索引更新，但没有 Qt IME、窗口交互或百万级数据库的自动验收。本次整理保持 `src/`、`tests/` 和 `CMakeLists.txt` 与原始 0.4.11 一致。

@@ -1,66 +1,40 @@
-# Everything Lite 工程目录（v0.2.0）
+# Everything Lite 工程目录（0.4.11）
+
+当前目录本身就是 Git 仓库与 CMake 工程根目录。活跃源码只有一份；版本历史由 Git 提交与标签表达。
 
 ```text
-everything-lite/
-├── CMakeLists.txt
+EverythingLite/
+├── CMakeLists.txt              # Core/CLI/Qt GUI、CTest
+├── CMakePresets.json           # Core 与 GUI 的 Debug 开发预设
 ├── README.md
 ├── CHANGELOG.md
 ├── Dockerfile
-├── docker-compose.yml
-├── assets/
-├── configs/
+├── docker-compose.yml          # Headless Core/CLI 演示
+├── assets/                     # UI 参考素材
+├── configs/                    # 环境配置示例
 ├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── BENCHMARK.md
-│   ├── MACOS_BUILD.md
+│   ├── DEVELOPMENT.md          # 构建、测试、本地提交、发布流程
+│   ├── ARCHITECTURE.md         # 当前架构
 │   ├── PROJECT_STRUCTURE.md
-│   ├── SEARCH_SYNTAX.md
-│   └── TEST_REPORT.md
-├── scripts/
-│   ├── benchmark-macos.sh
-│   ├── build-macos.sh
-│   ├── diagnose-macos.sh
-│   ├── docker-demo.sh
-│   └── run-macos.sh
+│   ├── releases/               # 原始发布说明，内容保留
+│   └── history/                # 历史导入证据、旧架构说明、本次验证
+├── scripts/                    # 原有 macOS 构建、运行、诊断、调试脚本
 ├── src/
-│   ├── cli/
-│   │   └── main.cpp
-│   ├── core/
-│   │   ├── database.cpp/.h
-│   │   ├── file_record.h
-│   │   ├── index_manager.cpp/.h
-│   │   ├── path_utils.cpp/.h
-│   │   ├── scanner.cpp/.h
-│   │   ├── search_engine.cpp/.h
-│   │   └── search_query.cpp/.h
-│   ├── platform/
-│   │   ├── file_watcher.h
-│   │   ├── mac_fsevents_watcher.cpp/.h
-│   │   ├── null_watcher.h
-│   │   └── watcher_factory.cpp/.h
-│   └── ui/
-│       ├── main.cpp
-│       ├── main_window.cpp/.h
-│       ├── root_settings_dialog.cpp/.h
-│       └── search_result_model.cpp/.h
-└── tests/
-    └── test_core.cpp
+│   ├── core/                   # 数据库、扫描、索引、查询、SearchService
+│   ├── platform/               # FileWatcher、macOS FSEvents、NullWatcher
+│   ├── cli/                    # 命令行入口
+│   └── ui/                     # MainWindow、Model、SearchWorker、目录设置
+├── tests/test_core.cpp         # 核心回归测试
+├── build/                      # 新开发预设生成目录，不提交
+├── build-macos/                # 原脚本生成目录，不提交
+├── debug-logs/                 # 搜索追踪日志，不提交
+└── archive/                    # 本地原始资料，不提交、不用于当前构建
+    ├── releases/               # 14 个 Everything Lite ZIP
+    ├── versions/               # 原解压目录，含原有构建产物及日志
+    ├── unrelated/              # ChatGPT TOC 插件各版本、两张图片
+    ├── legacy-root/            # 原根目录旧文档及 Finder 元数据
+    ├── git-metadata/           # 本次生成并移出的 Finder 元数据
+    └── original-inventory.json # 原始文件哈希、权限与符号链接记录
 ```
 
-核心模块含义：`scanner` 负责读取文件系统元数据，`index_manager` 负责全量/增量索引事务流程，`database` 负责 SQLite，`search_query` 负责把用户输入解析成过滤条件，`search_engine` 提供稳定查询接口，`platform` 隔离操作系统文件事件，`ui` 只负责 Qt 桌面交互。
-
-## v0.4 新增/重点文档
-
-```text
-docs/
-├── ROADMAP.md                  # v0.4 到 v1.0 的正式版本路线
-├── UI_GUIDE.md                 # 菜单、主窗口、快捷键
-└── EVERYTHING_COMPATIBILITY.md # 与 Everything 的功能映射
-```
-
-v0.4 的 UI 菜单实现继续集中在 `src/ui/main_window.*`，避免在 v0.5 Preferences/Exclude 架构尚未确定前过早拆分大量 UI 类。v0.5 开始增加独立 Preferences 与 Exclude rule model。
-
-
-## v0.4.6 新增
-
-- `src/core/search_service.h/.cpp`：应用级唯一搜索服务，CLI 与 GUI 共用。
+原 `.vscode/settings.json` 保留为本地配置并忽略。不要将 `archive/` 中的旧程序与当前 `build/` 的程序混用；旧 CMakeCache 可能记录原绝对路径，归档中的构建目录不是可迁移的构建入口。

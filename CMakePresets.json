@@ -1,0 +1,56 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 1
+  },
+  "configurePresets": [
+    {
+      "name": "core-debug",
+      "displayName": "Core and CLI with active assertions",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/core-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_GUI": "OFF",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "gui-debug",
+      "displayName": "Qt GUI, Core and CLI with active assertions",
+      "inherits": "core-debug",
+      "binaryDir": "${sourceDir}/build/gui-debug",
+      "cacheVariables": {
+        "BUILD_GUI": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "core-debug",
+      "configurePreset": "core-debug"
+    },
+    {
+      "name": "gui-debug",
+      "configurePreset": "gui-debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "core-debug",
+      "configurePreset": "core-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "gui-debug",
+      "configurePreset": "gui-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

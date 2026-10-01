@@ -1,289 +1,53 @@
 # Everything Lite
 
-Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
+Everything Lite 是本地文件名与路径搜索工具，当前应用版本为 **0.4.11**。技术栈为 C++17、Qt 6 Widgets、SQLite 和 CMake；macOS 使用 FSEvents 进行文件变化监听，其他平台目前使用 NullWatcher，尚没有实时监听实现。
 
-当前版本：`0.4.11`（后台搜索 / GUI 无阻塞版）
+源码现在直接位于本仓库根目录。继续开发时使用 `src/`、`tests/`、`scripts/` 和 `docs/`，不再复制新的版本目录。原始压缩包、旧版本解压目录和原有构建产物保留在本地 `archive/`，该目录不进入 Git 或 Docker 构建上下文。
 
-技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
+## 当前行为
 
+CLI 与 GUI 共用 `SearchService`。GUI 在停止输入 800 ms 后提交查询，中文 IME 组词期间暂停计时；SQLite 查询及 SearchService 初始化由 `SearchWorker` 在专用 QThread 中执行。过期 request ID 的结果被丢弃，后台同时仅执行一项查询，搜索期间保留旧结果。启动时不自动进行空关键词查询。这些是当前源码实现，交互验收仍应按发布说明在真实数据库上进行。
 
+普通关键词默认只匹配文件或文件夹名称；`path:` 或 Match Path 显式启用路径匹配。支持 `ext:`、`size:`、`modified:` 和 `type:file` / `type:dir`。GUI 每批加载 1000 条，当前排序主要针对已加载结果。书签、窗口布局和索引目录设置使用 QSettings。完整说明见 [搜索语法](docs/SEARCH_SYNTAX.md)、[UI 指南](docs/UI_GUIDE.md) 和 [0.4.11 发布说明](docs/releases/RELEASE_NOTES_0.4.11.md)。
 
-## 1. v0.4.11 后台搜索与 GUI 无阻塞
+## 构建与测试
 
-0.4.11 保留 0.4.8 的 UTF-8 中文搜索修复、0.4.9 的 800 ms/IME 输入保护和 0.4.10 的启动空查询修复。本版把真正的 SQLite 搜索从 GUI 主线程迁移到专用后台线程：停止输入 800 ms 后只提交搜索任务，输入框、鼠标、窗口重绘仍由主线程持续响应。搜索过程中旧结果继续保留，状态栏显示“正在后台搜索…可继续输入”；如果用户又修改关键词，旧查询完成后其结果会因 request ID 过期而直接丢弃，只执行最新关键词，不闪回旧结果。后台线程复用同一个 SearchService，首次数据库/FTS 初始化也在后台完成。
-
-## 2. v0.4.10 首输入卡顿修复
-
-0.4.10 保留 0.4.8 的 UTF-8 查询修复和 0.4.9 的 800 ms/IME 输入保护。本版针对“程序刚启动后第一次输入明显卡顿、后续反而很快”的问题做两项调整：启动时不再同步执行空关键词的 1001 条查询；GUI 在启动阶段只初始化一次 SearchService，后续查询复用同一服务，不再每次重复执行 Database::initialize()。文件系统后台刷新在搜索框为空或用户正在输入/IME 组词时也不会触发前台搜索。
-
-## 3. v0.4.9 输入完成后再搜索
-
-0.4.9 保留 0.4.8 的 UTF-8 查询修复，不修改搜索结果语义。本版只调整 GUI 的搜索触发时机：用户连续输入时不立即查询，每次编辑都会重置 800 ms 单次计时器；只有最后一次输入后连续空闲 800 ms 才执行搜索。中文输入法处于拼音预编辑、候选选择等 IME composition 状态时会完全停止搜索计时，候选词正式提交后才重新计时。
-
-行为规则：
-
-```text
-连续输入           → 不搜索，持续重置计时器
-中文 IME 正在组词   → 不搜索
-候选词提交          → 开始 800 ms 空闲计时
-停止输入 800 ms     → 自动搜索
-按 Enter            → 立即搜索（IME 组词期间除外）
-```
-
-这样可以避免在输入 `砀例甲`、`示例工匠` 等词时，关键词尚未完成就启动同步数据库查询造成界面卡顿。后续 v0.5 的 Preferences 将把该延迟开放为可配置项。
-
-## 4. v0.4.8 UTF-8 查询解析修复
-
-0.4.8 根据真实 macOS GUI Trace 找到了 `砀例甲`、`示例工匠` 等关键词漏搜的根因：旧版 `splitQuery()` 对 UTF-8 字符串逐字节调用 `std::isspace()`，GUI locale 会把中文字符内部的 `0xA0` 字节误判为空白。现在查询拆词只识别 ASCII whitespace，因此中文 UTF-8 字节序列不会再被拆坏。
-
-重点验证：
-
-```text
-砀例甲
-示例工匠
-工匠
-匠
-砀例
-```
-
-如需观察解析过程，可继续使用：
+在已经安装 CMake、C++ 编译器和 SQLite 开发库的环境中，可独立构建 Core/CLI。以下预设使用 Unix Makefiles，适合 macOS/Linux：
 
 ```bash
-./scripts/run-macos-debug.sh
+cmake --preset core-debug
+cmake --build --preset core-debug --parallel 4
+ctest --preset core-debug
+./build/core-debug/everything-lite-cli
 ```
 
-正常 Trace 应显示 `砀例甲` 为 `terms=1`，完整 hex 为 `e7 a0 80 e4 be 8b e7 94 b2`。详细说明见 `RELEASE_NOTES_0.4.8.md`。
-
-## 5. v0.4.7 Search Trace 诊断版
-
-当前真实问题仍然是：部分关键词在 CLI 中有结果，但 GUI 漏搜。0.4.7 不再继续猜测根因，而是增加完整的终端搜索追踪。推荐直接执行：
+macOS GUI 开发使用已有 Homebrew Qt Base 环境：
 
 ```bash
-./scripts/build-macos.sh
-./scripts/run-macos-debug.sh
+cmake --preset gui-debug -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase)"
+cmake --build --preset gui-debug --parallel 4
+ctest --preset gui-debug
+./build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
 ```
 
-在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.11 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
+预设使用 Debug，使现有测试中的 `assert` 生效。原有 `./scripts/build-macos.sh` 仍可用于 Release 本机构建；它默认删除 `build-macos/`，日常增量构建可设置 `CLEAN_BUILD=0`。CMake 在 Qt 缺失时仅警告并跳过 GUI，因此应额外确认 `.app` 实际生成，不能仅凭构建退出码宣称 GUI 成功。详见 [开发指南](docs/DEVELOPMENT.md)。
 
-## 6. v0.4.6 重点
+## 本地版本历史
 
-### GUI / CLI 搜索结果一致性优先
+本仓库从实际压缩包重建了 14 个版本快照：0.1.0、0.1.1、0.2.0、0.3.0、0.4.0、0.4.1、0.4.2、0.4.3、0.4.4、0.4.6、0.4.7-debug、0.4.8、0.4.9、0.4.11。每个快照对应独立提交与同名 `v` 标签，例如 `v0.1.0`、`v0.4.7-debug`、`v0.4.11`；整理工作另作提交，不改变原版标签。
 
-v0.4.6 针对真实 macOS 数据中“CLI 能找到、GUI 漏搜”的问题重构搜索入口。新增 `SearchService` 作为应用级唯一搜索服务：CLI `search` 和 GUI 默认查询都调用同一个 `SearchService::search()`，从源头避免两套搜索策略。
-
-为排除 Qt 异步调度、查询取消和 pending request 对结果的影响，v0.4.6 暂时把 GUI 搜索改为主线程同步执行。少数慢查询可能暂时让窗口短暂停顿，但当前验收标准是“该找到的必须找到”。等 GUI/CLI 结果在真实 large项数据库上稳定一致后，再恢复异步性能层。
-
-本版同时修复 `size:<...` / `size:<=...` 查询中 `max_size` 参数被重复绑定的问题。
-
-完整说明见 `RELEASE_NOTES_0.4.6.md`。
-
-## 2. 安装与构建（macOS）
+**0.4.5 和 0.4.10 缺少独立源码快照**。后续版本中的发布说明已保留，但未据此伪造这两个版本的源码、提交或标签。导入时间和提交身份使用本次实际环境；原始开发时间、作者和细粒度开发过程无法由这些压缩包确认。校验值与对应提交见 [导入清单](docs/history/import-manifest.json)，完整边界见 [仓库整理报告](docs/history/REPOSITORY_MIGRATION.md)。
 
 ```bash
-brew install cmake qtbase
-./scripts/build-macos.sh
-./scripts/run-macos.sh
+git log --oneline --reverse
+git tag --list --sort=version:refname
+git show v0.4.11:CMakeLists.txt
 ```
 
-也可以：
+仓库目前仅在本地，没有配置远程。以后每次完成一个可验证的改动，测试后提交；达到发布条件时再修改版本信息、更新发布说明并打标签。
 
-```bash
-open build-macos/everything-lite.app
-```
+## 文档与后续方向
 
-本阶段生成适合本机开发和使用的 `.app`。独立 Qt Framework 打包、codesign、notarization 和 DMG 安排在 v1.0 发布阶段。
+[工程目录](docs/PROJECT_STRUCTURE.md) 与 [当前架构](docs/ARCHITECTURE.md) 对应 0.4.11；[CHANGELOG](CHANGELOG.md) 和 [发布说明目录](docs/releases/) 保留版本演进；[本次验证记录](docs/history/VERIFICATION.md) 说明整理后的实际检查及局限。历史交付测试记录保留在 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)，不代表本次重新验证的结果。
 
-## 3. 主界面与操作
-
-主窗口结构：
-
-```text
-macOS 原生菜单栏
-────────────────────────────────────────────────────────
-[ 搜索文件和文件夹…                              ][全部▼]
-索引范围：~/Documents  ~/Downloads  ...
-────────────────────────────────────────────────────────
-名称                 所在位置              大小     修改时间
-...
-────────────────────────────────────────────────────────
-[private benchmark removed] 个对象 · 已加载 1000+ · 32 ms      全部 / 匹配路径
-```
-
-常用快捷键：
-
-- Command+N：新搜索窗口
-- Command+O：打开
-- Command+F：转到搜索框
-- Command+A：全选当前已加载结果
-- Command+,：Preferences
-- Command+Q：退出
-- Space：Quick Look
-- Return：搜索框有焦点时强制重新查询当前关键词；结果表有焦点时打开当前项
-
-详见 `docs/UI_GUIDE.md`。
-
-## 4. 搜索语义
-
-普通输入：
-
-```text
-pdf
-2026
-paper 2026
-```
-
-默认只匹配文件或文件夹自身的“名称”。父目录名称不会自动污染普通搜索结果。
-
-需要完整路径匹配时：
-
-- Search → Match Path；或
-- 使用 `path:`。
-
-例如：
-
-```text
-path:sample
-```
-
-过滤文件 / 文件夹：
-
-```text
-type:file
-type:dir
-```
-
-或者直接从顶部 Filter / Search 菜单选择 All / Files / Folders。
-
-现有语法：
-
-```text
-ext:pdf
-path:sample
-size:>100m
-modified:7d
-type:file
-type:dir
-```
-
-详见 `docs/SEARCH_SYNTAX.md`。
-
-## 5. 结果加载
-
-GUI 不把所有匹配项一次性复制到 Qt Model。每次加载 1000 条，滚动接近底部时继续加载下一批。
-
-状态栏：
-
-```text
-已加载 1000+
-已加载 2000+
-...
-```
-
-`+` 表示后面仍有结果。
-
-这解决了“1000 条永久上限”的问题，同时避免一次向 UI 塞入几十万条记录。
-
-## 6. 名称搜索性能
-
-v0.4.6 起，GUI 与 CLI `search` 共用唯一 `SearchService`。GUI 不再自己选择中文/英文、FTS/INSTR 或 fallback。当前 GUI 搜索暂时同步执行，以搜索结果一致性为第一目标；性能优化继续后置。
-
-真实 v0.2 基线（约 [private benchmark removed] 项）：
-
-```text
-Index time: [redacted] ms
-Index rate: [redacted] items/s
-pdf: [redacted] ms
-sample: [redacted] ms
-ext:pdf: [redacted] ms
-path:sample: [redacted] ms
-modified:7d: [redacted] ms
-size:>100m type:file: [redacted] ms
-```
-
-v0.3 开始解决 `pdf / 2026` 这种名称任意子串全表扫描问题；v0.7 将进行 250 万～500 万项系统性性能优化。
-
-## 7. 索引与实时更新
-
-核心链路：
-
-```text
-APFS
-  ↓
-FSEvents
-  ↓
-IndexManager
-  ↓
-SQLite files + FTS5 trigram
-  ↓
-SearchEngine
-  ↓
-SearchService（GUI / CLI 共用）
-  ↓
-Qt GUI（v0.4.6 暂时同步）
-```
-
-首次设置一个或多个索引目录后执行 Tools → Rebuild Index。之后新增、删除、重命名和移动由 FSEvents 驱动增量更新；FSEvents 报告丢事件时执行对应 root 的完整重扫，保证最终一致性。
-
-## 8. Bookmarks
-
-v0.4 Bookmarks 保存：
-
-- 查询字符串；
-- All / Files / Folders；
-- Match Path；
-- 排序列和方向。
-
-书签保存在 QSettings，重启后仍存在。当前“整理书签”主要提供删除；完整编辑器安排在 v0.9。
-
-## 9. 当前限制
-
-- Preferences v0.4 暂时进入索引目录配置；v0.5 会升级为完整 General / Indexes / Excludes / Search / Results / Keyboard 配置中心。
-- 尚未实现 Exclude；这是 v0.5 的核心功能。
-- Match Case / Whole Word / Regex 等 Search 兼容能力安排在 v0.6。
-- `path:` / Match Path 暂未做路径 trigram，百万级完整路径搜索可能明显慢于名称搜索。
-- 1～2 字符任意子串不能利用 trigram。
-- 当前表格排序主要作用于已加载窗口；全局排序优化安排在 v0.7。
-- Quick Look v0.4 使用 `qlmanage -p`；更原生的 Quick Look 集成安排在 v0.8。
-- 不搜索文件正文；OCR / Embedding / RAG 不属于 v1.0 之前的核心目标。
-
-## 10. Benchmark
-
-```bash
-./build-macos/everything-lite-cli benchmark "$HOME" \
-  'pdf' \
-  'sample' \
-  'ext:pdf' \
-  'path:sample' \
-  'modified:7d' \
-  'size:>100m type:file'
-```
-
-详见 `docs/BENCHMARK.md`。
-
-## 11. 文档导航
-
-- `RELEASE_NOTES_0.4.4.md`：v0.4.4 正确性优先修复说明
-- `RELEASE_NOTES_0.4.5.md`：v0.4.5 零结果双重确认修复说明
-- `RELEASE_NOTES_0.4.6.md`：v0.4.6 GUI / CLI 搜索一致性修复说明
-- `RELEASE_NOTES_0.4.0.md`：v0.4 主版本说明
-- `docs/ROADMAP.md`：v0.4 → v1.0 完整路线与验收目标
-- `docs/UI_GUIDE.md`：v0.4 菜单、主窗口和 Mac 快捷键
-- `docs/EVERYTHING_COMPATIBILITY.md`：Everything 功能兼容矩阵
-- `docs/SEARCH_SYNTAX.md`：当前搜索语义与语法
-- `docs/BENCHMARK.md`：性能测试方法与真实基线
-- `docs/ARCHITECTURE.md`：系统架构
-- `docs/MACOS_BUILD.md`：Mac 构建说明
-- `docs/PROJECT_STRUCTURE.md`：工程目录
-- `docs/TEST_REPORT.md`：交付前测试记录
-- `CHANGELOG.md`：版本历史
-
-## 12. 下一版
-
-v0.5.0：Indexes / Excludes / Preferences。
-
-核心任务是让“忽略目录与文件”真正发生在 Scanner 和 FSEvents Indexer 层，而不只是搜索结果隐藏，从源头减少缓存、`.git`、`node_modules`、DerivedData 等无价值索引项。详见 `docs/ROADMAP.md`。
-
-
-## v0.4.2 搜索可靠性说明
-
-GUI 搜索现在支持取消过时查询，并使用 request id 防止旧结果覆盖新结果。CLI 与 GUI 共用数据库路径解析，可用 `everything-lite-cli db-path` 检查当前数据库。工具 → 索引状态会显示 Files/FTS 记录数和最近查询诊断信息。
+下一主版本的既有方向是 Indexes / Excludes / Preferences，验收目标见 [路线图](docs/ROADMAP.md)。当前仍需关注短关键词及路径搜索性能、真实大索引上的 GUI 响应、已加载窗口排序，以及 macOS 分发所需的部署与签名；本次整理没有实现这些功能。

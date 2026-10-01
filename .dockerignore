@@ -6,3 +6,12 @@ logs/
 *.db
 *.db-shm
 *.db-wal
+archive/
+debug-logs/
+dist/
+.vscode/
+.idea/
+.DS_Store
+CMakeUserPresets.json
+.env
+.env.*

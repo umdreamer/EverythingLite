@@ -8,3 +8,15 @@ data/*
 !data/.gitkeep
 logs/*
 !logs/.gitkeep
+
+# Local archives, generated outputs, and developer-specific settings
+/archive/
+/debug-logs/
+/dist/
+/.vscode/
+/.idea/
+/CMakeUserPresets.json
+.env
+.env.*
+!configs/example.env
+*.user

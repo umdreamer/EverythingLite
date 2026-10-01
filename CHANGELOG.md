@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.3 — GUI/CLI 查询链路一致性修复
+
+- 默认“全部 + 不匹配路径”状态下，GUI 直接调用与 CLI 完全相同的字符串搜索入口。
+- GUI 查询统一 NFC 归一化，并移除 U+200B/U+FEFF/U+2060 等不可见格式字符。
+- 移除结果展示前的 QString signature 二次拦截，仅以 request ID 判断最新查询。
+- 新增“工具 → 最近搜索诊断…”，显示查询 UTF-8、执行模式、核心返回数、模型行数、耗时等。
+- 保留 v0.4.1 查询取消和 v0.4.2 FSEvents 静默刷新修复。
+
+
 ## v0.4.2 — GUI 搜索/FSEvents 竞争修复
 
 - 修复 macOS FSEvents 后台增量同步完成后无条件 `runSearch()`，导致前台查询被持续取消的问题。

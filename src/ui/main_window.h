@@ -38,8 +38,11 @@ struct SearchOutcome {
     QString query;
     QString signature;
     QString error;
+    QString query_utf8_hex;
+    QString execution_mode;
     double elapsed_ms = 0.0;
     std::uint64_t request_id = 0;
+    int raw_result_count = 0;
     bool cancelled = false;
     std::size_t offset = 0;
     bool append = false;
@@ -113,6 +116,10 @@ private:
     QString last_search_query_;
     double last_search_elapsed_ms_ = 0.0;
     int last_search_result_count_ = 0;
+    int last_search_raw_result_count_ = 0;
+    QString last_search_utf8_hex_;
+    QString last_search_execution_mode_;
+    std::uint64_t last_search_request_id_ = 0;
 
     void buildUi();
     void buildMenus();
@@ -132,6 +139,7 @@ private:
     void rebuildIndex();
     void editRoots();
     void showIndexStatus();
+    void showSearchDiagnostics();
     void openCurrent();
     void openWithCurrent();
     void revealCurrent();

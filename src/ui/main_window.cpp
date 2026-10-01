@@ -72,6 +72,21 @@ QString fromUtf8(const std::string& value) {
     return QString::fromUtf8(value.c_str(), static_cast<int>(value.size()));
 }
 
+QString normalizeGuiQuery(QString value) {
+    // Keep GUI and CLI semantics aligned while removing invisible formatting
+    // characters that can be introduced by IMEs or copy/paste. Chinese text
+    // itself is preserved; NFC also makes equivalent Unicode input stable.
+    value = value.normalized(QString::NormalizationForm_C);
+    value.remove(QChar(0x200B)); // ZERO WIDTH SPACE
+    value.remove(QChar(0xFEFF)); // ZERO WIDTH NO-BREAK SPACE / BOM
+    value.remove(QChar(0x2060)); // WORD JOINER
+    return value.trimmed();
+}
+
+QString utf8Hex(const QString& value) {
+    return QString::fromLatin1(value.toUtf8().toHex(' '));
+}
+
 QStringList defaultRoots() {
     QStringList roots;
     const auto home = QDir::homePath();
@@ -164,16 +179,23 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         active_search_cancel_.reset();
 
         const bool latest_request = outcome.request_id == search_request_id_;
-        const bool still_current = outcome.signature == currentSearchSignature();
+        // request_id is the single source of truth. v0.4.2 also compared a
+        // QString signature after the query returned; that extra gate could
+        // discard a valid IME/Unicode result even though the core had already
+        // returned the correct rows.
         if (!outcome.cancelled && !outcome.error.isEmpty()) {
-            if (latest_request && still_current) status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
-        } else if (!outcome.cancelled && latest_request && still_current && !search_pending_) {
+            if (latest_request) status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
+        } else if (!outcome.cancelled && latest_request && !search_pending_) {
             if (outcome.append) model_->appendResults(std::move(outcome.results));
             else model_->setResults(std::move(outcome.results));
             results_have_more_ = outcome.has_more;
             last_search_query_ = outcome.query;
             last_search_elapsed_ms_ = outcome.elapsed_ms;
             last_search_result_count_ = model_->rowCount();
+            last_search_raw_result_count_ = outcome.raw_result_count;
+            last_search_utf8_hex_ = outcome.query_utf8_hex;
+            last_search_execution_mode_ = outcome.execution_mode;
+            last_search_request_id_ = outcome.request_id;
             const auto loaded = model_->rowCount();
             status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    %4 ms    ·    %5%6")
                 .arg(indexed_count_)
@@ -440,6 +462,9 @@ void MainWindow::buildMenus() {
     auto* status_action = tools_menu->addAction(QStringLiteral("索引状态…"));
     connect(status_action, &QAction::triggered, this, &MainWindow::showIndexStatus);
 
+    auto* search_diag_action = tools_menu->addAction(QStringLiteral("最近搜索诊断…"));
+    connect(search_diag_action, &QAction::triggered, this, &MainWindow::showSearchDiagnostics);
+
     tools_menu->addSeparator();
     auto* preferences_action = tools_menu->addAction(QStringLiteral("偏好设置…"));
     preferences_action->setMenuRole(QAction::PreferencesRole);
@@ -592,14 +617,14 @@ void MainWindow::refreshStats() {
 
 QString MainWindow::currentSearchSignature() const {
     return QStringLiteral("%1\x1f%2\x1f%3")
-        .arg(search_edit_->text())
+        .arg(normalizeGuiQuery(search_edit_->text()))
         .arg(scope_combo_->currentIndex())
         .arg(match_path_check_->isChecked() ? 1 : 0);
 }
 
 void MainWindow::runSearch() {
     if (indexing_.load() && indexed_count_ == 0) return;
-    pending_search_query_ = search_edit_->text();
+    pending_search_query_ = normalizeGuiQuery(search_edit_->text());
     results_have_more_ = false;
     ++search_request_id_;
     if (search_watcher_->isRunning()) {
@@ -612,7 +637,7 @@ void MainWindow::runSearch() {
 
 void MainWindow::loadMoreResults() {
     if (!results_have_more_ || search_pending_ || search_watcher_->isRunning()) return;
-    launchSearch(search_edit_->text(), static_cast<std::size_t>(model_->rowCount()), true);
+    launchSearch(normalizeGuiQuery(search_edit_->text()), static_cast<std::size_t>(model_->rowCount()), true);
 }
 
 void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
@@ -630,6 +655,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
         pending_search_query_ = query;
     }
 
+    const auto normalized_query = normalizeGuiQuery(query);
     const auto db_path = db_path_;
     const auto signature = currentSearchSignature();
     const int item_scope = scope_combo_->currentIndex();
@@ -638,9 +664,10 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     auto cancel = std::make_shared<std::atomic_bool>(false);
     active_search_cancel_ = cancel;
 
-    search_watcher_->setFuture(QtConcurrent::run([db_path, query, signature, offset, append, item_scope, match_path, request_id, cancel] {
+    search_watcher_->setFuture(QtConcurrent::run([db_path, normalized_query, signature, offset, append, item_scope, match_path, request_id, cancel] {
         SearchOutcome outcome;
-        outcome.query = query;
+        outcome.query = normalized_query;
+        outcome.query_utf8_hex = utf8Hex(normalized_query);
         outcome.signature = signature;
         outcome.offset = offset;
         outcome.append = append;
@@ -649,16 +676,26 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             QElapsedTimer timer;
             timer.start();
             SearchEngine engine(toUtf8(db_path));
-            auto parsed = parseSearchQuery(toUtf8(query));
 
-            // Explicit type:file/type:dir in the query wins over the UI filter.
-            if (!parsed.files_only && !parsed.directories_only) {
-                if (item_scope == 1) parsed.files_only = true;
-                else if (item_scope == 2) parsed.directories_only = true;
+            // In the default GUI state use the exact same string overload as
+            // the CLI. This removes the last semantic difference between
+            // `everything-lite-cli search X` and typing X into the GUI.
+            if (item_scope == 0 && !match_path) {
+                outcome.execution_mode = QStringLiteral("CLI-compatible raw query");
+                outcome.results = engine.search(toUtf8(normalized_query), kPageSize + 1, offset, cancel.get());
+            } else {
+                outcome.execution_mode = QStringLiteral("GUI query + UI filters");
+                auto parsed = parseSearchQuery(toUtf8(normalized_query));
+
+                // Explicit type:file/type:dir in the query wins over the UI filter.
+                if (!parsed.files_only && !parsed.directories_only) {
+                    if (item_scope == 1) parsed.files_only = true;
+                    else if (item_scope == 2) parsed.directories_only = true;
+                }
+                if (match_path) parsed.match_path = true;
+                outcome.results = engine.search(parsed, kPageSize + 1, offset, cancel.get());
             }
-            if (match_path) parsed.match_path = true;
-
-            outcome.results = engine.search(parsed, kPageSize + 1, offset, cancel.get());
+            outcome.raw_result_count = static_cast<int>(outcome.results.size());
             if (outcome.results.size() > kPageSize) {
                 outcome.has_more = true;
                 outcome.results.resize(kPageSize);
@@ -765,6 +802,29 @@ void MainWindow::showIndexStatus() {
     }
     details << QStringLiteral("索引目录：\n  %1").arg(roots_.join(QStringLiteral("\n  ")));
     QMessageBox::information(this, QStringLiteral("索引状态"), details.join(QStringLiteral("\n")));
+}
+
+void MainWindow::showSearchDiagnostics() {
+    const auto visible_query = search_edit_ ? search_edit_->text() : QString{};
+    const auto normalized_query = normalizeGuiQuery(visible_query);
+    QStringList details;
+    details << QStringLiteral("版本：%1").arg(QString::fromLatin1(EVERYTHING_LITE_VERSION));
+    details << QStringLiteral("数据库：%1").arg(db_path_);
+    details << QStringLiteral("搜索框原文：%1").arg(visible_query.isEmpty() ? QStringLiteral("<空>") : visible_query);
+    details << QStringLiteral("归一化查询：%1").arg(normalized_query.isEmpty() ? QStringLiteral("<空>") : normalized_query);
+    details << QStringLiteral("当前 UTF-8(hex)：%1").arg(utf8Hex(normalized_query));
+    details << QStringLiteral("范围：%1").arg(scope_combo_ ? scope_combo_->currentText() : QStringLiteral("未知"));
+    details << QStringLiteral("匹配路径：%1").arg(match_path_check_ && match_path_check_->isChecked() ? QStringLiteral("是") : QStringLiteral("否"));
+    details << QStringLiteral("最近请求 ID：%1").arg(static_cast<qulonglong>(last_search_request_id_));
+    details << QStringLiteral("最近核心查询：%1").arg(last_search_query_.isEmpty() ? QStringLiteral("<空>") : last_search_query_);
+    details << QStringLiteral("最近核心 UTF-8(hex)：%1").arg(last_search_utf8_hex_);
+    details << QStringLiteral("执行模式：%1").arg(last_search_execution_mode_.isEmpty() ? QStringLiteral("<尚无>") : last_search_execution_mode_);
+    details << QStringLiteral("核心返回（含探测项）：%1").arg(last_search_raw_result_count_);
+    details << QStringLiteral("模型当前行数：%1").arg(model_ ? model_->rowCount() : 0);
+    details << QStringLiteral("查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
+    details << QStringLiteral("待处理搜索：%1").arg(search_pending_ ? QStringLiteral("是") : QStringLiteral("否"));
+    details << QStringLiteral("搜索线程运行：%1").arg(search_watcher_ && search_watcher_->isRunning() ? QStringLiteral("是") : QStringLiteral("否"));
+    QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));
 }
 
 QStringList MainWindow::selectedPaths() const {

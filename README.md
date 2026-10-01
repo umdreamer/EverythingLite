@@ -2,11 +2,16 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.2`
+当前版本：`0.4.3`
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
-## 1. v0.4.2 重点
+## 1. v0.4.3 重点
+
+### v0.4.3 GUI/CLI 一致性修复
+
+v0.4.3 针对“CLI 可搜索到特定中文关键词，但 GUI 不显示”的问题，将默认 GUI 查询路径改为与 CLI 完全相同的字符串搜索入口；结果接收仅使用 request ID 判定最新请求，不再追加 QString signature 二次拦截。GUI 查询会做 NFC 归一化并移除常见零宽格式字符，同时新增“工具 → 最近搜索诊断…”，显示 GUI 实际查询、UTF-8 十六进制、执行模式、核心返回数和模型行数。
+
 
 v0.4.2 是 v0.4.0 的搜索可靠性修复版，保留 Everything 风格 UI 与菜单，重点解决 GUI 与 CLI 搜索表现不一致的问题：
 

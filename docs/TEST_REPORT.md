@@ -94,3 +94,8 @@ type:file: 3.754 ms
 - 搜索取消 token 能中断旧查询。
 - 名称 FTS 可见记录数与 Files 记录数检查，并执行 FTS5 external-content `integrity-check` 深度一致性校验。
 - GUI request-id/debounce 逻辑为本版重点；最终 macOS Qt GUI 仍需在实机编译运行验证。
+
+
+## v0.4.2 GUI/FSEvents 修复说明
+
+Core/CLI 回归测试继续覆盖中文 `砀例甲`、`path:砀例甲`、FTS 完整性、查询取消和分页。v0.4.2 额外修复的 FSEvents/Qt GUI 调度属于 macOS Qt 事件循环行为，当前 Linux 容器无法执行 macOS FSEvents + Qt GUI 集成测试，需要在目标 Mac 上做最终验证。

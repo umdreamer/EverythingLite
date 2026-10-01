@@ -81,6 +81,7 @@ private:
     SearchResultModel* model_ = nullptr;
     QTimer* search_timer_ = nullptr;
     QTimer* event_timer_ = nullptr;
+    QTimer* filesystem_refresh_timer_ = nullptr;
     QThread* worker_thread_ = nullptr;
     QFutureWatcher<SearchOutcome>* search_watcher_ = nullptr;
 
@@ -144,7 +145,8 @@ private:
     void processPendingEvents();
     QString rootForPath(const QString& path) const;
     void setBusy(bool busy, const QString& message = {});
-    void startWorker(std::function<void()> job, const QString& start_message);
+    void startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish = true);
+    void scheduleFilesystemResultRefresh();
     void newWindow();
     void resetColumns();
     void addCurrentBookmark();

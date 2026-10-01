@@ -142,6 +142,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     event_timer_->setInterval(700);
     connect(event_timer_, &QTimer::timeout, this, &MainWindow::processPendingEvents);
 
+    // v0.4.2: filesystem churn must never pre-empt a user search. FSEvents can
+    // fire continuously under ~/Library; v0.4.1 restarted the foreground query
+    // after every sync batch, so slower queries could be cancelled forever.
+    // We refresh the visible result set only after the filesystem has been quiet
+    // for a while, and never cancel a query that is already running.
+    filesystem_refresh_timer_ = new QTimer(this);
+    filesystem_refresh_timer_->setSingleShot(true);
+    filesystem_refresh_timer_->setInterval(1800);
+    connect(filesystem_refresh_timer_, &QTimer::timeout, this, [this] {
+        if (search_watcher_->isRunning() || search_pending_) {
+            filesystem_refresh_timer_->start();
+            return;
+        }
+        runSearch();
+    });
+
     search_watcher_ = new QFutureWatcher<SearchOutcome>(this);
     connect(search_watcher_, &QFutureWatcher<SearchOutcome>::finished, this, [this] {
         auto outcome = search_watcher_->result();
@@ -660,19 +676,28 @@ void MainWindow::cancelActiveSearch() {
     if (active_search_cancel_) active_search_cancel_->store(true, std::memory_order_relaxed);
 }
 
-void MainWindow::startWorker(std::function<void()> job, const QString& start_message) {
+void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish) {
     if (worker_thread_) return;
     setBusy(true, start_message);
     worker_thread_ = QThread::create([job = std::move(job)] { job(); });
-    connect(worker_thread_, &QThread::finished, this, [this] {
+    connect(worker_thread_, &QThread::finished, this, [this, refresh_search_on_finish] {
         worker_thread_->deleteLater();
         worker_thread_ = nullptr;
         setBusy(false);
         refreshStats();
-        runSearch();
+        if (refresh_search_on_finish) {
+            runSearch();
+        } else {
+            scheduleFilesystemResultRefresh();
+        }
         if (!pending_paths_.isEmpty() || !pending_rescan_roots_.isEmpty()) event_timer_->start();
     });
     worker_thread_->start();
+}
+
+void MainWindow::scheduleFilesystemResultRefresh() {
+    if (!filesystem_refresh_timer_) return;
+    filesystem_refresh_timer_->start();
 }
 
 void MainWindow::rebuildIndex() {
@@ -935,7 +960,7 @@ void MainWindow::processPendingEvents() {
         } catch (...) {
             // A later FSEvents event or manual rebuild will reconcile the index.
         }
-    }, QStringLiteral("正在同步文件变化…"));
+    }, QStringLiteral("正在同步文件变化…"), false);
 }
 
 QString MainWindow::rootForPath(const QString& path) const {

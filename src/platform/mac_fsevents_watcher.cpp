@@ -4,7 +4,7 @@
 #include "core/path_utils.h"
 
 #include <algorithm>
-#include <iostream>
+#include <utility>
 
 namespace everything_lite {
 
@@ -30,67 +30,27 @@ void MacFSEventsWatcher::setCallback(Callback callback_fn) {
 
 bool MacFSEventsWatcher::start() {
     if (running_.exchange(true)) return true;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (roots_.empty()) {
-            running_ = false;
-            return false;
-        }
-    }
-    thread_ = std::thread([this] { run(); });
-    return true;
-}
 
-void MacFSEventsWatcher::stop() {
-    if (!running_.exchange(false)) return;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (run_loop_) CFRunLoopStop(run_loop_);
-    }
-    if (thread_.joinable()) thread_.join();
-}
-
-void MacFSEventsWatcher::callback(ConstFSEventStreamRef,
-                                  void* client_info,
-                                  std::size_t num_events,
-                                  void* event_paths,
-                                  const FSEventStreamEventFlags event_flags[],
-                                  const FSEventStreamEventId[]) {
-    auto* self = static_cast<MacFSEventsWatcher*>(client_info);
-    auto** paths = static_cast<char**>(event_paths);
-
-    Callback cb;
-    {
-        std::lock_guard<std::mutex> lock(self->mutex_);
-        cb = self->callback_;
-    }
-    if (!cb) return;
-
-    constexpr FSEventStreamEventFlags rescan_flags =
-        kFSEventStreamEventFlagMustScanSubDirs |
-        kFSEventStreamEventFlagUserDropped |
-        kFSEventStreamEventFlagKernelDropped |
-        kFSEventStreamEventFlagEventIdsWrapped |
-        kFSEventStreamEventFlagRootChanged;
-
-    for (std::size_t i = 0; i < num_events; ++i) {
-        FileEvent event;
-        event.path = paths[i] ? normalizePath(paths[i]) : std::string{};
-        event.needs_full_rescan = (event_flags[i] & rescan_flags) != 0;
-        cb(event);
-    }
-}
-
-void MacFSEventsWatcher::run() {
     std::vector<std::string> roots;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         roots = roots_;
     }
+    if (roots.empty()) {
+        running_ = false;
+        return false;
+    }
 
-    CFMutableArrayRef paths_to_watch = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    CFMutableArrayRef paths_to_watch =
+        CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    if (!paths_to_watch) {
+        running_ = false;
+        return false;
+    }
+
     for (const auto& root : roots) {
-        CFStringRef path = CFStringCreateWithCString(kCFAllocatorDefault, root.c_str(), kCFStringEncodingUTF8);
+        CFStringRef path = CFStringCreateWithCString(
+            kCFAllocatorDefault, root.c_str(), kCFStringEncodingUTF8);
         if (path) {
             CFArrayAppendValue(paths_to_watch, path);
             CFRelease(path);
@@ -116,30 +76,99 @@ void MacFSEventsWatcher::run() {
 
     if (!stream) {
         running_ = false;
-        return;
+        return false;
     }
 
-    CFRunLoopRef loop = CFRunLoopGetCurrent();
-    CFRetain(loop);
+    dispatch_queue_t queue = dispatch_queue_create(
+        "org.cichi.everything-lite.fsevents", DISPATCH_QUEUE_SERIAL);
+    if (!queue) {
+        FSEventStreamRelease(stream);
+        running_ = false;
+        return false;
+    }
+
+    // FSEventStreamScheduleWithRunLoop is deprecated since macOS 13.
+    // Dispatch queues are Apple's current API for scheduling FSEvents streams.
+    FSEventStreamSetDispatchQueue(stream, queue);
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        run_loop_ = loop;
+        stream_ = stream;
+        queue_ = queue;
     }
 
-    FSEventStreamScheduleWithRunLoop(stream, loop, kCFRunLoopDefaultMode);
-    if (running_.load() && FSEventStreamStart(stream)) {
-        CFRunLoopRun();
+    if (!FSEventStreamStart(stream)) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stream_ = nullptr;
+            queue_ = nullptr;
+        }
+        FSEventStreamInvalidate(stream);
+        FSEventStreamRelease(stream);
+#if !OS_OBJECT_USE_OBJC
+        dispatch_release(queue);
+#endif
+        running_ = false;
+        return false;
+    }
+
+    return true;
+}
+
+void MacFSEventsWatcher::stop() {
+    if (!running_.exchange(false)) return;
+
+    FSEventStreamRef stream = nullptr;
+    dispatch_queue_t queue = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stream = stream_;
+        queue = queue_;
+        stream_ = nullptr;
+        queue_ = nullptr;
+    }
+
+    if (stream) {
         FSEventStreamStop(stream);
+        FSEventStreamInvalidate(stream);
+        FSEventStreamRelease(stream);
     }
-    FSEventStreamInvalidate(stream);
-    FSEventStreamRelease(stream);
+#if !OS_OBJECT_USE_OBJC
+    if (queue) dispatch_release(queue);
+#else
+    (void)queue;
+#endif
+}
 
+void MacFSEventsWatcher::callback(ConstFSEventStreamRef,
+                                  void* client_info,
+                                  std::size_t num_events,
+                                  void* event_paths,
+                                  const FSEventStreamEventFlags event_flags[],
+                                  const FSEventStreamEventId[]) {
+    auto* self = static_cast<MacFSEventsWatcher*>(client_info);
+    auto** paths = static_cast<char**>(event_paths);
+
+    Callback cb;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        run_loop_ = nullptr;
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        cb = self->callback_;
     }
-    CFRelease(loop);
-    running_ = false;
+    if (!cb || !self->running_.load()) return;
+
+    constexpr FSEventStreamEventFlags rescan_flags =
+        kFSEventStreamEventFlagMustScanSubDirs |
+        kFSEventStreamEventFlagUserDropped |
+        kFSEventStreamEventFlagKernelDropped |
+        kFSEventStreamEventFlagEventIdsWrapped |
+        kFSEventStreamEventFlagRootChanged;
+
+    for (std::size_t i = 0; i < num_events; ++i) {
+        FileEvent event;
+        event.path = paths[i] ? normalizePath(paths[i]) : std::string{};
+        event.needs_full_rescan = (event_flags[i] & rescan_flags) != 0;
+        cb(event);
+    }
 }
 
 } // namespace everything_lite

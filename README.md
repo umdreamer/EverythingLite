@@ -2,7 +2,7 @@
 
 一个面向 macOS 的本地文件快速搜索工具原型，目标是在交互体验上接近 Windows Everything，同时保留 Windows/Linux 的后续跨平台扩展空间。
 
-当前版本：`0.1.0`
+当前版本：`0.1.1`
 
 ## 1. 当前已经实现的能力
 
@@ -61,7 +61,7 @@ SearchEngine      IndexManager
 推荐使用 Homebrew：
 
 ```bash
-brew install cmake qt
+brew install cmake qtbase
 ```
 
 ### 4.2 一键构建
@@ -73,11 +73,13 @@ cd everything-lite
 
 脚本会：
 
-1. 检测 Homebrew 和 Qt；
-2. 使用 CMake 构建 Release 版本；
-3. 运行核心测试；
-4. 生成 `everything-lite.app`；
-5. 使用 `macdeployqt` 将 Qt 运行库打入 App Bundle。
+1. 检测 Homebrew、CMake 和 `qtbase`；
+2. 清理旧的 `build-macos`，避免上次失败部署污染 App Bundle；
+3. 使用 CMake 构建 Release 版本；
+4. 运行核心测试；
+5. 生成可在当前开发机直接运行的 `everything-lite.app`。
+
+本地开发版默认不再执行 `macdeployqt`。独立分发包的 Framework 收集、签名和公证作为单独发布步骤处理。
 
 完成后运行：
 
@@ -253,7 +255,7 @@ macOS 使用 FSEvents：
 
 ```text
 FSEventStreamCreate
-→ FSEventStreamScheduleWithRunLoop
+→ FSEventStreamSetDispatchQueue
 → FSEventStreamStart
 → callback
 ```
@@ -272,7 +274,7 @@ FSEventStreamCreate
 
 ## 10. 当前限制
 
-这是可以运行和继续开发的 `0.1.0`，还不是 Everything 的完全替代品。目前明确保留以下边界：
+这是可以运行和继续开发的 `0.1.1`，还不是 Everything 的完全替代品。目前明确保留以下边界：
 
 - Windows USN Journal 尚未实现；
 - Linux inotify 尚未实现；
@@ -319,3 +321,21 @@ AI 文件语义搜索
 - Apple Using the File System Events API: https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html
 - SQLite Documentation: https://sqlite.org/docs.html
 - SQLite WAL: https://sqlite.org/wal.html
+
+## macOS 0.1.1 构建说明
+
+macOS 本地开发版现在明确使用 Homebrew `qtbase`，并且 `build-macos.sh` 默认不再执行 `macdeployqt`。这是为了把“本机开发运行”和“独立分发打包”分开，避免 Homebrew `qt` 元包中的无关 QtPdf/QtSvg/QtVirtualKeyboard 插件影响一个只依赖 Qt Widgets 的应用。详细说明见 `docs/MACOS_BUILD.md`。
+
+推荐：
+
+```bash
+brew install cmake qtbase
+./scripts/build-macos.sh
+open build-macos/everything-lite.app
+```
+
+如果需要查看启动错误：
+
+```bash
+./scripts/run-macos.sh
+```

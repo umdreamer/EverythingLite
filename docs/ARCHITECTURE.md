@@ -128,7 +128,7 @@ public:
 };
 ```
 
-macOS 实现创建独立线程和 CFRunLoop，在该线程中创建 FSEventStream。收到事件以后不直接操作 SQLite，而是把路径交给 Qt 主线程做 700 ms 防抖和合并，再启动后台更新任务。
+macOS 实现使用 FSEvents + 串行 Dispatch Queue。`FSEventStreamSetDispatchQueue()` 负责调度回调，不再使用 macOS 13 起已废弃的 RunLoop 调度 API。收到事件以后不直接操作 SQLite，而是把路径交给 Qt 主线程做 700 ms 防抖和合并，再启动后台更新任务。
 
 普通单文件事件：
 
@@ -161,7 +161,7 @@ Index Worker Thread
 └── SQLite batch 写入
 
 FSEvents Thread
-└── CFRunLoop + FSEventStream callback
+└── Serial Dispatch Queue + FSEventStream callback
 ```
 
 当前 0.1 查询仍在 UI 线程执行，因为普通文件名查询时间很短，并且数据库使用 WAL。若百万级索引下 `%token%` 包含查询出现明显 UI 卡顿，0.2 将 SearchEngine 单独移动到长期 Search Worker 线程，并使用查询序号丢弃过时结果。

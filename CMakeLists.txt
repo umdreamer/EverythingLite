@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.21)
-project(EverythingLite VERSION 0.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.21.1)
+project(EverythingLite VERSION 0.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,16 @@ option(BUILD_TESTS "Build tests" ON)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 
+# CMake 4.x renamed the imported SQLite target to SQLite3::SQLite3.
+# Keep a fallback for older CMake versions so the project remains portable.
+if(TARGET SQLite3::SQLite3)
+    set(EVERYTHING_LITE_SQLITE_TARGET SQLite3::SQLite3)
+elseif(TARGET SQLite::SQLite3)
+    set(EVERYTHING_LITE_SQLITE_TARGET SQLite::SQLite3)
+else()
+    message(FATAL_ERROR "No imported SQLite3 CMake target was found")
+endif()
+
 add_library(everything_core
     src/core/path_utils.cpp
     src/core/scanner.cpp
@@ -21,7 +31,7 @@ add_library(everything_core
 )
 
 target_include_directories(everything_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(everything_core PUBLIC SQLite::SQLite3 Threads::Threads)
+target_link_libraries(everything_core PUBLIC ${EVERYTHING_LITE_SQLITE_TARGET} Threads::Threads)
 target_compile_definitions(everything_core PUBLIC EVERYTHING_LITE_VERSION="${PROJECT_VERSION}")
 
 if(APPLE)
@@ -37,7 +47,7 @@ if(BUILD_GUI)
     find_package(Qt6 QUIET COMPONENTS Widgets)
     if(Qt6_FOUND)
         set(CMAKE_AUTOMOC ON)
-        add_executable(everything-lite MACOSX_BUNDLE
+        add_executable(everything-lite
             src/ui/main.cpp
             src/ui/main_window.cpp
             src/ui/main_window.h
@@ -47,14 +57,18 @@ if(BUILD_GUI)
             src/ui/root_settings_dialog.h
         )
         target_link_libraries(everything-lite PRIVATE everything_core Qt6::Widgets)
-        set_target_properties(everything-lite PROPERTIES
-            MACOSX_BUNDLE_BUNDLE_NAME "Everything Lite"
-            MACOSX_BUNDLE_GUI_IDENTIFIER "org.cichi.everything-lite"
-            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
-            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
-        )
+
+        if(APPLE)
+            set_target_properties(everything-lite PROPERTIES
+                MACOSX_BUNDLE TRUE
+                MACOSX_BUNDLE_BUNDLE_NAME "Everything Lite"
+                MACOSX_BUNDLE_GUI_IDENTIFIER "org.cichi.everything-lite"
+                MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+                MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+            )
+        endif()
     else()
-        message(WARNING "Qt6 Widgets not found: GUI target skipped. Install Qt6 and reconfigure to build everything-lite.")
+        message(WARNING "Qt6 Widgets not found: GUI target skipped. Install Qt6/qtbase and reconfigure to build everything-lite.")
     endif()
 endif()
 

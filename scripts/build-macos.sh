@@ -50,7 +50,8 @@ fi
 echo
 echo "本地开发版构建完成：$ROOT_DIR/$APP"
 echo "运行：open \"$APP\""
-echo "调试运行：\"$APP/Contents/MacOS/everything-lite\""
+echo "调试搜索：./scripts/run-macos-debug.sh"
+echo "直接运行：\"$APP/Contents/MacOS/everything-lite\""
 echo
 echo "说明：此脚本默认不运行 macdeployqt。"
 echo "原因：本地开发版直接使用 Homebrew qtbase 最稳定；独立分发包应单独执行部署/签名流程。"

@@ -1,11 +1,13 @@
 #include "core/database.h"
 #include "core/path_utils.h"
+#include "core/search_trace.h"
 
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <chrono>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -183,6 +185,7 @@ int cancelProgressCallback(void* opaque) {
 }
 
 std::vector<SearchResult> runSearch(sqlite3* db,
+                                    const std::string& db_path,
                                     const SearchQuery& query,
                                     std::size_t limit,
                                     std::size_t offset,
@@ -190,6 +193,28 @@ std::vector<SearchResult> runSearch(sqlite3* db,
                                     const std::atomic_bool* cancel,
                                     bool force_direct = false) {
     const bool use_fts = !force_direct && canUseNameFts(query, fts_ready);
+    const auto trace_started = std::chrono::steady_clock::now();
+
+    if (searchTraceEnabled()) {
+        std::ostringstream t;
+        t << "db=\"" << db_path << "\""
+          << " sqlite_version=" << sqlite3_libversion()
+          << " sqlite_sourceid=\"" << sqlite3_sourceid() << "\""
+          << " fts_ready=" << (fts_ready ? 1 : 0)
+          << " force_direct=" << (force_direct ? 1 : 0)
+          << " use_fts=" << (use_fts ? 1 : 0)
+          << " terms=" << query.terms.size()
+          << " match_path=" << (query.match_path ? 1 : 0)
+          << " files_only=" << (query.files_only ? 1 : 0)
+          << " directories_only=" << (query.directories_only ? 1 : 0)
+          << " limit=" << limit << " offset=" << offset;
+        searchTrace("Database", t.str());
+        for (std::size_t i = 0; i < query.terms.size(); ++i) {
+            searchTrace("Database", "term[" + std::to_string(i) + "]=\"" + query.terms[i] + "\" hex=[" + bytesToHex(query.terms[i]) + "]");
+        }
+        if (query.path_term) searchTrace("Database", "path_term=\"" + *query.path_term + "\"");
+        if (query.extension) searchTrace("Database", "extension=\"" + *query.extension + "\"");
+    }
 
     std::ostringstream sql;
     if (use_fts) {
@@ -238,6 +263,9 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     // Match Everything's default presentation more closely: Name, then Path.
     sql << " ORDER BY files.name COLLATE NOCASE ASC, files.parent_path COLLATE NOCASE ASC LIMIT ? OFFSET ?";
 
+    searchTrace("Database", "SQL=" + sql.str());
+    if (use_fts) searchTrace("Database", "bind[1] FTS=\"" + makeFtsExpression(query) + "\"");
+
     if (cancel) {
         sqlite3_progress_handler(db, 1000, cancelProgressCallback, const_cast<std::atomic_bool*>(cancel));
     }
@@ -248,6 +276,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         bindText(stmt.get(), bind_index++, makeFtsExpression(query));
     } else {
         for (const auto& token : query.terms) {
+            searchTrace("Database", "bind[" + std::to_string(bind_index) + "] term=\"" + token + "\" hex=[" + bytesToHex(token) + "]");
             bindText(stmt.get(), bind_index++, token);
         }
     }
@@ -259,7 +288,9 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     if (query.min_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.min_size));
     if (query.max_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.max_size));
     if (query.modified_after) sqlite3_bind_int64(stmt.get(), bind_index++, *query.modified_after);
+    searchTrace("Database", "bind[" + std::to_string(bind_index) + "] limit=" + std::to_string(limit));
     sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(limit));
+    searchTrace("Database", "bind[" + std::to_string(bind_index) + "] offset=" + std::to_string(offset));
     sqlite3_bind_int64(stmt.get(), bind_index, static_cast<sqlite3_int64>(offset));
 
     std::vector<SearchResult> results;
@@ -276,6 +307,15 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         throw std::runtime_error("search cancelled");
     }
     if (rc != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
+    if (searchTraceEnabled()) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - trace_started).count();
+        searchTrace("Database", "sqlite_step_done result_count=" + std::to_string(results.size()) + " elapsed_ms=" + std::to_string(elapsed));
+        const std::size_t preview = std::min<std::size_t>(results.size(), 5);
+        for (std::size_t i = 0; i < preview; ++i) {
+            searchTrace("Database", "result[" + std::to_string(i) + "]=\"" + results[i].file.path + "\"");
+        }
+    }
     return results;
 }
 
@@ -462,7 +502,7 @@ std::vector<SearchResult> Database::search(const SearchQuery& query,
                                            const std::atomic_bool* cancel) const {
     SqliteConnection conn(db_path_);
     const bool fts_ready = tableExists(conn.get(), "files_name_fts") && metadataFlag(conn.get(), "name_fts_ready");
-    return runSearch(conn.get(), query, limit, offset, fts_ready, cancel, false);
+    return runSearch(conn.get(), db_path_, query, limit, offset, fts_ready, cancel, false);
 }
 
 std::vector<SearchResult> Database::search(const std::string& query,
@@ -480,7 +520,7 @@ std::vector<SearchResult> Database::searchReliable(const SearchQuery& query,
     // is the source of truth. v0.4.5 uses SQLite instr() for exact substring
     // matching instead of LIKE so correctness does not depend on LIKE
     // wildcard/collation behaviour. No progress handler is installed here.
-    return runSearch(conn.get(), query, limit, offset, false, nullptr, true);
+    return runSearch(conn.get(), db_path_, query, limit, offset, false, nullptr, true);
 }
 
 std::vector<SearchResult> Database::searchReliable(const std::string& query,

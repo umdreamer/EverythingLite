@@ -3,8 +3,11 @@
 #include "core/index_manager.h"
 #include "core/search_engine.h"
 #include "core/search_service.h"
+#include "core/search_trace.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -39,6 +42,7 @@ Usage:
   everything-lite-cli [--db PATH] search <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] search-safe <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] search-correct <query> [--limit N] [--offset N]
+  everything-lite-cli [--trace-search] [--db PATH] probe-search <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] stats
   everything-lite-cli [--db PATH] clear
   everything-lite-cli [--db PATH] optimize-search
@@ -62,6 +66,7 @@ Database selection:
 
 Examples:
   everything-lite-cli db-path
+  everything-lite-cli --trace-search probe-search '砀例甲' --limit 1001
   everything-lite-cli search '砀例甲' --limit 50
   everything-lite-cli --db '/path/to/everything-lite.db' search '砀例甲'
   everything-lite-cli search 'ext:pdf example'
@@ -81,9 +86,23 @@ int main(int argc, char** argv) {
         }
 
         std::string db_path = defaultDatabasePath();
-        if (args.size() >= 2 && args[0] == "--db") {
-            db_path = args[1];
-            args.erase(args.begin(), args.begin() + 2);
+        // Global diagnostic switches may precede the command.
+        for (;;) {
+            if (!args.empty() && args[0] == "--trace-search") {
+#if defined(_WIN32)
+                _putenv_s("EVERYTHING_LITE_SEARCH_TRACE", "1");
+#else
+                setenv("EVERYTHING_LITE_SEARCH_TRACE", "1", 1);
+#endif
+                args.erase(args.begin());
+                continue;
+            }
+            if (args.size() >= 2 && args[0] == "--db") {
+                db_path = args[1];
+                args.erase(args.begin(), args.begin() + 2);
+                continue;
+            }
+            break;
         }
         if (args.empty()) {
             usage();
@@ -115,7 +134,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        if (command == "search" || command == "search-safe" || command == "search-correct") {
+        if (command == "search" || command == "search-safe" || command == "search-correct" || command == "probe-search") {
             if (args.size() < 2) {
                 std::cerr << "search requires a query\n";
                 return 2;
@@ -136,19 +155,35 @@ int main(int argc, char** argv) {
                 if (query_builder.tellp() > 0) query_builder << ' ';
                 query_builder << arg;
             }
+            const auto query_text = query_builder.str();
             std::vector<SearchResult> results;
-            if (command == "search") {
-                // v0.4.6: CLI and GUI share the exact same application-level
-                // SearchService. This command is the reference behavior.
+            if (command == "search" || command == "probe-search") {
+                // CLI and GUI share this exact application-level SearchService.
                 SearchService service(db_path);
-                results = service.search(query_builder.str(), limit, offset);
+                results = service.search(query_text, limit, offset);
             } else {
                 // Keep the older diagnostic paths available for comparison.
                 SearchEngine engine(db_path);
                 results = command == "search-safe"
-                    ? engine.searchReliable(query_builder.str(), limit, offset)
-                    : engine.searchCorrect(query_builder.str(), limit, offset);
+                    ? engine.searchReliable(query_text, limit, offset)
+                    : engine.searchCorrect(query_text, limit, offset);
             }
+
+            if (command == "probe-search") {
+                std::cout << "PROBE_VERSION=" << EVERYTHING_LITE_VERSION << "\n";
+                std::cout << "PROBE_DB=" << db_path << "\n";
+                std::cout << "PROBE_QUERY=" << query_text << "\n";
+                std::cout << "PROBE_QUERY_HEX=" << bytesToHex(query_text) << "\n";
+                std::cout << "PROBE_LIMIT=" << limit << "\n";
+                std::cout << "PROBE_OFFSET=" << offset << "\n";
+                std::cout << "PROBE_RESULT_COUNT=" << results.size() << "\n";
+                const std::size_t preview = std::min<std::size_t>(results.size(), 5);
+                for (std::size_t i = 0; i < preview; ++i) {
+                    std::cout << "PROBE_RESULT_" << i << "=" << results[i].file.path << "\n";
+                }
+                return 0;
+            }
+
             for (const auto& result : results) {
                 std::cout << (result.file.is_directory ? "[D] " : "[F] ")
                           << result.file.name << "\t"

@@ -6,6 +6,7 @@
 #include "core/path_utils.h"
 #include "core/search_engine.h"
 #include "core/search_service.h"
+#include "core/search_trace.h"
 #include "core/search_query.h"
 #include "platform/watcher_factory.h"
 #include "ui/root_settings_dialog.h"
@@ -56,6 +57,7 @@
 #include <algorithm>
 #include <exception>
 #include <filesystem>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -86,6 +88,51 @@ QString utf8Hex(const QString& value) {
     return QString::fromLatin1(value.toUtf8().toHex(' '));
 }
 
+QString cliProbePath() {
+    QDir dir(QFileInfo(QCoreApplication::applicationFilePath()).absolutePath());
+#ifdef Q_OS_MACOS
+    return QDir::cleanPath(dir.absoluteFilePath(QStringLiteral("../../../everything-lite-cli")));
+#else
+    return QDir::cleanPath(dir.absoluteFilePath(QStringLiteral("everything-lite-cli")));
+#endif
+}
+
+void runCliProbe(const QString& db_path, const QString& query, std::size_t limit, std::size_t offset) {
+    if (!searchTraceEnabled() || query.isEmpty()) return;
+    const auto cli = cliProbePath();
+    searchTrace("GUI-PROBE", "candidate_cli=\"" + toUtf8(cli) + "\"");
+    if (!QFileInfo::exists(cli)) {
+        searchTrace("GUI-PROBE", "CLI probe skipped: executable not found");
+        return;
+    }
+
+    QStringList args;
+    args << QStringLiteral("--trace-search")
+         << QStringLiteral("--db") << db_path
+         << QStringLiteral("probe-search") << query
+         << QStringLiteral("--limit") << QString::number(static_cast<qulonglong>(limit))
+         << QStringLiteral("--offset") << QString::number(static_cast<qulonglong>(offset));
+
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    process.start(cli, args);
+    if (!process.waitForStarted(5000)) {
+        searchTrace("GUI-PROBE", "CLI probe failed to start: " + toUtf8(process.errorString()));
+        return;
+    }
+    if (!process.waitForFinished(60000)) {
+        searchTrace("GUI-PROBE", "CLI probe timed out after 60s; killing child");
+        process.kill();
+        process.waitForFinished(3000);
+        return;
+    }
+    searchTrace("GUI-PROBE", "CLI exit_code=" + std::to_string(process.exitCode()));
+    const auto stdout_text = process.readAllStandardOutput().toStdString();
+    const auto stderr_text = process.readAllStandardError().toStdString();
+    if (!stdout_text.empty()) searchTrace("GUI-PROBE-STDOUT", "\n" + stdout_text);
+    if (!stderr_text.empty()) searchTrace("GUI-PROBE-STDERR", "\n" + stderr_text);
+}
+
 QStringList defaultRoots() {
     QStringList roots;
     const auto home = QDir::homePath();
@@ -114,10 +161,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // an existing v0.4 database so upgrading never creates a silent empty DB.
     db_path_ = fromUtf8(defaultDatabasePath());
     QDir().mkpath(QFileInfo(db_path_).absolutePath());
+    searchTrace("GUI", "MainWindow db=\"" + toUtf8(db_path_) + "\"");
 
     buildUi();
     buildMenus();
     loadSettings();
+    if (searchTraceEnabled()) {
+        searchTrace("GUI", "settings scope=" + std::to_string(scope_combo_->currentIndex())
+            + " match_path=" + std::to_string(match_path_check_->isChecked() ? 1 : 0)
+            + " roots=" + std::to_string(roots_.size()));
+        for (int i = 0; i < roots_.size(); ++i) {
+            searchTrace("GUI", "root[" + std::to_string(i) + "]=\"" + toUtf8(roots_.at(i)) + "\"");
+        }
+    }
     loadBookmarks();
     rebuildBookmarksMenu();
     updateScopeLabel();
@@ -222,7 +278,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::buildUi() {
-    setWindowTitle(QStringLiteral("Everything Lite"));
+    setWindowTitle(searchTraceEnabled()
+        ? QStringLiteral("Everything Lite %1 [SEARCH TRACE]").arg(QStringLiteral(EVERYTHING_LITE_VERSION))
+        : QStringLiteral("Everything Lite %1").arg(QStringLiteral(EVERYTHING_LITE_VERSION)));
     resize(1160, 740);
     setMinimumSize(820, 480);
 
@@ -562,6 +620,9 @@ void MainWindow::refreshStats() {
         indexed_count_ = db.totalFileCount();
         name_search_available_ = db.nameSearchIndexAvailable();
         name_search_ready_ = db.nameSearchIndexReady();
+        searchTrace("GUI", "refreshStats indexed_count=" + std::to_string(indexed_count_)
+            + " fts_available=" + std::to_string(name_search_available_ ? 1 : 0)
+            + " fts_ready=" + std::to_string(name_search_ready_ ? 1 : 0));
         QString acceleration;
         if (!name_search_available_) acceleration = QStringLiteral("    ·    当前 SQLite 未提供 FTS5 trigram，使用兼容搜索");
         else if (!name_search_ready_) acceleration = QStringLiteral("    ·    名称加速索引未就绪");
@@ -595,20 +656,37 @@ void MainWindow::loadMoreResults() {
 }
 
 void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
-    // v0.4.6 correctness-first design:
-    // GUI search is intentionally synchronous and delegates all search
-    // semantics to the same SearchService used by the CLI `search` command.
-    // There is no GUI-only FTS/INSTR decision, cancellation token, pending
-    // request queue, or secondary result filter in this path.
+    // v0.4.7-debug: keep the actual search path simple, but make every step
+    // observable from the terminal. In trace mode we also launch the sibling
+    // CLI executable with the exact same DB/query/limit/offset for a true
+    // cross-process comparison.
+    const auto raw_query = query;
     const auto normalized_query = normalizeGuiQuery(query);
     const int item_scope = scope_combo_->currentIndex();
     const bool match_path = match_path_check_->isChecked();
     const auto request_id = search_request_id_;
+    const auto effective_limit = kPageSize + 1;
 
     last_search_query_ = normalized_query;
     last_search_utf8_hex_ = utf8Hex(normalized_query);
     last_search_request_id_ = request_id;
-    last_search_execution_mode_ = QStringLiteral("Shared SearchService (same as CLI)");
+    last_search_execution_mode_ = QStringLiteral("Shared SearchService + terminal trace");
+
+    if (searchTraceEnabled()) {
+        std::ostringstream t;
+        t << "BEGIN request_id=" << request_id
+          << " append=" << (append ? 1 : 0)
+          << " raw=\"" << toUtf8(raw_query) << "\""
+          << " normalized=\"" << toUtf8(normalized_query) << "\""
+          << " utf8_hex=[" << bytesToHex(toUtf8(normalized_query)) << "]"
+          << " scope=" << item_scope
+          << " match_path=" << (match_path ? 1 : 0)
+          << " limit=" << effective_limit
+          << " offset=" << offset
+          << " db=\"" << toUtf8(db_path_) << "\""
+          << " model_rows_before=" << model_->rowCount();
+        searchTrace("GUI-SEARCH", t.str());
+    }
 
     try {
         QElapsedTimer timer;
@@ -621,8 +699,34 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
         else options.scope = SearchItemScope::All;
         options.match_path = match_path;
 
-        auto results = service.search(toUtf8(normalized_query), kPageSize + 1, offset, options);
+        auto results = service.search(toUtf8(normalized_query), effective_limit, offset, options);
         last_search_raw_result_count_ = static_cast<int>(results.size());
+        searchTrace("GUI-SEARCH", "SearchService returned=" + std::to_string(results.size()));
+        if (searchTraceEnabled()) {
+            const std::size_t preview = std::min<std::size_t>(results.size(), 5);
+            for (std::size_t i = 0; i < preview; ++i) {
+                searchTrace("GUI-SEARCH", "service_result[" + std::to_string(i) + "]=\"" + results[i].file.path + "\"");
+            }
+        }
+
+        // If the shared service reports zero, immediately compare the two
+        // lower-level paths in THIS GUI process. This does not alter the GUI
+        // result; it is diagnostic evidence only.
+        if (searchTraceEnabled() && results.empty() && !normalized_query.isEmpty()) {
+            try {
+                SearchEngine diagnostic_engine(toUtf8(db_path_));
+                auto direct = diagnostic_engine.searchReliable(toUtf8(normalized_query), 20, 0);
+                searchTrace("GUI-DIAG", "same-process direct/instr result_count=" + std::to_string(direct.size()));
+                for (std::size_t i = 0; i < std::min<std::size_t>(direct.size(), 5); ++i) {
+                    searchTrace("GUI-DIAG", "direct_result[" + std::to_string(i) + "]=\"" + direct[i].file.path + "\"");
+                }
+                auto correct = diagnostic_engine.searchCorrect(toUtf8(normalized_query), 20, 0);
+                searchTrace("GUI-DIAG", "same-process correctness-gate result_count=" + std::to_string(correct.size()));
+            } catch (const std::exception& diag_error) {
+                searchTrace("GUI-DIAG", std::string("diagnostic exception: ") + diag_error.what());
+            }
+        }
+
         results_have_more_ = results.size() > kPageSize;
         if (results_have_more_) results.resize(kPageSize);
 
@@ -631,6 +735,9 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
 
         last_search_elapsed_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
         last_search_result_count_ = model_->rowCount();
+        searchTrace("GUI-MODEL", "model_rows_after=" + std::to_string(model_->rowCount())
+            + " have_more=" + std::to_string(results_have_more_ ? 1 : 0)
+            + " elapsed_ms=" + std::to_string(last_search_elapsed_ms_));
 
         const auto loaded = model_->rowCount();
         status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    %4 ms    ·    %5%6")
@@ -640,10 +747,16 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             .arg(last_search_elapsed_ms_, 0, 'f', 1)
             .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听"))
             .arg(name_search_ready_ ? QString{} : QStringLiteral("    ·    名称加速索引未就绪")));
+
+        // Run after updating the model so the user can see the GUI result even
+        // if the independent CLI probe takes longer.
+        runCliProbe(db_path_, normalized_query, effective_limit, offset);
+        searchTrace("GUI-SEARCH", "END request_id=" + std::to_string(request_id));
     } catch (const std::exception& e) {
         last_search_elapsed_ms_ = 0.0;
         last_search_raw_result_count_ = 0;
         last_search_result_count_ = model_->rowCount();
+        searchTrace("GUI-SEARCH", std::string("EXCEPTION: ") + e.what());
         status_label_->setText(QStringLiteral("搜索错误：%1").arg(QString::fromUtf8(e.what())));
     }
 }
@@ -763,7 +876,9 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("模型当前行数：%1").arg(model_ ? model_->rowCount() : 0);
     details << QStringLiteral("查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
     details << QStringLiteral("待处理搜索：否");
-    details << QStringLiteral("搜索执行方式：GUI 主线程同步（v0.4.6 正确性模式）");
+    details << QStringLiteral("搜索执行方式：GUI 主线程同步 + Search Trace（v0.4.7）");
+    details << QStringLiteral("终端 Trace：%1").arg(searchTraceEnabled() ? QStringLiteral("已启用") : QStringLiteral("未启用"));
+    details << QStringLiteral("CLI 探针：%1").arg(cliProbePath());
     QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));
 }
 

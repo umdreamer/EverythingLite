@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21.1)
-project(EverythingLite VERSION 0.4.6 LANGUAGES CXX)
+project(EverythingLite VERSION 0.4.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,6 +28,7 @@ add_library(everything_core
     src/core/database.cpp
     src/core/search_engine.cpp
     src/core/search_service.cpp
+    src/core/search_trace.cpp
     src/core/search_query.cpp
     src/core/index_manager.cpp
     src/platform/watcher_factory.cpp

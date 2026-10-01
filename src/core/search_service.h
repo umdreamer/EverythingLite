@@ -33,6 +33,7 @@ public:
                                      const SearchOptions& options = {}) const;
 
 private:
+    std::string db_path_;
     SearchEngine engine_;
 };
 

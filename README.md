@@ -2,11 +2,23 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.6`
+当前版本：`0.4.7`（Search Trace 诊断版）
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
-## 1. v0.4.6 重点
+
+## 1. v0.4.7 Search Trace 诊断版
+
+当前真实问题仍然是：部分关键词在 CLI 中有结果，但 GUI 漏搜。0.4.7 不再继续猜测根因，而是增加完整的终端搜索追踪。推荐直接执行：
+
+```bash
+./scripts/build-macos.sh
+./scripts/run-macos-debug.sh
+```
+
+窗口标题必须显示 `Everything Lite 0.4.7 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
+
+## 1.1 v0.4.6 重点
 
 ### GUI / CLI 搜索结果一致性优先
 

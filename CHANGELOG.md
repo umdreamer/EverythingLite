@@ -1,3 +1,13 @@
+## 0.4.7
+
+- 新增搜索终端 Trace：GUI/SearchService/Database/Model 全链路日志。
+- 新增 `scripts/run-macos-debug.sh`，实时显示并自动保存搜索日志。
+- 调试模式窗口标题显示版本和 `[SEARCH TRACE]`。
+- GUI 搜索返回 0 时，自动执行同进程 direct/instr 与 correctness-gate 对照。
+- GUI 调试模式自动启动同 build 的 CLI `probe-search`，以相同 DB/query/limit/offset 做跨进程对照。
+- CLI 新增 `--trace-search` 与 `probe-search` 摘要命令。
+- Database trace 输出 SQLite 版本/source id、FTS 状态、最终 SQL、bind 参数、结果数和前 5 条路径。
+
 # Changelog
 
 ## 0.4.6

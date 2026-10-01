@@ -1,6 +1,6 @@
 # Everything Lite 产品与技术路线图
 
-> 当前状态（v0.4.6）：搜索正确性进入强制一致性阶段。GUI 与 CLI 共用唯一 SearchService，GUI 暂时使用同步查询以排除异步/cancellation 引入的漏搜。真实数据验证通过后，再进入 v0.5 Indexes + Excludes + Preferences。
+> 当前状态（v0.4.7 Search Trace）：搜索正确性进入强制一致性阶段。GUI 与 CLI 共用唯一 SearchService，GUI 暂时使用同步查询以排除异步/cancellation 引入的漏搜。真实数据验证通过后，再进入 v0.5 Indexes + Excludes + Preferences。
 
 ### Correctness Gate（自 v0.4.6 起）
 

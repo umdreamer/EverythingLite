@@ -1,76 +1,130 @@
 # Everything Lite
 
-Everything Lite 是一个面向 macOS 的本地文件快速搜索工具，目标是在日常交互上接近 Windows Everything，同时保持核心引擎跨平台。项目采用 C++17 + Qt 6 Widgets + SQLite + CMake；macOS 实时更新使用 FSEvents。
+Everything Lite 是一个面向 macOS 的本地文件快速搜索工具，目标是在交互上接近 Windows Everything，同时保持 C++ 核心跨平台。技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
-当前版本：`0.2.0`
+当前版本：`0.3.0`
 
-## 1. v0.2.0 已实现能力
+## 1. v0.3.0 重点
 
-- C++17 独立核心引擎，Qt 只负责桌面 UI
-- SQLite 本地索引数据库，WAL 模式
-- 多索引目录
-- 手动完整重建 + `scan_generation` 一致性清理
-- 文件名和完整路径搜索
-- 单关键词前缀优先、包含匹配补足
-- 多关键词 AND 搜索、双引号短语
-- 搜索过滤语法：`ext:`、`path:`、`size:`、`modified:`、`type:`
-- Qt 查询异步化：数据库搜索不阻塞输入框
-- 搜索结果按名称、路径、大小、修改时间排序
-- 双击打开文件/目录
-- 右键：打开、Finder 定位、复制完整路径、复制文件名
-- 窗口尺寸、表头状态、排序方式、索引目录持久化
-- macOS FSEvents 实时监听新增、删除、重命名和变化
-- FSEvents 丢事件时自动根目录重扫
-- CLI 与 Docker 核心验证
-- CLI 真实目录 benchmark 命令
-- CTest 自动测试
+本版本基于真实 macOS large索引项 benchmark 优化：
 
-`0.2.0` 的重点是“日常可用 + 可测量性能”，暂不加入全文内容索引、OCR、Embedding 和 AI。
+- 普通关键词默认只匹配“名称”，不再隐式匹配完整路径。
+- UI 增加“全部 / 仅文件 / 仅文件夹”。
+- UI 增加“匹配路径”开关，行为接近 Everything 的 Match Path。
+- 结果采用增量加载：首批 1000 条，滚动到底部自动继续加载，每批 1000 条，不再永久截断在 1000。
+- SQLite FTS5 trigram 名称索引用于 >=3 Unicode 字符的普通名称子串搜索。
+- 从 v0.2 升级时，首次启动直接从现有 SQLite `files` 表后台建立 trigram 索引，不重新扫描磁盘。
+- FTS5 不可用时自动回退到兼容的 SQLite LIKE 搜索，不影响基本功能。
+- CLI 支持 `--offset` 和 `optimize-search`。
 
-## 2. 架构
+v0.2 已实现的多索引目录、异步搜索、过滤语法、Qt 表格排序、右键操作、配置持久化和 macOS FSEvents 实时更新均保留。
+
+## 2. 默认搜索语义
+
+普通输入：
 
 ```text
-Qt Desktop UI
-   │
-   ├─ Async Search (QtConcurrent)
-   │       ↓
-   │   SearchEngine
-   │       ↓
-   └─ Index / FSEvents
-           ↓
-      IndexManager
-           ↓
-      SQLite Database
-           ↑
-       FileScanner
-           ↑
-   Platform File Watcher
-           ↑
- macOS FSEvents / future Windows / Linux backends
+pdf
+2026
+paper 2026
 ```
 
-核心层不依赖 Qt。Docker、CLI、自动测试和未来 Windows/Linux 后端都复用同一套 Scanner / IndexManager / Database / SearchEngine。
+默认只匹配文件或文件夹自身的名称。例如目录 `/Sample/` 下的 `notes.txt` 不会仅因为父目录包含 Sample 就被普通 `sample` 搜索返回。
 
-详细设计见 `docs/ARCHITECTURE.md`。
+需要匹配完整路径时，勾选顶部“匹配路径”。也可以继续显式使用：
 
-## 3. macOS 构建与运行
+```text
+path:sample
+```
 
-安装依赖：
+文件/文件夹范围可以用顶部下拉框选择：
+
+```text
+全部
+仅文件
+仅文件夹
+```
+
+查询语法仍支持：
+
+```text
+ext:pdf
+path:sample
+size:>100m
+modified:7d
+type:file
+type:dir
+```
+
+详见 `docs/SEARCH_SYNTAX.md`。
+
+## 3. 增量结果加载
+
+GUI 不会一次把所有匹配项复制到 Qt Model。第一次搜索最多加载 1000 条；向下滚动接近底部时自动请求下一批 1000 条。状态栏显示：
+
+```text
+已加载 1000+
+已加载 2000+
+...
+```
+
+`+` 表示数据库中仍可能有更多匹配项。这种方式避免百万级匹配时一次构造几十万 UI 行对象。
+
+CLI 对应支持窗口式查询：
+
+```bash
+./build-macos/everything-lite-cli search pdf --limit 1000 --offset 0
+./build-macos/everything-lite-cli search pdf --limit 1000 --offset 1000
+```
+
+## 4. 名称 Trigram 加速索引
+
+SQLite 普通 B-tree 无法有效优化 `%keyword%` 任意子串匹配。v0.3 在 SQLite 支持 FTS5 trigram 时额外建立 basename 搜索索引。
+
+适用范围：
+
+- 普通名称搜索；
+- 查询词至少 3 个 Unicode 字符；
+- 未开启“匹配路径”。
+
+1~2 字符查询、完整路径匹配及 `path:` 当前仍使用兼容 SQL 查询。
+
+### 从 v0.2 升级
+
+直接运行 v0.3 即可。若已有数据库，程序首次启动会后台执行：
+
+```text
+已有 files 表
+→ FTS5 trigram rebuild
+→ 安装增量同步 trigger
+→ 后续由 FSEvents/Indexer 自动维护
+```
+
+无需重新扫描 large文件。
+
+也可以手工执行：
+
+```bash
+./build-macos/everything-lite-cli optimize-search
+```
+
+查看状态：
+
+```bash
+./build-macos/everything-lite-cli stats
+```
+
+其中会显示：
+
+```text
+名称 Trigram 索引：ready
+```
+
+## 5. macOS 构建
 
 ```bash
 brew install cmake qtbase
-```
-
-构建：
-
-```bash
-cd everything-lite
 ./scripts/build-macos.sh
-```
-
-运行：
-
-```bash
 ./scripts/run-macos.sh
 ```
 
@@ -80,276 +134,72 @@ cd everything-lite
 open build-macos/everything-lite.app
 ```
 
-构建脚本默认生成“本机开发/使用版”，不运行 `macdeployqt`。这样最适合当前迭代阶段，也避开 Homebrew Qt 聚合模块造成的无关 Framework/rpath 问题。独立分发 DMG、codesign、notarization 留到 1.0 发布阶段。
+本阶段仍生成本机开发/使用版，不强制执行 `macdeployqt`。独立签名、notarization 和 DMG 留到 1.0。
 
-## 4. 第一次使用
+## 6. 索引与实时更新
 
-打开程序后点击“索引目录…”，可以同时加入多个目录。建议先从：
+首次设置一个或多个索引目录后点击“重建索引”。后续新增、删除、重命名和移动由 FSEvents 驱动增量更新；FSEvents 报告丢事件时执行对应 root 的完整重扫以恢复最终一致性。
 
-```text
-~/Desktop
-~/Documents
-~/Downloads
-```
-
-开始，点击“重建索引”。重建完成后直接输入关键词即可。后续新增、删除、重命名和移动文件由 FSEvents 增量同步。
-
-如果要索引 `~/Library` 或其他 macOS 隐私保护目录，可能需要：
+核心链路：
 
 ```text
-系统设置 → 隐私与安全性 → 完全磁盘访问权限
+APFS
+  ↓
+FSEvents
+  ↓
+IndexManager
+  ↓
+SQLite files + FTS5 trigram
+  ↓
+SearchEngine
+  ↓
+Qt Async UI
 ```
 
-## 5. 搜索语法
-
-普通搜索：
-
-```text
-paper
-```
-
-多关键词 AND：
-
-```text
-paper 2026
-```
-
-短语：
-
-```text
-"Example Collection"
-```
-
-扩展名：
-
-```text
-ext:pdf
-ext:pdf example
-```
-
-路径包含：
-
-```text
-path:sample droplet
-path:"Sample Projects" paper
-```
-
-文件大小：
-
-```text
-size:>100m
-size:>=10mb
-size:<1g
-```
-
-支持 `b/k/kb/m/mb/g/gb/t/tb`，按 1024 进制计算。
-
-最近修改：
-
-```text
-modified:24h
-modified:7d
-modified:4w
-```
-
-类型：
-
-```text
-type:file
-type:dir
-```
-
-可以组合：
-
-```text
-ext:pdf path:sample size:>10m modified:30d type:file example
-```
-
-当前 `modified:` 表示“最近一段时间内修改”，支持小时、天、周；绝对日期语法后续再增加。
-
-## 6. 结果排序与操作
-
-点击表头可按以下列升序/降序排序：
-
-- 名称
-- 所在位置
-- 大小
-- 修改时间
-
-右键结果支持：
-
-- 打开
-- 在 Finder 中显示
-- 复制完整路径
-- 复制文件名
-
-窗口位置/大小、列宽/顺序、排序方式和索引目录均通过 `QSettings` 自动保存。
-
-## 7. 异步搜索
-
-v0.1.x 的 SQLite 查询直接运行在 GUI 线程。v0.2.0 改为：
-
-```text
-输入变化
-→ 100 ms debounce
-→ QtConcurrent 后台查询
-→ 若查询期间继续输入，只保留最新待查询字符串
-→ 后台完成后更新结果模型
-```
-
-因此即使查询耗时上升，搜索框仍保持响应。SQLite WAL 允许后台索引写入和前台搜索读取更好地并行。
-
-## 8. 性能 benchmark
-
-v0.2.0 增加真实目录 benchmark：
-
-```bash
-./build-macos/everything-lite-cli benchmark "$HOME/Documents"
-```
-
-自定义查询：
+## 7. Benchmark
 
 ```bash
 ./build-macos/everything-lite-cli benchmark "$HOME" \
-  'ext:pdf' \
+  'pdf' \
   'sample' \
-  'path:sample type:file'
+  'ext:pdf' \
+  'path:sample' \
+  'modified:7d' \
+  'size:>100m type:file'
 ```
 
-它使用临时 SQLite 数据库，不污染正式 GUI 索引，输出：
+v0.3 benchmark 建库结束后会包含 trigram 名称索引构建，因此 `pdf`、`2026` 可用于验证任意子串搜索优化。
 
-- 索引项数量
-- 首次索引总时间
-- 每秒索引项数
-- 各查询耗时与返回数量
-
-也可以运行：
-
-```bash
-./scripts/benchmark-macos.sh "$HOME/Documents"
-```
-
-详细方法见 `docs/BENCHMARK.md`。
-
-## 9. CLI 使用
-
-只构建核心和 CLI：
-
-```bash
-cmake -S . -B build-cli -DBUILD_GUI=OFF -DBUILD_TESTS=ON
-cmake --build build-cli -j
-ctest --test-dir build-cli --output-on-failure
-```
-
-指定正式数据库：
-
-```bash
-export EVERYTHING_LITE_DB="$HOME/.everything-lite.db"
-```
-
-索引多个目录：
-
-```bash
-./build-cli/everything-lite-cli index "$HOME/Documents" "$HOME/Downloads"
-```
-
-搜索：
-
-```bash
-./build-cli/everything-lite-cli search 'ext:pdf example' --limit 50
-```
-
-## 10. Docker
-
-Docker 只用于 headless 核心/CLI 验证，不替代 macOS 原生 Qt UI 和 FSEvents。
-
-```bash
-docker compose build
-```
-
-索引：
-
-```bash
-SEARCH_ROOT="$HOME/Documents" \
-docker compose run --rm everything-lite index /search
-```
-
-搜索：
-
-```bash
-SEARCH_ROOT="$HOME/Documents" \
-docker compose run --rm everything-lite search 'ext:pdf report' --limit 30
-```
-
-## 11. 当前数据库策略
-
-核心表字段：
+用户实测 v0.2（[private benchmark removed] 项）的基线：
 
 ```text
-path
-parent_path
-name
-ext
-root
-size
-modified_time
-is_dir
-search_name
-search_path
-scan_generation
+Index time: [redacted] ms
+Index rate: [redacted] items/s
+pdf: [redacted] ms
+sample: [redacted] ms
+ext:pdf: [redacted] ms
+path:sample: [redacted] ms
+modified:7d: [redacted] ms
+size:>100m type:file: [redacted] ms
 ```
 
-主要索引：
+v0.3 的主要性能目标就是消除普通 basename 子串搜索的 16~18 秒全表扫描。请在同一台 Mac 上重新 benchmark 后对比。
 
-```text
-search_name
-ext
-size
-(root, scan_generation)
-modified_time
-```
+## 8. 当前限制
 
-完整重建采用 generation：新扫描结果写入新 generation，成功结束后再删除旧 generation 项目，因此不会在扫描开始时先把旧索引清空。
+- `path:` 和“匹配路径”暂未建立 trigram 路径索引；large级下仍可能明显慢于名称搜索。
+- 1~2 字符任意子串不能利用 trigram，仍会回退到 LIKE。
+- 当前列排序发生在已经加载到 UI 的结果窗口内；全局服务器端排序后续继续完善。
+- 不搜索文件正文；OCR / Embedding / RAG 暂不属于当前阶段。
+- Unicode case folding 仍主要依赖 SQLite/FTS 行为与现有 ASCII fold，后续可进一步统一。
+- 系统级全局快捷键尚未实现。
 
-## 12. 当前限制
+## 9. 文档
 
-- 文件名/路径索引，不搜索文件正文。
-- `path:` 和普通“包含匹配”需要 `%keyword%`，在百万级索引上可能成为瓶颈；需要通过真实 benchmark 决定是否引入 trigram/自定义内存索引。
-- 英文 ASCII 大小写不敏感；尚未加入完整 Unicode case-folding 库。
-- GUI 当前每次最多取 1000 条结果，再在本地结果模型中排序。
-- 系统级全局快捷键暂未加入。Qt 本身没有统一稳定的跨平台 global hotkey API，后续会放到 platform 层分别实现。
-- 独立可分发 macOS Bundle（无 Homebrew Qt 依赖）尚未做 codesign/notarization。
-
-## 13. Roadmap
-
-### v0.2.x
-
-- 在真实 Mac 上完成 10 万 / 50 万 / 100 万级 benchmark
-- 根据 benchmark 做 SQL/query plan 优化
-- 搜索历史和常用过滤器（按需要）
-- 索引进度/取消机制增强
-
-### v0.3.x
-
-- 百万级查询优化
-- trigram / prefix memory index 按证据引入
-- 外接磁盘生命周期处理
-- Windows USN Journal、Linux inotify backend
-- platform global hotkey
-
-### v1.0
-
-- 独立 `.app`
-- deploy、codesign、notarization
-- DMG
-- 无 Homebrew Qt 运行依赖
-
-## 14. 文档
-
+- `RELEASE_NOTES_0.3.0.md`：本次版本说明
+- `docs/SEARCH_SYNTAX.md`：搜索语义与语法
+- `docs/BENCHMARK.md`：性能测试方法
 - `docs/ARCHITECTURE.md`：系统架构
-- `docs/PROJECT_STRUCTURE.md`：工程目录
-- `docs/MACOS_BUILD.md`：Mac 构建
-- `docs/SEARCH_SYNTAX.md`：搜索语法
-- `docs/BENCHMARK.md`：性能测试
-- `docs/TEST_REPORT.md`：自动测试记录
-- `CHANGELOG.md`：版本变化
+- `docs/MACOS_BUILD.md`：Mac 构建说明
+- `docs/TEST_REPORT.md`：测试记录
+- `CHANGELOG.md`：版本历史

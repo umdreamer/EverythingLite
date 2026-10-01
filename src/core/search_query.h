@@ -16,6 +16,9 @@ struct SearchQuery {
     std::optional<std::int64_t> modified_after;
     bool files_only = false;
     bool directories_only = false;
+    // Mirrors Everything's "Match Path" option. When false, plain terms match
+    // only the basename. When true, plain terms match the full path.
+    bool match_path = false;
 };
 
 SearchQuery parseSearchQuery(const std::string& query, std::int64_t now_seconds = 0);

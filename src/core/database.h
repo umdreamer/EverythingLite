@@ -31,11 +31,23 @@ public:
     std::uint64_t deleteRoot(const std::string& root) const;
     void clear() const;
 
-    std::vector<SearchResult> search(const SearchQuery& query, std::size_t limit = 500) const;
-    std::vector<SearchResult> search(const std::string& query, std::size_t limit = 500) const;
+    // offset/limit are intentionally exposed for viewport-style incremental loading.
+    std::vector<SearchResult> search(const SearchQuery& query,
+                                     std::size_t limit = 500,
+                                     std::size_t offset = 0) const;
+    std::vector<SearchResult> search(const std::string& query,
+                                     std::size_t limit = 500,
+                                     std::size_t offset = 0) const;
 
     std::uint64_t totalFileCount() const;
     std::vector<std::string> roots() const;
+
+    // v0.3: optional SQLite FTS5 trigram acceleration for basename substring
+    // searches. Existing v0.2 databases keep working and fall back to LIKE
+    // until a full rebuild has prepared the trigram index once.
+    bool nameSearchIndexAvailable() const;
+    bool nameSearchIndexReady() const;
+    void rebuildNameSearchIndex() const;
 
 private:
     std::string db_path_;

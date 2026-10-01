@@ -106,3 +106,27 @@ GUI 线程不直接执行 SQLite search。输入后 100 ms debounce，再由 QtC
 ## 10. 性能决策原则
 
 当前不引入 Trie。原因是：B-tree 前缀查询、SQLite WAL 和 1000 条上限已足以支撑 MVP；真正风险在 `%keyword%` 和 `path:%keyword%`。只有真实 10 万/50 万/100 万数据 benchmark 表明这些查询无法接受时，再引入 trigram、自定义倒排结构、mmap 或内存索引。
+
+## v0.3 查询优化补充
+
+### 默认名称搜索
+
+普通查询只作用于 `search_name`。完整路径匹配是显式模式，避免父目录名称导致大量假阳性结果。
+
+### FTS5 trigram
+
+当 SQLite 支持 FTS5 trigram 且 basename 查询词不少于 3 个 Unicode 字符时：
+
+```text
+SearchQuery
+  ↓
+files_name_fts MATCH ...
+  ↓ join rowid
+files
+```
+
+`files_name_fts` 是 external-content FTS5 表，主内容仍保存在 `files` 表。首次从旧版本升级时执行一次 FTS `rebuild`；之后 insert/delete/update trigger 同步维护。
+
+### 结果窗口
+
+SearchEngine 对外提供 `limit + offset`。Qt 首批加载 1000 条，滚动接近底部再请求下一批。这样数据库匹配数量与 UI 当前持有数量解耦。

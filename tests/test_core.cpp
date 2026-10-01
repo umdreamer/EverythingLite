@@ -31,11 +31,12 @@ int main() {
     std::ofstream(base / "AlphaReport.txt") << std::string(64, 'a');
     std::ofstream(base / "nested" / "data.csv") << "1,2,3";
     std::ofstream(base / "nested" / "sample" / "ExampleFile.pdf") << std::string(2048, 'p');
+    std::ofstream(base / "nested" / "sample" / "unrelated.bin") << "x";
 
     const auto db = (db_dir / "index.db").string();
     IndexManager manager(db);
     const auto stats = manager.rebuildRoot(base.string());
-    assert(stats.indexed >= 6); // root + directories + 3 files
+    assert(stats.indexed >= 7); // root + directories + test files
 
     SearchEngine engine(db);
     auto results = engine.search("alpha", 20);
@@ -45,8 +46,20 @@ int main() {
     assert(containsName(results, "ExampleFile.pdf"));
     assert(!containsName(results, "data.csv"));
 
+    // v0.3: ordinary terms match the basename only. A parent directory name
+    // must not make all descendants appear as false positives.
+    results = engine.search("sample", 20);
+    assert(containsName(results, "sample"));
+    assert(!containsName(results, "unrelated.bin"));
+
     results = engine.search("path:sample", 20);
     assert(containsName(results, "ExampleFile.pdf"));
+    assert(containsName(results, "unrelated.bin"));
+
+    auto match_path_query = parseSearchQuery("sample");
+    match_path_query.match_path = true;
+    results = engine.search(match_path_query, 20);
+    assert(containsName(results, "unrelated.bin"));
 
     results = engine.search("size:>1k type:file", 20);
     assert(containsName(results, "ExampleFile.pdf"));
@@ -55,6 +68,14 @@ int main() {
     results = engine.search("type:dir sample", 20);
     assert(containsName(results, "sample"));
     assert(!containsName(results, "ExampleFile.pdf"));
+
+    // Incremental result windows: the second page must continue rather than
+    // repeat the first page.
+    auto first_page = engine.search("type:file", 2, 0);
+    auto second_page = engine.search("type:file", 2, 2);
+    assert(first_page.size() == 2);
+    assert(!second_page.empty());
+    assert(first_page.front().file.path != second_page.front().file.path);
 
     const auto parsed = parseSearchQuery("ext:PDF path:\"Sample Folder\" size:>=10m modified:7d type:file hello", 1'000'000);
     assert(parsed.extension && *parsed.extension == "pdf");

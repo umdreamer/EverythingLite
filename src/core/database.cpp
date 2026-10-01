@@ -6,10 +6,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <memory>
-#include <iterator>
 #include <sstream>
 #include <stdexcept>
-#include <unordered_set>
 
 namespace everything_lite {
 namespace {
@@ -48,6 +46,13 @@ public:
             sqlite3_free(error);
             throw std::runtime_error(message);
         }
+    }
+
+    bool tryExec(const char* sql) const noexcept {
+        char* error = nullptr;
+        const int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &error);
+        if (error) sqlite3_free(error);
+        return rc == SQLITE_OK;
     }
 
 private:
@@ -94,25 +99,117 @@ FileRecord readFileRecord(sqlite3_stmt* stmt) {
     return r;
 }
 
+bool tableExists(sqlite3* db, const char* name) {
+    auto stmt = prepare(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;");
+    bindText(stmt.get(), 1, name);
+    return sqlite3_step(stmt.get()) == SQLITE_ROW;
+}
+
+bool metadataFlag(sqlite3* db, const char* key) {
+    auto stmt = prepare(db, "SELECT value FROM app_metadata WHERE key=? LIMIT 1;");
+    bindText(stmt.get(), 1, key);
+    if (sqlite3_step(stmt.get()) != SQLITE_ROW) return false;
+    return columnText(stmt.get(), 0) == "1";
+}
+
+void setMetadataFlag(sqlite3* db, const char* key, bool enabled) {
+    auto stmt = prepare(db, R"SQL(
+INSERT INTO app_metadata(key,value) VALUES(?,?)
+ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+)SQL");
+    bindText(stmt.get(), 1, key);
+    bindText(stmt.get(), 2, enabled ? "1" : "0");
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
+}
+
+void installFtsTriggers(const SqliteConnection& conn) {
+    conn.exec(R"SQL(
+CREATE TRIGGER IF NOT EXISTS files_name_fts_ai AFTER INSERT ON files BEGIN
+    INSERT INTO files_name_fts(rowid,search_name) VALUES(new.id,new.search_name);
+END;
+CREATE TRIGGER IF NOT EXISTS files_name_fts_ad AFTER DELETE ON files BEGIN
+    INSERT INTO files_name_fts(files_name_fts,rowid,search_name)
+    VALUES('delete',old.id,old.search_name);
+END;
+CREATE TRIGGER IF NOT EXISTS files_name_fts_au AFTER UPDATE OF search_name ON files WHEN old.search_name <> new.search_name BEGIN
+    INSERT INTO files_name_fts(files_name_fts,rowid,search_name)
+    VALUES('delete',old.id,old.search_name);
+    INSERT INTO files_name_fts(rowid,search_name) VALUES(new.id,new.search_name);
+END;
+)SQL");
+}
+
+std::size_t utf8CodepointCount(const std::string& text) {
+    std::size_t count = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0U) != 0x80U) ++count;
+    }
+    return count;
+}
+
+std::string quoteFtsPhrase(const std::string& text) {
+    std::string out;
+    out.reserve(text.size() + 4);
+    out.push_back('"');
+    for (char c : text) {
+        if (c == '"') out.push_back('"');
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+bool canUseNameFts(const SearchQuery& query, bool fts_ready) {
+    if (!fts_ready || query.match_path || query.terms.empty()) return false;
+    for (const auto& term : query.terms) {
+        if (utf8CodepointCount(term) < 3) return false;
+    }
+    return true;
+}
+
+std::string makeFtsExpression(const SearchQuery& query) {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < query.terms.size(); ++i) {
+        if (i) out << " AND ";
+        out << quoteFtsPhrase(query.terms[i]);
+    }
+    return out.str();
+}
+
 std::vector<SearchResult> runSearch(sqlite3* db,
                                     const SearchQuery& query,
                                     std::size_t limit,
-                                    bool prefix_only,
-                                    const std::unordered_set<std::string>& exclude_paths = {}) {
+                                    std::size_t offset,
+                                    bool fts_ready) {
+    const bool use_fts = canUseNameFts(query, fts_ready);
+
     std::ostringstream sql;
-    sql << "SELECT path,parent_path,name,ext,root,size,modified_time,is_dir,scan_generation FROM files";
+    if (use_fts) {
+        sql << "SELECT files.path,files.parent_path,files.name,files.ext,files.root,files.size,files.modified_time,files.is_dir,files.scan_generation "
+               "FROM files_name_fts JOIN files ON files.id=files_name_fts.rowid";
+    } else {
+        sql << "SELECT files.path,files.parent_path,files.name,files.ext,files.root,files.size,files.modified_time,files.is_dir,files.scan_generation FROM files";
+    }
 
     std::vector<std::string> where;
-    for (std::size_t i = 0; i < query.terms.size(); ++i) {
-        where.emplace_back("(search_name LIKE ? ESCAPE '\\' OR search_path LIKE ? ESCAPE '\\')");
+    if (use_fts) {
+        where.emplace_back("files_name_fts MATCH ?");
+    } else {
+        for (std::size_t i = 0; i < query.terms.size(); ++i) {
+            // Everything-compatible default: plain terms match the basename only.
+            // Full-path matching is opt-in via Match Path.
+            where.emplace_back(query.match_path
+                ? "files.search_path LIKE ? ESCAPE '\\'"
+                : "files.search_name LIKE ? ESCAPE '\\'");
+        }
     }
-    if (query.extension) where.emplace_back("ext = ? COLLATE NOCASE");
-    if (query.path_term) where.emplace_back("search_path LIKE ? ESCAPE '\\'");
-    if (query.min_size) where.emplace_back("size >= ?");
-    if (query.max_size) where.emplace_back("size <= ?");
-    if (query.modified_after) where.emplace_back("modified_time >= ?");
-    if (query.files_only) where.emplace_back("is_dir = 0");
-    if (query.directories_only) where.emplace_back("is_dir = 1");
+    if (query.extension) where.emplace_back("files.ext = ? COLLATE NOCASE");
+    if (query.path_term) where.emplace_back("files.search_path LIKE ? ESCAPE '\\'");
+    if (query.min_size) where.emplace_back("files.size >= ?");
+    if (query.max_size) where.emplace_back("files.size <= ?");
+    if (query.modified_after) where.emplace_back("files.modified_time >= ?");
+    if (query.files_only) where.emplace_back("files.is_dir = 0");
+    if (query.directories_only) where.emplace_back("files.is_dir = 1");
 
     if (!where.empty()) {
         sql << " WHERE ";
@@ -121,33 +218,35 @@ std::vector<SearchResult> runSearch(sqlite3* db,
             sql << where[i];
         }
     }
-    sql << " ORDER BY is_dir DESC, name COLLATE NOCASE ASC LIMIT ?";
+
+    // Match Everything's default presentation more closely: Name, then Path.
+    sql << " ORDER BY files.name COLLATE NOCASE ASC, files.parent_path COLLATE NOCASE ASC LIMIT ? OFFSET ?";
 
     auto stmt = prepare(db, sql.str());
     int bind_index = 1;
-    for (const auto& token : query.terms) {
-        const auto escaped = escapeLike(token);
-        const auto pattern = (prefix_only && query.terms.size() == 1) ? (escaped + "%") : ("%" + escaped + "%");
-        bindText(stmt.get(), bind_index++, pattern);
-        bindText(stmt.get(), bind_index++, pattern);
+    if (use_fts) {
+        bindText(stmt.get(), bind_index++, makeFtsExpression(query));
+    } else {
+        for (const auto& token : query.terms) {
+            const auto escaped = escapeLike(token);
+            bindText(stmt.get(), bind_index++, "%" + escaped + "%");
+        }
     }
     if (query.extension) bindText(stmt.get(), bind_index++, *query.extension);
     if (query.path_term) bindText(stmt.get(), bind_index++, "%" + escapeLike(*query.path_term) + "%");
     if (query.min_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.min_size));
     if (query.max_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.max_size));
     if (query.modified_after) sqlite3_bind_int64(stmt.get(), bind_index++, *query.modified_after);
-    sqlite3_bind_int64(stmt.get(), bind_index, static_cast<sqlite3_int64>(limit + exclude_paths.size()));
+    sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(limit));
+    sqlite3_bind_int64(stmt.get(), bind_index, static_cast<sqlite3_int64>(offset));
 
     std::vector<SearchResult> results;
     results.reserve(limit);
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        auto record = readFileRecord(stmt.get());
-        if (!exclude_paths.empty() && exclude_paths.find(record.path) != exclude_paths.end()) continue;
         SearchResult result;
-        result.file = std::move(record);
-        result.rank = prefix_only ? 1 : 2;
+        result.file = readFileRecord(stmt.get());
+        result.rank = 0;
         results.push_back(std::move(result));
-        if (results.size() >= limit) break;
     }
     return results;
 }
@@ -184,7 +283,26 @@ CREATE TABLE IF NOT EXISTS roots (
     last_scan_time INTEGER NOT NULL DEFAULT 0,
     file_count INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS app_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT OR IGNORE INTO app_metadata(key,value) VALUES('name_fts_ready','0');
 )SQL");
+
+    // FTS5 may not be compiled into every platform SQLite. The app remains
+    // functional without it and simply falls back to LIKE scans.
+    const bool fts_ok = conn.tryExec(R"SQL(
+CREATE VIRTUAL TABLE IF NOT EXISTS files_name_fts USING fts5(
+    search_name,
+    content='files',
+    content_rowid='id',
+    tokenize='trigram'
+);
+)SQL");
+    if (fts_ok && metadataFlag(conn.get(), "name_fts_ready")) {
+        installFtsTriggers(conn);
+    }
 }
 
 void Database::beginRootScan(const std::string& root, std::int64_t generation) const {
@@ -310,23 +428,18 @@ void Database::clear() const {
     conn.exec("DELETE FROM files; DELETE FROM roots;");
 }
 
-std::vector<SearchResult> Database::search(const SearchQuery& query, std::size_t limit) const {
+std::vector<SearchResult> Database::search(const SearchQuery& query,
+                                           std::size_t limit,
+                                           std::size_t offset) const {
     SqliteConnection conn(db_path_);
-    if (query.terms.size() == 1) {
-        auto prefix = runSearch(conn.get(), query, limit, true);
-        if (prefix.size() >= limit) return prefix;
-        std::unordered_set<std::string> seen;
-        seen.reserve(prefix.size() * 2 + 1);
-        for (const auto& item : prefix) seen.insert(item.file.path);
-        auto contains = runSearch(conn.get(), query, limit - prefix.size(), false, seen);
-        prefix.insert(prefix.end(), std::make_move_iterator(contains.begin()), std::make_move_iterator(contains.end()));
-        return prefix;
-    }
-    return runSearch(conn.get(), query, limit, false);
+    const bool fts_ready = tableExists(conn.get(), "files_name_fts") && metadataFlag(conn.get(), "name_fts_ready");
+    return runSearch(conn.get(), query, limit, offset, fts_ready);
 }
 
-std::vector<SearchResult> Database::search(const std::string& query, std::size_t limit) const {
-    return search(parseSearchQuery(query), limit);
+std::vector<SearchResult> Database::search(const std::string& query,
+                                           std::size_t limit,
+                                           std::size_t offset) const {
+    return search(parseSearchQuery(query), limit, offset);
 }
 
 std::uint64_t Database::totalFileCount() const {
@@ -346,6 +459,27 @@ std::vector<std::string> Database::roots() const {
         out.push_back(columnText(stmt.get(), 0));
     }
     return out;
+}
+
+bool Database::nameSearchIndexAvailable() const {
+    SqliteConnection conn(db_path_);
+    return tableExists(conn.get(), "files_name_fts");
+}
+
+bool Database::nameSearchIndexReady() const {
+    SqliteConnection conn(db_path_);
+    return tableExists(conn.get(), "files_name_fts") && metadataFlag(conn.get(), "name_fts_ready");
+}
+
+void Database::rebuildNameSearchIndex() const {
+    SqliteConnection conn(db_path_);
+    if (!tableExists(conn.get(), "files_name_fts")) return;
+
+    // External-content FTS tables require one initial rebuild for databases
+    // created by v0.2 and earlier. This is a one-time O(N) migration.
+    conn.exec("INSERT INTO files_name_fts(files_name_fts) VALUES('rebuild');");
+    installFtsTriggers(conn);
+    setMetadataFlag(conn.get(), "name_fts_ready", true);
 }
 
 } // namespace everything_lite

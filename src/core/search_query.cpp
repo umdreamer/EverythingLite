@@ -84,6 +84,10 @@ SearchQuery parseSearchQuery(const std::string& query, std::int64_t now_seconds)
             out.path_term = token.substr(5);
             continue;
         }
+        if (token == "matchpath:" || token == "match-path:") {
+            out.match_path = true;
+            continue;
+        }
         if (startsWith(token, "type:") && token.size() > 5) {
             const auto type = token.substr(5);
             if (type == "file" || type == "files" || type == "f") {

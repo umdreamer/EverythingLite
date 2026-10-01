@@ -20,6 +20,8 @@ public:
     void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override;
 
     void setResults(std::vector<SearchResult> results);
+    void appendResults(std::vector<SearchResult> results);
+    void clearResults();
     QString pathAt(int row) const;
     QString nameAt(int row) const;
     bool isDirectoryAt(int row) const;

@@ -4,6 +4,7 @@
 #include <QString>
 
 #include <algorithm>
+#include <iterator>
 
 namespace everything_lite {
 
@@ -72,6 +73,25 @@ void SearchResultModel::setResults(std::vector<SearchResult> results) {
     beginResetModel();
     results_ = std::move(results);
     applySort();
+    endResetModel();
+}
+
+void SearchResultModel::appendResults(std::vector<SearchResult> results) {
+    if (results.empty()) return;
+    // Because users may have selected a local column sort, append and re-sort
+    // the loaded window as one model update. Server-side global sorting can be
+    // added later without changing the incremental-loading API.
+    beginResetModel();
+    results_.insert(results_.end(),
+                    std::make_move_iterator(results.begin()),
+                    std::make_move_iterator(results.end()));
+    applySort();
+    endResetModel();
+}
+
+void SearchResultModel::clearResults() {
+    beginResetModel();
+    results_.clear();
     endResetModel();
 }
 

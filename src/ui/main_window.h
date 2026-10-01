@@ -14,7 +14,9 @@
 #include <memory>
 #include <vector>
 
+class QCheckBox;
 class QCloseEvent;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPoint;
@@ -31,8 +33,12 @@ class SearchResultModel;
 struct SearchOutcome {
     std::vector<SearchResult> results;
     QString query;
+    QString signature;
     QString error;
     double elapsed_ms = 0.0;
+    std::size_t offset = 0;
+    bool append = false;
+    bool has_more = false;
 };
 
 class MainWindow final : public QMainWindow {
@@ -45,11 +51,15 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    static constexpr std::size_t kPageSize = 1000;
+
     QString db_path_;
     QStringList roots_;
     std::unique_ptr<FileWatcher> watcher_;
 
     QLineEdit* search_edit_ = nullptr;
+    QComboBox* scope_combo_ = nullptr;
+    QCheckBox* match_path_check_ = nullptr;
     QPushButton* roots_button_ = nullptr;
     QPushButton* rebuild_button_ = nullptr;
     QLabel* scope_label_ = nullptr;
@@ -65,6 +75,9 @@ private:
     QSet<QString> pending_rescan_roots_;
     QString pending_search_query_;
     bool search_pending_ = false;
+    bool results_have_more_ = false;
+    bool name_search_available_ = false;
+    bool name_search_ready_ = false;
     std::atomic_bool indexing_{false};
     std::uint64_t indexed_count_ = 0;
 
@@ -74,7 +87,9 @@ private:
     void updateScopeLabel();
     void refreshStats();
     void runSearch();
-    void launchSearch(const QString& query);
+    void launchSearch(const QString& query, std::size_t offset = 0, bool append = false);
+    void loadMoreResults();
+    QString currentSearchSignature() const;
     void rebuildIndex();
     void editRoots();
     void openCurrent();

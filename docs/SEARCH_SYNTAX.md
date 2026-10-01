@@ -1,16 +1,59 @@
-# Everything Lite 搜索语法 v0.2.0
+# Everything Lite 搜索语法 v0.3.0
 
-Everything Lite 的查询首先由 `SearchQuery` 解析，再由 SQLite 执行。普通词同时匹配文件名与完整路径；多个普通词之间是 AND 关系。
-
-## 普通搜索
+## 默认语义：只匹配名称
 
 ```text
 paper
-paper 2026
+pdf
+2026
 "Example Collection"
 ```
 
-单普通关键词先执行前缀匹配，再补充包含匹配；多关键词直接执行包含 AND。
+普通关键词默认只匹配当前项目自身的 basename，即“文件名或文件夹名”，不会因为某个父目录包含关键词而把它下面所有后代都返回。
+
+例如：
+
+```text
+/Sample/unrelated.bin
+```
+
+搜索 `sample` 默认只会命中名为 `Sample` 的文件夹，不会命中 `unrelated.bin`。
+
+## 文件 / 文件夹范围
+
+GUI 顶部可以选择：
+
+```text
+全部
+仅文件
+仅文件夹
+```
+
+语法等价能力：
+
+```text
+type:file
+type:dir
+```
+
+查询文本中的 `type:` 优先于 GUI 下拉框。
+
+## 匹配完整路径
+
+勾选 GUI 顶部“匹配路径”后，普通词会针对完整路径匹配。这相当于 Everything 的 Match Path 搜索选项。
+
+CLI 可使用：
+
+```text
+matchpath: sample
+```
+
+显式路径过滤仍支持：
+
+```text
+path:sample
+path:"Sample Projects"
+```
 
 ## 扩展名
 
@@ -18,17 +61,6 @@ paper 2026
 ext:pdf
 ext:docx report
 ```
-
-扩展名不要写前导点；写成 `ext:.pdf` 也会自动去掉点。
-
-## 路径
-
-```text
-path:sample
-path:"Sample Projects" example
-```
-
-`path:` 只约束完整路径字段。
 
 ## 大小
 
@@ -39,7 +71,7 @@ size:<1g
 size:<=500k
 ```
 
-单位按 1024 进制；支持 B/K/KB/M/MB/G/GB/T/TB（大小写不敏感）。
+单位按 1024 进制；支持 B/K/KB/M/MB/G/GB/T/TB。
 
 ## 修改时间
 
@@ -49,21 +81,16 @@ modified:7d
 modified:4w
 ```
 
-表示“修改时间晚于当前时间减去该时长”。当前支持 h / d / w。
-
-## 类型
-
-```text
-type:file
-type:dir
-```
-
-别名 `type:f`、`type:d`、`type:folder` 也可解析。
+表示修改时间晚于“当前时间 - 指定时长”。
 
 ## 组合
 
 ```text
-ext:pdf path:sample size:>10m modified:30d type:file example
+ext:pdf size:>10m modified:30d type:file example
 ```
 
-含义：扩展名为 PDF、路径中包含 sample、文件大于 10 MiB、最近 30 天修改、只要文件，并且名称或路径包含 example。
+默认 example 只匹配文件名。如果需要完整路径也匹配 example，打开“匹配路径”。
+
+## 性能说明
+
+普通 basename 查询在 SQLite FTS5 trigram 可用且查询词至少 3 个 Unicode 字符时使用 trigram 索引。1~2 字符、`path:` 和“匹配路径”当前使用兼容 SQL 路径。

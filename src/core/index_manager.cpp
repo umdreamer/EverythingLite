@@ -36,6 +36,11 @@ IndexStats IndexManager::rebuildRoot(const std::string& root,
     if (!(cancelled && cancelled->load())) {
         stats.removed = database_.deleteStaleForRoot(normalized_root, generation);
         database_.completeRootScan(normalized_root, generation, stats.indexed);
+        // v0.3 one-time migration: prepare the trigram basename index after a
+        // complete scan. Once ready, database triggers keep it synchronized.
+        if (database_.nameSearchIndexAvailable() && !database_.nameSearchIndexReady()) {
+            database_.rebuildNameSearchIndex();
+        }
     }
     return stats;
 }

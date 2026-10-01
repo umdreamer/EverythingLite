@@ -4,14 +4,17 @@
 #include "core/index_manager.h"
 #include "core/path_utils.h"
 #include "core/search_engine.h"
+#include "core/search_query.h"
 #include "platform/watcher_factory.h"
 #include "ui/root_settings_dialog.h"
 #include "ui/search_result_model.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -28,6 +31,7 @@
 #include <QMetaObject>
 #include <QProcess>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSettings>
 #include <QShortcut>
 #include <QStandardPaths>
@@ -84,6 +88,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     search_timer_->setInterval(100);
     connect(search_timer_, &QTimer::timeout, this, &MainWindow::runSearch);
     connect(search_edit_, &QLineEdit::textChanged, this, [this] { search_timer_->start(); });
+    connect(scope_combo_, &QComboBox::currentIndexChanged, this, [this] { search_timer_->start(); });
+    connect(match_path_check_, &QCheckBox::toggled, this, [this] { search_timer_->start(); });
 
     event_timer_ = new QTimer(this);
     event_timer_->setSingleShot(true);
@@ -93,20 +99,26 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     search_watcher_ = new QFutureWatcher<SearchOutcome>(this);
     connect(search_watcher_, &QFutureWatcher<SearchOutcome>::finished, this, [this] {
         auto outcome = search_watcher_->result();
+        const bool still_current = outcome.signature == currentSearchSignature();
         if (!outcome.error.isEmpty()) {
-            status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
-        } else if (!search_pending_ && search_edit_->text() == outcome.query) {
-            const auto result_count = outcome.results.size();
-            model_->setResults(std::move(outcome.results));
-            status_label_->setText(QStringLiteral("索引 %1 项    ·    结果 %2    ·    %3 ms    ·    %4")
+            if (still_current) status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
+        } else if (!search_pending_ && still_current) {
+            if (outcome.append) model_->appendResults(std::move(outcome.results));
+            else model_->setResults(std::move(outcome.results));
+            results_have_more_ = outcome.has_more;
+            const auto loaded = model_->rowCount();
+            status_label_->setText(QStringLiteral("索引 %1 项    ·    已加载 %2%3    ·    %4 ms    ·    %5%6")
                 .arg(indexed_count_)
-                .arg(result_count)
+                .arg(loaded)
+                .arg(results_have_more_ ? QStringLiteral("+") : QString{})
                 .arg(outcome.elapsed_ms, 0, 'f', 1)
-                .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听")));
+                .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听"))
+                .arg(name_search_ready_ ? QString{} : QStringLiteral("    ·    名称加速索引未就绪")));
         }
-        if (search_pending_ || search_edit_->text() != outcome.query) {
+
+        if (search_pending_ || !still_current) {
             search_pending_ = false;
-            launchSearch(search_edit_->text());
+            launchSearch(search_edit_->text(), 0, false);
         }
     });
 
@@ -114,6 +126,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(roots_button_, &QPushButton::clicked, this, &MainWindow::editRoots);
     connect(table_, &QTableView::doubleClicked, this, [this] { openCurrent(); });
     connect(table_, &QWidget::customContextMenuRequested, this, &MainWindow::showContextMenu);
+    connect(table_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        auto* bar = table_->verticalScrollBar();
+        if (results_have_more_ && value >= bar->maximum() - 8) loadMoreResults();
+    });
 
     auto* findShortcut = new QShortcut(QKeySequence::Find, this);
     connect(findShortcut, &QShortcut::activated, this, [this] {
@@ -126,6 +142,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     refreshStats();
     restartWatcher();
+
+    // v0.3 upgrades an existing v0.2 database in-place. Building the trigram
+    // index reads the existing SQLite rows only; it does not rescan the disk.
+    if (indexed_count_ > 0 && name_search_available_ && !name_search_ready_) {
+        const auto db_path = db_path_;
+        startWorker([db_path] {
+            Database db(toUtf8(db_path));
+            db.initialize();
+            db.rebuildNameSearchIndex();
+        }, QStringLiteral("首次升级：正在从现有数据库建立名称加速索引（无需重新扫描磁盘）…"));
+    }
+
     search_edit_->setFocus();
     runSearch();
 }
@@ -148,8 +176,8 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 
 void MainWindow::buildUi() {
     setWindowTitle(QStringLiteral("Everything Lite"));
-    resize(1120, 720);
-    setMinimumSize(760, 460);
+    resize(1160, 740);
+    setMinimumSize(820, 480);
 
     auto* central = new QWidget(this);
     auto* layout = new QVBoxLayout(central);
@@ -160,12 +188,22 @@ void MainWindow::buildUi() {
     top->setSpacing(8);
 
     search_edit_ = new QLineEdit(this);
-    search_edit_->setPlaceholderText(QStringLiteral("搜索…  例：ext:pdf  path:sample  size:>10m  modified:7d  type:file"));
+    search_edit_->setPlaceholderText(QStringLiteral("搜索名称…  例：report  ext:pdf  path:sample  size:>10m  modified:7d"));
     search_edit_->setClearButtonEnabled(true);
     search_edit_->setMinimumHeight(38);
     QFont search_font = search_edit_->font();
     search_font.setPointSizeF(search_font.pointSizeF() + 1.5);
     search_edit_->setFont(search_font);
+
+    scope_combo_ = new QComboBox(this);
+    scope_combo_->addItem(QStringLiteral("全部"));
+    scope_combo_->addItem(QStringLiteral("仅文件"));
+    scope_combo_->addItem(QStringLiteral("仅文件夹"));
+    scope_combo_->setMinimumHeight(36);
+    scope_combo_->setMinimumWidth(92);
+
+    match_path_check_ = new QCheckBox(QStringLiteral("匹配路径"), this);
+    match_path_check_->setToolTip(QStringLiteral("关闭时普通关键词只匹配文件/文件夹名称；打开后匹配完整路径"));
 
     roots_button_ = new QPushButton(QStringLiteral("索引目录…"), this);
     rebuild_button_ = new QPushButton(QStringLiteral("重建索引"), this);
@@ -173,6 +211,8 @@ void MainWindow::buildUi() {
     rebuild_button_->setMinimumHeight(36);
 
     top->addWidget(search_edit_, 1);
+    top->addWidget(scope_combo_);
+    top->addWidget(match_path_check_);
     top->addWidget(roots_button_);
     top->addWidget(rebuild_button_);
     layout->addLayout(top);
@@ -202,7 +242,7 @@ void MainWindow::buildUi() {
     table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
     table_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Interactive);
-    table_->setColumnWidth(0, 280);
+    table_->setColumnWidth(0, 300);
     table_->setColumnWidth(2, 90);
     table_->setColumnWidth(3, 150);
     layout->addWidget(table_, 1);
@@ -218,6 +258,8 @@ void MainWindow::loadSettings() {
     QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
     roots_ = settings.value(QStringLiteral("index/roots")).toStringList();
     if (roots_.isEmpty()) roots_ = defaultRoots();
+    scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
+    match_path_check_->setChecked(settings.value(QStringLiteral("search/matchPath"), false).toBool());
     const auto geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
     if (!geometry.isEmpty()) restoreGeometry(geometry);
     const auto header_state = settings.value(QStringLiteral("table/header")).toByteArray();
@@ -230,6 +272,8 @@ void MainWindow::loadSettings() {
 void MainWindow::saveSettings() {
     QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
     settings.setValue(QStringLiteral("index/roots"), roots_);
+    settings.setValue(QStringLiteral("search/itemScope"), scope_combo_->currentIndex());
+    settings.setValue(QStringLiteral("search/matchPath"), match_path_check_->isChecked());
     settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
     settings.setValue(QStringLiteral("table/header"), table_->horizontalHeader()->saveState());
     settings.setValue(QStringLiteral("table/sortColumn"), table_->horizontalHeader()->sortIndicatorSection());
@@ -251,41 +295,86 @@ void MainWindow::refreshStats() {
         Database db(toUtf8(db_path_));
         db.initialize();
         indexed_count_ = db.totalFileCount();
-        status_label_->setText(QStringLiteral("索引 %1 项    ·    %2")
+        name_search_available_ = db.nameSearchIndexAvailable();
+        name_search_ready_ = db.nameSearchIndexReady();
+        QString acceleration;
+        if (!name_search_available_) acceleration = QStringLiteral("    ·    当前 SQLite 未提供 FTS5 trigram，使用兼容搜索");
+        else if (!name_search_ready_) acceleration = QStringLiteral("    ·    名称加速索引未就绪");
+        status_label_->setText(QStringLiteral("索引 %1 项    ·    %2%3")
             .arg(indexed_count_)
-            .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("等待启动")));
+            .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("等待启动"))
+            .arg(acceleration));
     } catch (const std::exception& e) {
         status_label_->setText(QStringLiteral("数据库错误：%1").arg(QString::fromUtf8(e.what())));
     }
 }
 
+QString MainWindow::currentSearchSignature() const {
+    return QStringLiteral("%1\x1f%2\x1f%3")
+        .arg(search_edit_->text())
+        .arg(scope_combo_->currentIndex())
+        .arg(match_path_check_->isChecked() ? 1 : 0);
+}
+
 void MainWindow::runSearch() {
     if (indexing_.load() && indexed_count_ == 0) return;
     pending_search_query_ = search_edit_->text();
+    results_have_more_ = false;
     if (search_watcher_->isRunning()) {
         search_pending_ = true;
         return;
     }
-    launchSearch(pending_search_query_);
+    launchSearch(pending_search_query_, 0, false);
 }
 
-void MainWindow::launchSearch(const QString& query) {
+void MainWindow::loadMoreResults() {
+    if (!results_have_more_ || search_pending_ || search_watcher_->isRunning()) return;
+    launchSearch(search_edit_->text(), static_cast<std::size_t>(model_->rowCount()), true);
+}
+
+void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
     if (search_watcher_->isRunning()) {
-        pending_search_query_ = query;
-        search_pending_ = true;
+        if (!append) {
+            pending_search_query_ = query;
+            search_pending_ = true;
+        }
         return;
     }
-    search_pending_ = false;
-    pending_search_query_ = query;
+
+    if (!append) {
+        search_pending_ = false;
+        pending_search_query_ = query;
+    }
+
     const auto db_path = db_path_;
-    search_watcher_->setFuture(QtConcurrent::run([db_path, query] {
+    const auto signature = currentSearchSignature();
+    const int item_scope = scope_combo_->currentIndex();
+    const bool match_path = match_path_check_->isChecked();
+
+    search_watcher_->setFuture(QtConcurrent::run([db_path, query, signature, offset, append, item_scope, match_path] {
         SearchOutcome outcome;
         outcome.query = query;
+        outcome.signature = signature;
+        outcome.offset = offset;
+        outcome.append = append;
         try {
             QElapsedTimer timer;
             timer.start();
             SearchEngine engine(toUtf8(db_path));
-            outcome.results = engine.search(toUtf8(query), 1000);
+            auto parsed = parseSearchQuery(toUtf8(query));
+
+            // Explicit type:file/type:dir in the query wins over the toolbar.
+            if (!parsed.files_only && !parsed.directories_only) {
+                if (item_scope == 1) parsed.files_only = true;
+                else if (item_scope == 2) parsed.directories_only = true;
+            }
+            if (match_path) parsed.match_path = true;
+
+            outcome.results = engine.search(parsed, kPageSize + 1, offset);
+            if (outcome.results.size() > kPageSize) {
+                outcome.has_more = true;
+                outcome.results.resize(kPageSize);
+            }
             outcome.elapsed_ms = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
         } catch (const std::exception& e) {
             outcome.error = QString::fromUtf8(e.what());
@@ -332,7 +421,8 @@ void MainWindow::rebuildIndex() {
                 QMessageBox::critical(this, QStringLiteral("索引失败"), message);
             }, Qt::QueuedConnection);
         }
-    }, QStringLiteral("正在准备索引…"));
+    }, name_search_ready_ ? QStringLiteral("正在准备索引…")
+                          : QStringLiteral("正在准备索引；完成后将一次性建立名称加速索引…"));
 }
 
 void MainWindow::editRoots() {

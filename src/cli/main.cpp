@@ -41,9 +41,10 @@ R"(Everything-Lite CLI
 
 Usage:
   everything-lite-cli index <root> [root...]
-  everything-lite-cli search <query> [--limit N]
+  everything-lite-cli search <query> [--limit N] [--offset N]
   everything-lite-cli stats
   everything-lite-cli clear
+  everything-lite-cli optimize-search
   everything-lite-cli benchmark <root> [query...]
 
 Search syntax:
@@ -52,6 +53,9 @@ Search syntax:
   size:>10m            file size; supports b/k/m/g/t and > >= < <=
   modified:7d          modified within the last 7 days (h/d/w)
   type:file | type:dir files or directories only
+  matchpath:            make ordinary terms match the full path
+
+Plain terms match file/folder names only by default.
 
 Examples:
   everything-lite-cli search 'ext:pdf example'
@@ -99,6 +103,7 @@ int main(int argc, char** argv) {
                 return 2;
             }
             std::size_t limit = 50;
+            std::size_t offset = 0;
             std::ostringstream query_builder;
             for (int i = 2; i < argc; ++i) {
                 std::string arg = argv[i];
@@ -106,11 +111,15 @@ int main(int argc, char** argv) {
                     limit = static_cast<std::size_t>(std::stoul(argv[++i]));
                     continue;
                 }
+                if (arg == "--offset" && i + 1 < argc) {
+                    offset = static_cast<std::size_t>(std::stoul(argv[++i]));
+                    continue;
+                }
                 if (query_builder.tellp() > 0) query_builder << ' ';
                 query_builder << arg;
             }
             SearchEngine engine(db_path);
-            const auto results = engine.search(query_builder.str(), limit);
+            const auto results = engine.search(query_builder.str(), limit, offset);
             for (const auto& result : results) {
                 std::cout << (result.file.is_directory ? "[D] " : "[F] ")
                           << result.file.name << "\t"
@@ -126,6 +135,7 @@ int main(int argc, char** argv) {
             db.initialize();
             std::cout << "数据库：" << db_path << "\n";
             std::cout << "索引项：" << db.totalFileCount() << "\n";
+            std::cout << "名称 Trigram 索引：" << (db.nameSearchIndexReady() ? "ready" : "not-ready") << "\n";
             const auto roots = db.roots();
             std::cout << "索引根目录：" << roots.size() << "\n";
             for (const auto& root : roots) std::cout << "  - " << root << "\n";
@@ -137,6 +147,21 @@ int main(int argc, char** argv) {
             db.initialize();
             db.clear();
             std::cout << "索引已清空\n";
+            return 0;
+        }
+
+        if (command == "optimize-search") {
+            Database db(db_path);
+            db.initialize();
+            if (!db.nameSearchIndexAvailable()) {
+                std::cerr << "当前 SQLite 未提供 FTS5 trigram，无法建立名称加速索引\n";
+                return 3;
+            }
+            const auto begin = std::chrono::steady_clock::now();
+            db.rebuildNameSearchIndex();
+            const auto end = std::chrono::steady_clock::now();
+            const auto ms = std::chrono::duration<double, std::milli>(end - begin).count();
+            std::cout << "名称加速索引已建立：" << std::fixed << std::setprecision(1) << ms << " ms\n";
             return 0;
         }
 

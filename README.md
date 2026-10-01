@@ -1,6 +1,8 @@
 # Everything Lite
 
-Everything Lite 是本地文件名与路径搜索工具，当前应用版本为 **0.4.11**。技术栈为 C++17、Qt 6 Widgets、SQLite 和 CMake；macOS 使用 FSEvents 进行文件变化监听，其他平台目前使用 NullWatcher，尚没有实时监听实现。
+Everything Lite 是本地文件名与路径搜索工具，当前应用版本为 **0.4.11**。源码仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
+
+技术栈为 C++17、Qt 6 Widgets、SQLite 和 CMake；macOS 使用 FSEvents 进行文件变化监听，其他平台目前使用 NullWatcher，尚没有实时监听实现。
 
 源码现在直接位于本仓库根目录。继续开发时使用 `src/`、`tests/`、`scripts/` 和 `docs/`，不再复制新的版本目录。原始压缩包、旧版本解压目录和原有构建产物保留在本地 `archive/`，该目录不进入 Git 或 Docker 构建上下文。
 
@@ -44,10 +46,14 @@ git tag --list --sort=version:refname
 git show v0.4.11:CMakeLists.txt
 ```
 
-仓库目前仅在本地，没有配置远程。以后每次完成一个可验证的改动，测试后提交；达到发布条件时再修改版本信息、更新发布说明并打标签。
+以后每次完成一个可验证的改动，测试后本地提交，再同步到 GitHub；达到发布条件时再修改版本信息、更新发布说明并打标签。远程地址可用 `git remote -v` 查看。
 
 ## 文档与后续方向
 
 [工程目录](docs/PROJECT_STRUCTURE.md) 与 [当前架构](docs/ARCHITECTURE.md) 对应 0.4.11；[CHANGELOG](CHANGELOG.md) 和 [发布说明目录](docs/releases/) 保留版本演进；[本次验证记录](docs/history/VERIFICATION.md) 说明整理后的实际检查及局限。历史交付测试记录保留在 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)，不代表本次重新验证的结果。
 
 下一主版本的既有方向是 Indexes / Excludes / Preferences，验收目标见 [路线图](docs/ROADMAP.md)。当前仍需关注短关键词及路径搜索性能、真实大索引上的 GUI 响应、已加载窗口排序，以及 macOS 分发所需的部署与签名；本次整理没有实现这些功能。
+
+## 许可证
+
+当前项目源码采用 [MIT License](LICENSE)，版权署名为 `Copyright (c) 2026 umdreamer`。标准许可证文本参考 [Open Source Initiative — The MIT License](https://opensource.org/license/mit)。外部依赖仍受其各自许可证约束。本次新增许可证不改变 0.4.11 应用版本，也不重写已导入的历史标签。

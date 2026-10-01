@@ -4,13 +4,12 @@
 #include "core/database.h"
 #include "core/index_manager.h"
 #include "core/path_utils.h"
-#include "core/search_engine.h"
-#include "core/search_service.h"
 #include "core/search_trace.h"
 #include "core/search_query.h"
 #include "platform/watcher_factory.h"
 #include "ui/root_settings_dialog.h"
 #include "ui/search_result_model.h"
+#include "ui/search_worker.h"
 
 #include <QAbstractItemView>
 #include <QAction>
@@ -23,7 +22,6 @@
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
-#include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -42,6 +40,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QProcess>
+#include <QPointer>
 #include <QScrollBar>
 #include <QSettings>
 #include <QStringConverter>
@@ -166,6 +165,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     searchTrace("GUI", "MainWindow db=\"" + toUtf8(db_path_) + "\"");
 
     buildUi();
+
     buildMenus();
     loadSettings();
     if (searchTraceEnabled()) {
@@ -180,6 +180,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     rebuildBookmarksMenu();
     updateScopeLabel();
     updateSearchStateLabel();
+
+    // v0.4.11: all SQLite searching lives on a dedicated worker thread.
+    // SearchWorker lazily creates SearchService on that thread, so even the
+    // first-time database/FTS initialization cannot stall the GUI event loop.
+    search_thread_ = new QThread(this);
+    search_worker_ = new SearchWorker(toUtf8(db_path_));
+    search_worker_->moveToThread(search_thread_);
+    connect(search_thread_, &QThread::finished, search_worker_, &QObject::deleteLater);
+    search_thread_->start();
 
     search_timer_ = new QTimer(this);
     search_timer_->setSingleShot(true);
@@ -196,8 +205,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // example when applying a bookmark), which already trigger their own
     // explicit search. Every keystroke restarts the timer.
     connect(search_edit_, &QLineEdit::textEdited, this, [this](const QString&) {
+        // Invalidate any result already being computed as soon as the user
+        // changes the text. The running query is allowed to finish off-thread,
+        // but its stale result will never replace the current view.
+        ++search_request_id_;
         results_have_more_ = false;
         search_timer_->stop();
+        status_label_->setText(QStringLiteral("输入中… 停止输入 %1 ms 后后台搜索").arg(kSearchIdleDelayMs));
         if (!search_ime_composing_) {
             search_timer_->start(kSearchIdleDelayMs);
         }
@@ -217,11 +231,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             else if (index == 1) scope_files_action_->setChecked(true);
             else if (index == 2) scope_folders_action_->setChecked(true);
         }
+        ++search_request_id_;
         updateSearchStateLabel();
         search_timer_->start(kSearchIdleDelayMs);
     });
     connect(match_path_check_, &QCheckBox::toggled, this, [this](bool checked) {
         if (match_path_action_ && match_path_action_->isChecked() != checked) match_path_action_->setChecked(checked);
+        ++search_request_id_;
         updateSearchStateLabel();
         search_timer_->start(kSearchIdleDelayMs);
     });
@@ -240,9 +256,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     filesystem_refresh_timer_->setSingleShot(true);
     filesystem_refresh_timer_->setInterval(1800);
     connect(filesystem_refresh_timer_, &QTimer::timeout, this, [this] {
-        // v0.4.6: search is deliberately synchronous and uses the exact same
-        // SearchService as the CLI. File-system refreshes therefore cannot
-        // cancel, replace, or reinterpret a foreground query.
+        // v0.4.10: filesystem refresh must never compete with typing. Do not
+        // issue an expensive empty query and do not refresh while the user's
+        // debounce timer or IME composition is active.
+        if (search_ime_composing_ || (search_timer_ && search_timer_->isActive())) {
+            filesystem_refresh_timer_->start(1800);
+            return;
+        }
+        if (normalizeGuiQuery(search_edit_->text()).isEmpty()) return;
         runSearch();
     });
 
@@ -270,12 +291,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         }, QStringLiteral("首次升级：正在从现有数据库建立名称加速索引（无需重新扫描磁盘）…"));
     }
 
+    // v0.4.10: do not synchronously run an empty 1001-row search at startup.
+    // That query used to overlap with the user's first keystrokes and was the
+    // main source of the "first input" hitch. The first real query is started
+    // only after the user finishes typing (or presses Enter).
     search_edit_->setFocus();
-    runSearch();
+    model_->setResults({});
+    status_label_->setText(QStringLiteral("%1 个对象    ·    输入关键词开始搜索    ·    %2")
+        .arg(indexed_count_)
+        .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听")));
 }
 
 MainWindow::~MainWindow() {
     if (watcher_) watcher_->stop();
+    if (search_thread_) {
+        search_thread_->quit();
+        search_thread_->wait();
+        search_worker_ = nullptr;
+        search_thread_ = nullptr;
+    }
     if (worker_thread_) {
         worker_thread_->quit();
         worker_thread_->wait();
@@ -296,6 +330,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         const bool composing_now = !input_event->preeditString().isEmpty();
 
         if (composing_now) {
+            ++search_request_id_;
             search_ime_composing_ = true;
             if (search_timer_) search_timer_->stop();
             if (searchTraceEnabled()) {
@@ -689,15 +724,12 @@ void MainWindow::runSearch() {
 }
 
 void MainWindow::loadMoreResults() {
-    if (!results_have_more_) return;
+    if (!results_have_more_ || search_in_flight_) return;
+    ++search_request_id_;
     launchSearch(normalizeGuiQuery(search_edit_->text()), static_cast<std::size_t>(model_->rowCount()), true);
 }
 
 void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
-    // v0.4.9: keep the shared search path simple; input timing is handled before this point
-    // observable from the terminal. In trace mode we also launch the sibling
-    // CLI executable with the exact same DB/query/limit/offset for a true
-    // cross-process comparison.
     const auto raw_query = query;
     const auto normalized_query = normalizeGuiQuery(query);
     const int item_scope = scope_combo_->currentIndex();
@@ -708,7 +740,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     last_search_query_ = normalized_query;
     last_search_utf8_hex_ = utf8Hex(normalized_query);
     last_search_request_id_ = request_id;
-    last_search_execution_mode_ = QStringLiteral("Shared SearchService + terminal trace");
+    last_search_execution_mode_ = QStringLiteral("Background SearchWorker + Shared SearchService");
 
     if (searchTraceEnabled()) {
         std::ostringstream t;
@@ -726,77 +758,106 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
         searchTrace("GUI-SEARCH", t.str());
     }
 
-    try {
-        QElapsedTimer timer;
-        timer.start();
-
-        SearchService service(toUtf8(db_path_));
-        SearchOptions options;
-        if (item_scope == 1) options.scope = SearchItemScope::Files;
-        else if (item_scope == 2) options.scope = SearchItemScope::Folders;
-        else options.scope = SearchItemScope::All;
-        options.match_path = match_path;
-
-        auto results = service.search(toUtf8(normalized_query), effective_limit, offset, options);
-        last_search_raw_result_count_ = static_cast<int>(results.size());
-        searchTrace("GUI-SEARCH", "SearchService returned=" + std::to_string(results.size()));
-        if (searchTraceEnabled()) {
-            const std::size_t preview = std::min<std::size_t>(results.size(), 5);
-            for (std::size_t i = 0; i < preview; ++i) {
-                searchTrace("GUI-SEARCH", "service_result[" + std::to_string(i) + "]=\"" + results[i].file.path + "\"");
-            }
-        }
-
-        // If the shared service reports zero, immediately compare the two
-        // lower-level paths in THIS GUI process. This does not alter the GUI
-        // result; it is diagnostic evidence only.
-        if (searchTraceEnabled() && results.empty() && !normalized_query.isEmpty()) {
-            try {
-                SearchEngine diagnostic_engine(toUtf8(db_path_));
-                auto direct = diagnostic_engine.searchReliable(toUtf8(normalized_query), 20, 0);
-                searchTrace("GUI-DIAG", "same-process direct/instr result_count=" + std::to_string(direct.size()));
-                for (std::size_t i = 0; i < std::min<std::size_t>(direct.size(), 5); ++i) {
-                    searchTrace("GUI-DIAG", "direct_result[" + std::to_string(i) + "]=\"" + direct[i].file.path + "\"");
-                }
-                auto correct = diagnostic_engine.searchCorrect(toUtf8(normalized_query), 20, 0);
-                searchTrace("GUI-DIAG", "same-process correctness-gate result_count=" + std::to_string(correct.size()));
-            } catch (const std::exception& diag_error) {
-                searchTrace("GUI-DIAG", std::string("diagnostic exception: ") + diag_error.what());
-            }
-        }
-
-        results_have_more_ = results.size() > kPageSize;
-        if (results_have_more_) results.resize(kPageSize);
-
-        if (append) model_->appendResults(std::move(results));
-        else model_->setResults(std::move(results));
-
-        last_search_elapsed_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
-        last_search_result_count_ = model_->rowCount();
-        searchTrace("GUI-MODEL", "model_rows_after=" + std::to_string(model_->rowCount())
-            + " have_more=" + std::to_string(results_have_more_ ? 1 : 0)
-            + " elapsed_ms=" + std::to_string(last_search_elapsed_ms_));
-
-        const auto loaded = model_->rowCount();
-        status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    %4 ms    ·    %5%6")
-            .arg(indexed_count_)
-            .arg(loaded)
-            .arg(results_have_more_ ? QStringLiteral("+") : QString{})
-            .arg(last_search_elapsed_ms_, 0, 'f', 1)
-            .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听"))
-            .arg(name_search_ready_ ? QString{} : QStringLiteral("    ·    名称加速索引未就绪")));
-
-        // Run after updating the model so the user can see the GUI result even
-        // if the independent CLI probe takes longer.
-        runCliProbe(db_path_, normalized_query, effective_limit, offset);
-        searchTrace("GUI-SEARCH", "END request_id=" + std::to_string(request_id));
-    } catch (const std::exception& e) {
-        last_search_elapsed_ms_ = 0.0;
-        last_search_raw_result_count_ = 0;
-        last_search_result_count_ = model_->rowCount();
-        searchTrace("GUI-SEARCH", std::string("EXCEPTION: ") + e.what());
-        status_label_->setText(QStringLiteral("搜索错误：%1").arg(QString::fromUtf8(e.what())));
+    // Keep exactly one SQLite query active. If a newer debounce fires while a
+    // previous query is still running, remember only that a newer search is
+    // needed; when the worker finishes, run the latest contents of the box.
+    // This avoids both query pile-ups and cancellation-related correctness bugs.
+    if (search_in_flight_) {
+        search_pending_ = true;
+        status_label_->setText(QStringLiteral("上一查询仍在后台运行，最新关键词已排队… 可继续输入"));
+        searchTrace("GUI-SEARCH", "queued latest request while previous search is in flight");
+        return;
     }
+
+    if (!search_worker_ || !search_thread_ || !search_thread_->isRunning()) {
+        status_label_->setText(QStringLiteral("搜索线程未就绪"));
+        searchTrace("GUI-SEARCH", "background worker is not available");
+        return;
+    }
+
+    SearchOptions options;
+    if (item_scope == 1) options.scope = SearchItemScope::Files;
+    else if (item_scope == 2) options.scope = SearchItemScope::Folders;
+    else options.scope = SearchItemScope::All;
+    options.match_path = match_path;
+
+    search_in_flight_ = true;
+    search_pending_ = false;
+    status_label_->setText(QStringLiteral("正在后台搜索“%1”… 可继续输入")
+        .arg(normalized_query.isEmpty() ? QStringLiteral("全部") : normalized_query));
+
+    const auto query_utf8 = toUtf8(normalized_query);
+    const auto db_path = db_path_;
+    auto* worker = search_worker_;
+    QPointer<MainWindow> window(this);
+
+    QMetaObject::invokeMethod(worker, [window, worker, query_utf8, effective_limit, offset, options,
+                                       request_id, append, normalized_query, db_path] {
+        auto outcome = std::make_shared<BackgroundSearchResult>(
+            worker->search(query_utf8, effective_limit, offset, options));
+        if (!window) return;
+
+        QMetaObject::invokeMethod(window.data(), [window, outcome, request_id, append,
+                                                   normalized_query, effective_limit, offset, db_path] {
+            if (!window) return;
+            auto* self = window.data();
+            self->search_in_flight_ = false;
+
+            // textEdited/scope changes invalidate request_id immediately. Old
+            // queries may finish, but are never allowed to flash stale results.
+            const bool still_current = request_id == self->search_request_id_;
+            if (!still_current) {
+                searchTrace("GUI-SEARCH", "discarded stale background result request_id="
+                    + std::to_string(request_id)
+                    + " current_request_id=" + std::to_string(self->search_request_id_));
+            } else if (!outcome->error.empty()) {
+                self->last_search_elapsed_ms_ = outcome->elapsed_ms;
+                self->last_search_raw_result_count_ = 0;
+                self->last_search_result_count_ = self->model_->rowCount();
+                searchTrace("GUI-SEARCH", "BACKGROUND EXCEPTION: " + outcome->error);
+                self->status_label_->setText(QStringLiteral("搜索错误：%1")
+                    .arg(QString::fromUtf8(outcome->error.c_str())));
+            } else {
+                self->last_search_raw_result_count_ = static_cast<int>(outcome->results.size());
+                searchTrace("GUI-SEARCH", "background SearchService returned="
+                    + std::to_string(outcome->results.size()));
+
+                self->results_have_more_ = outcome->results.size() > kPageSize;
+                if (self->results_have_more_) outcome->results.resize(kPageSize);
+
+                if (append) self->model_->appendResults(std::move(outcome->results));
+                else self->model_->setResults(std::move(outcome->results));
+
+                self->last_search_elapsed_ms_ = outcome->elapsed_ms;
+                self->last_search_result_count_ = self->model_->rowCount();
+                searchTrace("GUI-MODEL", "model_rows_after=" + std::to_string(self->model_->rowCount())
+                    + " have_more=" + std::to_string(self->results_have_more_ ? 1 : 0)
+                    + " elapsed_ms=" + std::to_string(self->last_search_elapsed_ms_));
+
+                const auto loaded = self->model_->rowCount();
+                self->status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    后台查询 %4 ms    ·    %5%6")
+                    .arg(self->indexed_count_)
+                    .arg(loaded)
+                    .arg(self->results_have_more_ ? QStringLiteral("+") : QString{})
+                    .arg(self->last_search_elapsed_ms_, 0, 'f', 1)
+                    .arg(self->watcher_ ? fromUtf8(self->watcher_->backendName()) : QStringLiteral("未监听"))
+                    .arg(self->name_search_ready_ ? QString{} : QStringLiteral("    ·    名称加速索引未就绪")));
+
+                // Search trace mode intentionally keeps the independent CLI
+                // comparison. Normal builds never execute this branch.
+                runCliProbe(db_path, normalized_query, effective_limit, offset);
+                searchTrace("GUI-SEARCH", "END request_id=" + std::to_string(request_id));
+            }
+
+            // If the 800 ms timer fired while the worker was busy, do one new
+            // query using the latest UI state. Multiple edits collapse to this
+            // single latest search instead of building a backlog.
+            if (self->search_pending_) {
+                self->search_pending_ = false;
+                QTimer::singleShot(0, self, [self] { self->runSearch(); });
+            }
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
 }
 
 void MainWindow::cancelActiveSearch() {
@@ -914,7 +975,7 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("模型当前行数：%1").arg(model_ ? model_->rowCount() : 0);
     details << QStringLiteral("查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
     details << QStringLiteral("待处理搜索：否");
-    details << QStringLiteral("搜索执行方式：输入完成后延迟搜索（800 ms）+ IME 组词保护 + GUI 主线程同步（v0.4.9）");
+    details << QStringLiteral("搜索执行方式：输入完成后延迟搜索（800 ms）+ IME 组词保护 + 启动不空查 + SearchService 复用（v0.4.10）");
     details << QStringLiteral("终端 Trace：%1").arg(searchTraceEnabled() ? QStringLiteral("已启用") : QStringLiteral("未启用"));
     details << QStringLiteral("CLI 探针：%1").arg(cliProbePath());
     QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));

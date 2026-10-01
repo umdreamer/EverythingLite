@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21.1)
-project(EverythingLite VERSION 0.4.9 LANGUAGES CXX)
+project(EverythingLite VERSION 0.4.11 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +57,8 @@ if(BUILD_GUI)
             src/ui/main_window.h
             src/ui/search_result_model.cpp
             src/ui/search_result_model.h
+            src/ui/search_worker.cpp
+            src/ui/search_worker.h
             src/ui/root_settings_dialog.cpp
             src/ui/root_settings_dialog.h
         )

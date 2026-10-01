@@ -33,6 +33,7 @@ class QWidget;
 namespace everything_lite {
 
 class SearchResultModel;
+class SearchWorker;
 
 
 struct SearchBookmark {
@@ -61,6 +62,8 @@ private:
     QString db_path_;
     QStringList roots_;
     std::unique_ptr<FileWatcher> watcher_;
+    SearchWorker* search_worker_ = nullptr;
+    QThread* search_thread_ = nullptr;
 
     QLineEdit* search_edit_ = nullptr;
     QComboBox* scope_combo_ = nullptr;
@@ -93,6 +96,8 @@ private:
     QString pending_search_query_;
     bool results_have_more_ = false;
     bool search_ime_composing_ = false;
+    bool search_in_flight_ = false;
+    bool search_pending_ = false;
     bool name_search_available_ = false;
     bool name_search_ready_ = false;
     std::atomic_bool indexing_{false};

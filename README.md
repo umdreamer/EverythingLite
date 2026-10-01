@@ -2,13 +2,21 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.9`（输入完成后搜索 / IME 防提前搜索版）
+当前版本：`0.4.11`（后台搜索 / GUI 无阻塞版）
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
 
 
-## 1. v0.4.9 输入完成后再搜索
+## 1. v0.4.11 后台搜索与 GUI 无阻塞
+
+0.4.11 保留 0.4.8 的 UTF-8 中文搜索修复、0.4.9 的 800 ms/IME 输入保护和 0.4.10 的启动空查询修复。本版把真正的 SQLite 搜索从 GUI 主线程迁移到专用后台线程：停止输入 800 ms 后只提交搜索任务，输入框、鼠标、窗口重绘仍由主线程持续响应。搜索过程中旧结果继续保留，状态栏显示“正在后台搜索…可继续输入”；如果用户又修改关键词，旧查询完成后其结果会因 request ID 过期而直接丢弃，只执行最新关键词，不闪回旧结果。后台线程复用同一个 SearchService，首次数据库/FTS 初始化也在后台完成。
+
+## 2. v0.4.10 首输入卡顿修复
+
+0.4.10 保留 0.4.8 的 UTF-8 查询修复和 0.4.9 的 800 ms/IME 输入保护。本版针对“程序刚启动后第一次输入明显卡顿、后续反而很快”的问题做两项调整：启动时不再同步执行空关键词的 1001 条查询；GUI 在启动阶段只初始化一次 SearchService，后续查询复用同一服务，不再每次重复执行 Database::initialize()。文件系统后台刷新在搜索框为空或用户正在输入/IME 组词时也不会触发前台搜索。
+
+## 3. v0.4.9 输入完成后再搜索
 
 0.4.9 保留 0.4.8 的 UTF-8 查询修复，不修改搜索结果语义。本版只调整 GUI 的搜索触发时机：用户连续输入时不立即查询，每次编辑都会重置 800 ms 单次计时器；只有最后一次输入后连续空闲 800 ms 才执行搜索。中文输入法处于拼音预编辑、候选选择等 IME composition 状态时会完全停止搜索计时，候选词正式提交后才重新计时。
 
@@ -24,7 +32,7 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 
 这样可以避免在输入 `砀例甲`、`示例工匠` 等词时，关键词尚未完成就启动同步数据库查询造成界面卡顿。后续 v0.5 的 Preferences 将把该延迟开放为可配置项。
 
-## 1. v0.4.8 UTF-8 查询解析修复
+## 4. v0.4.8 UTF-8 查询解析修复
 
 0.4.8 根据真实 macOS GUI Trace 找到了 `砀例甲`、`示例工匠` 等关键词漏搜的根因：旧版 `splitQuery()` 对 UTF-8 字符串逐字节调用 `std::isspace()`，GUI locale 会把中文字符内部的 `0xA0` 字节误判为空白。现在查询拆词只识别 ASCII whitespace，因此中文 UTF-8 字节序列不会再被拆坏。
 
@@ -46,7 +54,7 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 
 正常 Trace 应显示 `砀例甲` 为 `terms=1`，完整 hex 为 `e7 a0 80 e4 be 8b e7 94 b2`。详细说明见 `RELEASE_NOTES_0.4.8.md`。
 
-## 2. v0.4.7 Search Trace 诊断版
+## 5. v0.4.7 Search Trace 诊断版
 
 当前真实问题仍然是：部分关键词在 CLI 中有结果，但 GUI 漏搜。0.4.7 不再继续猜测根因，而是增加完整的终端搜索追踪。推荐直接执行：
 
@@ -55,9 +63,9 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 ./scripts/run-macos-debug.sh
 ```
 
-在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.9 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
+在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.11 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
 
-## 1.1 v0.4.6 重点
+## 6. v0.4.6 重点
 
 ### GUI / CLI 搜索结果一致性优先
 

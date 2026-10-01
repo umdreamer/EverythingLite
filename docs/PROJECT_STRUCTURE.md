@@ -59,3 +59,8 @@ docs/
 ```
 
 v0.4 的 UI 菜单实现继续集中在 `src/ui/main_window.*`，避免在 v0.5 Preferences/Exclude 架构尚未确定前过早拆分大量 UI 类。v0.5 开始增加独立 Preferences 与 Exclude rule model。
+
+
+## v0.4.6 新增
+
+- `src/core/search_service.h/.cpp`：应用级唯一搜索服务，CLI 与 GUI 共用。

@@ -2,6 +2,7 @@
 #include "core/index_manager.h"
 #include "core/search_engine.h"
 #include "core/search_query.h"
+#include "core/search_service.h"
 
 #include <atomic>
 #include <cassert>
@@ -78,6 +79,11 @@ int main() {
     assert(containsName(results, "ExampleFile.pdf"));
     assert(!containsName(results, "AlphaReport.txt"));
 
+    // v0.4.6 correctness fix: max_size used to be bound twice, shifting LIMIT/OFFSET.
+    results = engine.search("size:<100b type:file", 20);
+    assert(containsName(results, "data.csv"));
+    assert(!containsName(results, "ExampleFile.pdf"));
+
     results = engine.search("type:dir sample", 20);
     assert(containsName(results, "sample"));
     assert(!containsName(results, "ExampleFile.pdf"));
@@ -100,8 +106,44 @@ int main() {
     results = engine.searchReliable("示例工匠", 20);
     assert(containsName(results, "示例工匠示例文件.pdf"));
 
+    // v0.4.5: the GUI-facing correctness gate must never accept a false zero
+    // from a single search implementation. Chinese keywords are verified by
+    // the direct INSTR path and can fall back to FTS if necessary.
+    results = engine.searchCorrect("砀例甲", 20);
+    assert(containsName(results, "砀例甲示例文档.docx"));
+    assert(containsName(results, "砀例甲资料"));
+
+    results = engine.searchCorrect("示例工匠", 20);
+    assert(containsName(results, "示例工匠示例文件.pdf"));
+
+    // v0.4.6 regression: the application-level SearchService is the single
+    // search entry point shared by CLI and GUI. Its default result set must
+    // exactly match the historical CLI SearchEngine path for keywords that
+    // previously disappeared only in the GUI.
+    SearchService service(db);
+    for (const auto& keyword : {std::string("砀例甲"), std::string("示例工匠"), std::string("sample"), std::string("pdf")}) {
+        const auto cli_reference = engine.search(keyword, 100, 0);
+        const auto shared_result = service.search(keyword, 100, 0);
+        assert(cli_reference.size() == shared_result.size());
+        for (std::size_t i = 0; i < cli_reference.size(); ++i) {
+            assert(cli_reference[i].file.path == shared_result[i].file.path);
+        }
+    }
+
+    SearchOptions files_only;
+    files_only.scope = SearchItemScope::Files;
+    auto service_files = service.search("砀例甲", 100, 0, files_only);
+    assert(containsName(service_files, "砀例甲示例文档.docx"));
+    assert(!containsName(service_files, "砀例甲资料"));
+
+    SearchOptions folders_only;
+    folders_only.scope = SearchItemScope::Folders;
+    auto service_dirs = service.search("砀例甲", 100, 0, folders_only);
+    assert(containsName(service_dirs, "砀例甲资料"));
+    assert(!containsName(service_dirs, "砀例甲示例文档.docx"));
+
     // A cancelled GUI-style query must be interruptible instead of blocking
-    // the next request behind a potentially expensive LIKE scan.
+    // the next request behind a potentially expensive substring scan.
     std::atomic_bool cancelled{true};
     bool cancellation_observed = false;
     try {

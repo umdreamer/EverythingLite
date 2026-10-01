@@ -150,3 +150,8 @@ Search controls / Bookmarks / Export / Finder / Quick Look
 菜单只调用 Service/Core 已存在的能力，不允许 UI 直接修改 SQLite。Bookmarks 与窗口布局属于 UI 状态，使用 QSettings；文件索引仍只由 Database / IndexManager 管理。
 
 macOS 特定行为目前保持在 UI 边缘（`open -R`、`qlmanage -p`），长期会抽象到 platform 层。v0.8 计划将 Quick Look、Open With 和全局快捷键改成正式 macOS 后端。
+
+
+## v0.4.6 搜索入口统一
+
+从 v0.4.6 起增加 `SearchService` 作为 CLI 与 GUI 共用的应用层搜索入口。GUI 不再直接选择 FTS/INSTR/fallback，也不再通过 QtConcurrent cancellation 改变查询生命周期。当前阶段优先保证：同一数据库、同一查询、同一选项时，GUI backend 与 CLI 返回相同结果。

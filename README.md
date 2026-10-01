@@ -2,30 +2,21 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.4`
+当前版本：`0.4.6`
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
-## 1. v0.4.4 重点
+## 1. v0.4.6 重点
 
-### 搜索正确性优先
+### GUI / CLI 搜索结果一致性优先
 
-v0.4.4 根据真实 large项索引反馈调整优先级：先解决“关键词明明存在但 GUI 搜不到”，再做极致性能。
+v0.4.6 针对真实 macOS 数据中“CLI 能找到、GUI 漏搜”的问题重构搜索入口。新增 `SearchService` 作为应用级唯一搜索服务：CLI `search` 和 GUI 默认查询都调用同一个 `SearchService::search()`，从源头避免两套搜索策略。
 
-- 中文/非 ASCII 普通查询默认走 `Reliable LIKE`，直接查询 canonical `files` 表，不依赖 FTS5 trigram。
-- ASCII 查询继续使用快速索引；若快速路径返回 0，会自动执行一次 Reliable LIKE 复核。
-- 可靠路径不安装 SQLite progress handler，减少 GUI 运行时与 CLI 的差异。
-- CLI 新增 `search-safe`，可直接验证 GUI 使用的正确性优先路径。
-- 自动测试新增 `砀例甲`、`示例工匠`、`path:砀例甲`。
+为排除 Qt 异步调度、查询取消和 pending request 对结果的影响，v0.4.6 暂时把 GUI 搜索改为主线程同步执行。少数慢查询可能暂时让窗口短暂停顿，但当前验收标准是“该找到的必须找到”。等 GUI/CLI 结果在真实 large项数据库上稳定一致后，再恢复异步性能层。
 
-例如：
+本版同时修复 `size:<...` / `size:<=...` 查询中 `max_size` 参数被重复绑定的问题。
 
-```bash
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-safe '示例工匠' --limit 2000
-```
-
-完整说明见 `RELEASE_NOTES_0.4.4.md`。v0.4.0 已完成的 Everything 风格菜单、Quick Look、Finder Reveal、多选、分页和 CSV 导出均保留。
+完整说明见 `RELEASE_NOTES_0.4.6.md`。
 
 ## 2. 安装与构建（macOS）
 
@@ -68,7 +59,7 @@ macOS 原生菜单栏
 - Command+,：Preferences
 - Command+Q：退出
 - Space：Quick Look
-- Return：打开当前项
+- Return：搜索框有焦点时强制重新查询当前关键词；结果表有焦点时打开当前项
 
 详见 `docs/UI_GUIDE.md`。
 
@@ -135,7 +126,7 @@ GUI 不把所有匹配项一次性复制到 Qt Model。每次加载 1000 条，�
 
 ## 6. 名称搜索性能
 
-v0.4.4 起，GUI 对中文/非 ASCII 关键词优先使用可靠 LIKE 查询，先保证不漏搜；ASCII 普通查询仍可使用 SQLite FTS5 trigram，并在 0 结果时自动回退 LIKE。性能优化安排在后续版本。
+v0.4.6 起，GUI 与 CLI `search` 共用唯一 `SearchService`。GUI 不再自己选择中文/英文、FTS/INSTR 或 fallback。当前 GUI 搜索暂时同步执行，以搜索结果一致性为第一目标；性能优化继续后置。
 
 真实 v0.2 基线（约 [private benchmark removed] 项）：
 
@@ -167,7 +158,9 @@ SQLite files + FTS5 trigram
   ↓
 SearchEngine
   ↓
-Qt Async UI
+SearchService（GUI / CLI 共用）
+  ↓
+Qt GUI（v0.4.6 暂时同步）
 ```
 
 首次设置一个或多个索引目录后执行 Tools → Rebuild Index。之后新增、删除、重命名和移动由 FSEvents 驱动增量更新；FSEvents 报告丢事件时执行对应 root 的完整重扫，保证最终一致性。
@@ -211,6 +204,8 @@ v0.4 Bookmarks 保存：
 ## 11. 文档导航
 
 - `RELEASE_NOTES_0.4.4.md`：v0.4.4 正确性优先修复说明
+- `RELEASE_NOTES_0.4.5.md`：v0.4.5 零结果双重确认修复说明
+- `RELEASE_NOTES_0.4.6.md`：v0.4.6 GUI / CLI 搜索一致性修复说明
 - `RELEASE_NOTES_0.4.0.md`：v0.4 主版本说明
 - `docs/ROADMAP.md`：v0.4 → v1.0 完整路线与验收目标
 - `docs/UI_GUIDE.md`：v0.4 菜单、主窗口和 Mac 快捷键

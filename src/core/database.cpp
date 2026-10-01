@@ -188,8 +188,8 @@ std::vector<SearchResult> runSearch(sqlite3* db,
                                     std::size_t offset,
                                     bool fts_ready,
                                     const std::atomic_bool* cancel,
-                                    bool force_like = false) {
-    const bool use_fts = !force_like && canUseNameFts(query, fts_ready);
+                                    bool force_direct = false) {
+    const bool use_fts = !force_direct && canUseNameFts(query, fts_ready);
 
     std::ostringstream sql;
     if (use_fts) {
@@ -206,13 +206,21 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         for (std::size_t i = 0; i < query.terms.size(); ++i) {
             // Everything-compatible default: plain terms match the basename only.
             // Full-path matching is opt-in via Match Path.
+            // Correctness path uses instr() instead of LIKE. Both search_name
+            // and query terms are already ASCII-folded, while non-ASCII UTF-8
+            // bytes are preserved exactly. This avoids wildcard/collation/LIKE
+            // behaviour becoming a source of false negatives.
             where.emplace_back(query.match_path
-                ? "files.search_path LIKE ? ESCAPE '\\'"
-                : "files.search_name LIKE ? ESCAPE '\\'");
+                ? "instr(files.search_path, ?) > 0"
+                : "instr(files.search_name, ?) > 0");
         }
     }
     if (query.extension) where.emplace_back("files.ext = ? COLLATE NOCASE");
-    if (query.path_term) where.emplace_back("files.search_path LIKE ? ESCAPE '\\'");
+    if (query.path_term) {
+        where.emplace_back(force_direct
+            ? "instr(files.search_path, ?) > 0"
+            : "files.search_path LIKE ? ESCAPE '\\'");
+    }
     if (query.min_size) where.emplace_back("files.size >= ?");
     if (query.max_size) where.emplace_back("files.size <= ?");
     if (query.modified_after) where.emplace_back("files.modified_time >= ?");
@@ -240,12 +248,14 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         bindText(stmt.get(), bind_index++, makeFtsExpression(query));
     } else {
         for (const auto& token : query.terms) {
-            const auto escaped = escapeLike(token);
-            bindText(stmt.get(), bind_index++, "%" + escaped + "%");
+            bindText(stmt.get(), bind_index++, token);
         }
     }
     if (query.extension) bindText(stmt.get(), bind_index++, *query.extension);
-    if (query.path_term) bindText(stmt.get(), bind_index++, "%" + escapeLike(*query.path_term) + "%");
+    if (query.path_term) {
+        if (force_direct) bindText(stmt.get(), bind_index++, *query.path_term);
+        else bindText(stmt.get(), bind_index++, "%" + escapeLike(*query.path_term) + "%");
+    }
     if (query.min_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.min_size));
     if (query.max_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.max_size));
     if (query.modified_after) sqlite3_bind_int64(stmt.get(), bind_index++, *query.modified_after);
@@ -467,9 +477,9 @@ std::vector<SearchResult> Database::searchReliable(const SearchQuery& query,
                                                    std::size_t offset) const {
     SqliteConnection conn(db_path_);
     // Deliberately bypass the optional FTS index. The canonical `files` table
-    // is the source of truth and therefore defines correctness. No progress
-    // handler is installed on this path so the GUI and CLI execute identical
-    // SQL semantics.
+    // is the source of truth. v0.4.5 uses SQLite instr() for exact substring
+    // matching instead of LIKE so correctness does not depend on LIKE
+    // wildcard/collation behaviour. No progress handler is installed here.
     return runSearch(conn.get(), query, limit, offset, false, nullptr, true);
 }
 

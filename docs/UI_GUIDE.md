@@ -44,3 +44,8 @@ v0.4 只展示已经真实实现的搜索开关：Match Path、All、Files、Fol
 - Return：打开当前项目
 
 Qt 在 Apple 平台会把标准 Ctrl 快捷键映射为 Command，因此源码保持跨平台写法。
+
+
+## v0.4.6 搜索执行说明
+
+当前为了定位并消除 GUI 漏搜，搜索在 GUI 主线程同步执行，并直接调用与 CLI 相同的 SearchService。少数慢查询期间窗口可能短暂停顿，这是 v0.4.6 有意采用的正确性优先取舍。

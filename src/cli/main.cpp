@@ -2,6 +2,7 @@
 #include "core/database.h"
 #include "core/index_manager.h"
 #include "core/search_engine.h"
+#include "core/search_service.h"
 
 #include <chrono>
 #include <filesystem>
@@ -37,6 +38,7 @@ Usage:
   everything-lite-cli [--db PATH] index <root> [root...]
   everything-lite-cli [--db PATH] search <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] search-safe <query> [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] search-correct <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] stats
   everything-lite-cli [--db PATH] clear
   everything-lite-cli [--db PATH] optimize-search
@@ -113,7 +115,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        if (command == "search" || command == "search-safe") {
+        if (command == "search" || command == "search-safe" || command == "search-correct") {
             if (args.size() < 2) {
                 std::cerr << "search requires a query\n";
                 return 2;
@@ -134,10 +136,19 @@ int main(int argc, char** argv) {
                 if (query_builder.tellp() > 0) query_builder << ' ';
                 query_builder << arg;
             }
-            SearchEngine engine(db_path);
-            const auto results = command == "search-safe"
-                ? engine.searchReliable(query_builder.str(), limit, offset)
-                : engine.search(query_builder.str(), limit, offset);
+            std::vector<SearchResult> results;
+            if (command == "search") {
+                // v0.4.6: CLI and GUI share the exact same application-level
+                // SearchService. This command is the reference behavior.
+                SearchService service(db_path);
+                results = service.search(query_builder.str(), limit, offset);
+            } else {
+                // Keep the older diagnostic paths available for comparison.
+                SearchEngine engine(db_path);
+                results = command == "search-safe"
+                    ? engine.searchReliable(query_builder.str(), limit, offset)
+                    : engine.searchCorrect(query_builder.str(), limit, offset);
+            }
             for (const auto& result : results) {
                 std::cout << (result.file.is_directory ? "[D] " : "[F] ")
                           << result.file.name << "\t"

@@ -27,27 +27,11 @@ class QTableView;
 class QThread;
 class QTimer;
 class QWidget;
-template <typename T> class QFutureWatcher;
 
 namespace everything_lite {
 
 class SearchResultModel;
 
-struct SearchOutcome {
-    std::vector<SearchResult> results;
-    QString query;
-    QString signature;
-    QString error;
-    QString query_utf8_hex;
-    QString execution_mode;
-    double elapsed_ms = 0.0;
-    std::uint64_t request_id = 0;
-    int raw_result_count = 0;
-    bool cancelled = false;
-    std::size_t offset = 0;
-    bool append = false;
-    bool has_more = false;
-};
 
 struct SearchBookmark {
     QString name;
@@ -86,7 +70,6 @@ private:
     QTimer* event_timer_ = nullptr;
     QTimer* filesystem_refresh_timer_ = nullptr;
     QThread* worker_thread_ = nullptr;
-    QFutureWatcher<SearchOutcome>* search_watcher_ = nullptr;
 
     QMenu* bookmarks_menu_ = nullptr;
     QAction* match_path_action_ = nullptr;
@@ -104,7 +87,6 @@ private:
     QSet<QString> pending_paths_;
     QSet<QString> pending_rescan_roots_;
     QString pending_search_query_;
-    bool search_pending_ = false;
     bool results_have_more_ = false;
     bool name_search_available_ = false;
     bool name_search_ready_ = false;
@@ -112,7 +94,6 @@ private:
     std::uint64_t indexed_count_ = 0;
     std::uint64_t name_search_count_ = 0;
     std::uint64_t search_request_id_ = 0;
-    std::shared_ptr<std::atomic_bool> active_search_cancel_;
     QString last_search_query_;
     double last_search_elapsed_ms_ = 0.0;
     int last_search_result_count_ = 0;

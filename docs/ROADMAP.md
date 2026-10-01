@@ -1,7 +1,16 @@
 # Everything Lite 产品与技术路线图
 
-> 当前状态（v0.4.1）：v0.4 Everything 风格主界面已完成；v0.4.1 专门修复 GUI 异步搜索、中文输入期间的旧查询阻塞，以及 GUI/CLI 数据库路径诊断。下一主版本仍按计划进入 v0.5 Indexes + Excludes + Preferences。
+> 当前状态（v0.4.6）：搜索正确性进入强制一致性阶段。GUI 与 CLI 共用唯一 SearchService，GUI 暂时使用同步查询以排除异步/cancellation 引入的漏搜。真实数据验证通过后，再进入 v0.5 Indexes + Excludes + Preferences。
 
+### Correctness Gate（自 v0.4.6 起）
+
+任何性能优化都必须先通过结果一致性验证：
+
+```text
+GUI backend result == CLI SearchService result
+```
+
+重点回归词包括“砀例甲”“示例工匠”“深度工匠”“人工智能”“软件工程”“示例乙”“示例丙”以及常用 ASCII 查询。只要性能方案造成已有正确结果消失，就不能进入主分支。
 
 版本基线：v0.4.0  
 目标平台：macOS 优先，Windows / Linux 保持跨平台架构  
@@ -267,3 +276,8 @@ Core / Search / Database 保持共用：
 ## v0.4.4 Correctness Gate（2026-09）
 
 在进入 v0.5 前增加一条强制验收原则：搜索正确性高于性能。真实索引中出现过“砀例甲”“示例工匠”等中文关键词 CLI 可命中而 GUI 快速路径返回 0 的情况。因此 v0.4.4 对非 ASCII 查询使用可靠 LIKE 路径；后续性能优化不得以重新引入可复现漏搜为代价。v0.7 的性能工作需要同时建立中文、英文、路径、文件/目录的正确性回归集。
+
+
+## v0.4.5 Correctness Gate II（2026-09）
+
+真实使用进一步发现：一个关键词如果走到某条持续返回 0 的搜索分支，之后每次同词查询都会稳定复现；代码中并不存在零结果缓存。因此 v0.4.5 将“0 结果”本身视为需要验证的结论。GUI 采用 INSTR 与 FTS 两条独立路径交叉确认，任何一条能找到结果都不得显示 0。后续 v0.7 性能优化必须保持此 Correctness Gate，可将快速引擎替换，但不能取消可靠参考路径与结果一致性回归。

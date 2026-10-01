@@ -104,10 +104,39 @@ ext:pdf size:>10m modified:30d type:file example
 
 ## v0.4.4：正确性优先搜索
 
-GUI 对包含非 ASCII 字符的查询（如 `砀例甲`、`示例工匠`）默认使用 canonical `files` 表的 LIKE 子串匹配，暂时绕过 FTS5 trigram，以避免加速索引路径导致漏搜。ASCII 查询仍可使用快速路径，但 0 结果会自动用 LIKE 复核。
+v0.4.4 曾使用 LIKE 作为中文可靠路径；v0.4.5 已进一步改为 `instr(search_name, ?)>0` 的直接子串匹配，并引入双路径确认。
 
 CLI 可显式验证可靠路径：
 
 ```bash
 ./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
 ```
+
+
+## v0.4.5：零结果双重确认
+
+GUI 使用 `searchCorrect`：
+
+- 中文/非 ASCII：先 INSTR，0 时再 FTS5；
+- ASCII：先快速搜索，0 时再 INSTR；
+- 两条路径都返回 0，才显示无结果。
+
+显式验证：
+
+```bash
+./build-macos/everything-lite-cli search-correct '砀例甲' --limit 2000
+./build-macos/everything-lite-cli search-correct '示例工匠' --limit 2000
+```
+
+搜索框文字不变时可直接按 Enter 强制重新执行当前查询。
+
+## v0.4.6：GUI / CLI 共用 SearchService
+
+从 v0.4.6 起，GUI 默认搜索与 CLI `search` 共用同一个 `SearchService`，不再在 GUI 内部选择 `searchCorrect`、INSTR/FTS 顺序或 cancellation。当前阶段以结果一致性为最高优先级。
+
+```bash
+./build-macos/everything-lite-cli search '砀例甲' --limit 1001
+./build-macos/everything-lite-cli search '示例工匠' --limit 1001
+```
+
+GUI 默认“全部 + 不匹配路径”使用与上述命令相同的核心搜索入口。`search-safe` / `search-correct` 暂时保留为诊断命令，不是 GUI 默认执行路径。

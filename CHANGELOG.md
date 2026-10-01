@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.6
+
+- 新增应用级唯一 `SearchService`，CLI `search` 与 GUI 共用同一个搜索入口。
+- GUI 暂时改为主线程同步搜索，移除 QtConcurrent/cancellation/pending-query 对搜索语义的干预。
+- GUI 不再自行选择 FTS/INSTR/fallback；默认查询严格复用 CLI reference 路径。
+- All / Files / Folders 与 Match Path 统一在 SearchService 中应用。
+- 新增 GUI/CLI backend 一致性回归测试，覆盖“砀例甲”“示例工匠”“sample”“pdf”。
+- 修复 `max_size` 重复绑定导致 `size:<...` 查询 LIMIT/OFFSET 错位的问题。
+- 性能优化暂时后置，优先保证不漏搜。
+
+## 0.4.5
+
+- 修复“某个关键词一旦返回 0，之后始终为空”的确定性搜索路径问题；工程不存在零结果缓存。
+- 可靠搜索由 `LIKE` 改为 `instr(search_name, ?)>0` / `instr(search_path, ?)>0`。
+- 新增 `SearchEngine::searchCorrect`：零结果必须经过 INSTR 与 FTS 两条独立路径确认。
+- GUI 统一使用 `searchCorrect`，避免单一算法的 false zero 成为最终结果。
+- 搜索框按 Enter 可在文本不变时强制重试。
+- CLI 新增 `search-correct`。
+- 新增/保留 `砀例甲`、`示例工匠`、中文路径回归测试。
+
 ## 0.4.4
 
 - 搜索策略改为正确性优先。

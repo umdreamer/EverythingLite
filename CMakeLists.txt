@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21.1)
-project(EverythingLite VERSION 0.4.4 LANGUAGES CXX)
+project(EverythingLite VERSION 0.4.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +27,7 @@ add_library(everything_core
     src/core/scanner.cpp
     src/core/database.cpp
     src/core/search_engine.cpp
+    src/core/search_service.cpp
     src/core/search_query.cpp
     src/core/index_manager.cpp
     src/platform/watcher_factory.cpp
@@ -46,7 +47,7 @@ add_executable(everything-lite-cli src/cli/main.cpp)
 target_link_libraries(everything-lite-cli PRIVATE everything_core)
 
 if(BUILD_GUI)
-    find_package(Qt6 QUIET COMPONENTS Widgets Concurrent)
+    find_package(Qt6 QUIET COMPONENTS Widgets)
     if(Qt6_FOUND)
         set(CMAKE_AUTOMOC ON)
         add_executable(everything-lite
@@ -58,7 +59,7 @@ if(BUILD_GUI)
             src/ui/root_settings_dialog.cpp
             src/ui/root_settings_dialog.h
         )
-        target_link_libraries(everything-lite PRIVATE everything_core Qt6::Widgets Qt6::Concurrent)
+        target_link_libraries(everything-lite PRIVATE everything_core Qt6::Widgets)
 
         if(APPLE)
             set_target_properties(everything-lite PROPERTIES
@@ -70,7 +71,7 @@ if(BUILD_GUI)
             )
         endif()
     else()
-        message(WARNING "Qt6 Widgets/Concurrent not found: GUI target skipped. Install Qt6/qtbase and reconfigure to build everything-lite.")
+        message(WARNING "Qt6 Widgets not found: GUI target skipped. Install Qt6/qtbase and reconfigure to build everything-lite.")
     endif()
 endif()
 

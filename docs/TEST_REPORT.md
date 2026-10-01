@@ -52,3 +52,20 @@ e7 a0 80 e4 be 8b e7 94 b2
 ```
 
 如果“核心返回”大于 0 但模型行数为 0，则问题位于 Qt Model/View 更新；如果核心返回为 0，则应继续检查 GUI 实际查询字节和 UI 过滤状态。
+
+
+## v0.4.5 回归
+
+- `searchReliable` 改为 SQLite `instr()` 子串匹配。
+- `searchCorrect("砀例甲")` 必须命中 `砀例甲示例文档.docx` 与 `砀例甲资料`。
+- `searchCorrect("示例工匠")` 必须命中 `示例工匠示例文件.pdf`。
+- Core/CLI CTest 需 100% 通过。
+
+## v0.4.6 搜索一致性回归
+
+- Core / CLI clean build：通过。
+- CTest：100% 通过。
+- 新增 SearchService 与 SearchEngine reference 逐项路径一致性测试：`砀例甲`、`示例工匠`、`sample`、`pdf`。
+- 新增 SearchService Files / Folders scope 测试。
+- 新增 `size:<100b` 参数绑定回归测试。
+- 当前执行环境无 Qt6 Widgets/macOS SDK，因此 GUI 最终编译和真实 large项数据库验证仍由 macOS 实机完成。

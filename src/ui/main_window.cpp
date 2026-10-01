@@ -5,6 +5,7 @@
 #include "core/index_manager.h"
 #include "core/path_utils.h"
 #include "core/search_engine.h"
+#include "core/search_service.h"
 #include "core/search_query.h"
 #include "platform/watcher_factory.h"
 #include "ui/root_settings_dialog.h"
@@ -26,7 +27,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
-#include <QFutureWatcher>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -52,7 +52,6 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <QtConcurrent>
 
 #include <algorithm>
 #include <exception>
@@ -85,13 +84,6 @@ QString normalizeGuiQuery(QString value) {
 
 QString utf8Hex(const QString& value) {
     return QString::fromLatin1(value.toUtf8().toHex(' '));
-}
-
-bool containsNonAscii(const QString& value) {
-    for (const QChar ch : value) {
-        if (ch.unicode() > 0x7f) return true;
-    }
-    return false;
 }
 
 QStringList defaultRoots() {
@@ -140,9 +132,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         // LIKE scan. Give IME/fast typing a little longer to settle, and stop
         // an obsolete scan immediately instead of making the final query wait.
         search_timer_->setInterval(text.trimmed().size() > 0 && text.trimmed().size() < 3 ? 240 : 100);
-        cancelActiveSearch();
         results_have_more_ = false;
         search_timer_->start();
+    });
+    connect(search_edit_, &QLineEdit::returnPressed, this, [this] {
+        // v0.4.5: allow an explicit retry even when the text has not changed.
+        // A previous zero-result answer must never make the same keyword
+        // impossible to query again without editing the text.
+        search_timer_->stop();
+        runSearch();
     });
     connect(scope_combo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (scope_action_group_) {
@@ -173,54 +171,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     filesystem_refresh_timer_->setSingleShot(true);
     filesystem_refresh_timer_->setInterval(1800);
     connect(filesystem_refresh_timer_, &QTimer::timeout, this, [this] {
-        if (search_watcher_->isRunning() || search_pending_) {
-            filesystem_refresh_timer_->start();
-            return;
-        }
+        // v0.4.6: search is deliberately synchronous and uses the exact same
+        // SearchService as the CLI. File-system refreshes therefore cannot
+        // cancel, replace, or reinterpret a foreground query.
         runSearch();
-    });
-
-    search_watcher_ = new QFutureWatcher<SearchOutcome>(this);
-    connect(search_watcher_, &QFutureWatcher<SearchOutcome>::finished, this, [this] {
-        auto outcome = search_watcher_->result();
-        active_search_cancel_.reset();
-
-        const bool latest_request = outcome.request_id == search_request_id_;
-        // request_id is the single source of truth. v0.4.2 also compared a
-        // QString signature after the query returned; that extra gate could
-        // discard a valid IME/Unicode result even though the core had already
-        // returned the correct rows.
-        if (!outcome.cancelled && !outcome.error.isEmpty()) {
-            if (latest_request) status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
-        } else if (!outcome.cancelled && latest_request && !search_pending_) {
-            if (outcome.append) model_->appendResults(std::move(outcome.results));
-            else model_->setResults(std::move(outcome.results));
-            results_have_more_ = outcome.has_more;
-            last_search_query_ = outcome.query;
-            last_search_elapsed_ms_ = outcome.elapsed_ms;
-            last_search_result_count_ = model_->rowCount();
-            last_search_raw_result_count_ = outcome.raw_result_count;
-            last_search_utf8_hex_ = outcome.query_utf8_hex;
-            last_search_execution_mode_ = outcome.execution_mode;
-            last_search_request_id_ = outcome.request_id;
-            const auto loaded = model_->rowCount();
-            status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    %4 ms    ·    %5%6")
-                .arg(indexed_count_)
-                .arg(loaded)
-                .arg(results_have_more_ ? QStringLiteral("+") : QString{})
-                .arg(outcome.elapsed_ms, 0, 'f', 1)
-                .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听"))
-                .arg(name_search_ready_ ? QString{} : QStringLiteral("    ·    名称加速索引未就绪")));
-        }
-
-        // Only explicitly queued searches are launched here. In v0.4 a mere
-        // signature mismatch immediately launched whatever text happened to be
-        // in the editor, bypassing debounce/IME settling. That could start a
-        // slow 1-2 character LIKE scan and block the final 3+ character query.
-        if (search_pending_) {
-            search_pending_ = false;
-            launchSearch(search_edit_->text(), 0, false);
-        }
     });
 
     connect(table_, &QTableView::doubleClicked, this, [this] { openCurrent(); });
@@ -253,8 +207,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
 MainWindow::~MainWindow() {
     if (watcher_) watcher_->stop();
-    cancelActiveSearch();
-    if (search_watcher_ && search_watcher_->isRunning()) search_watcher_->waitForFinished();
     if (worker_thread_) {
         worker_thread_->quit();
         worker_thread_->wait();
@@ -634,116 +586,71 @@ void MainWindow::runSearch() {
     pending_search_query_ = normalizeGuiQuery(search_edit_->text());
     results_have_more_ = false;
     ++search_request_id_;
-    if (search_watcher_->isRunning()) {
-        search_pending_ = true;
-        cancelActiveSearch();
-        return;
-    }
     launchSearch(pending_search_query_, 0, false);
 }
 
 void MainWindow::loadMoreResults() {
-    if (!results_have_more_ || search_pending_ || search_watcher_->isRunning()) return;
+    if (!results_have_more_) return;
     launchSearch(normalizeGuiQuery(search_edit_->text()), static_cast<std::size_t>(model_->rowCount()), true);
 }
 
 void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
-    if (search_watcher_->isRunning()) {
-        if (!append) {
-            pending_search_query_ = query;
-            search_pending_ = true;
-            cancelActiveSearch();
-        }
-        return;
-    }
-
-    if (!append) {
-        search_pending_ = false;
-        pending_search_query_ = query;
-    }
-
+    // v0.4.6 correctness-first design:
+    // GUI search is intentionally synchronous and delegates all search
+    // semantics to the same SearchService used by the CLI `search` command.
+    // There is no GUI-only FTS/INSTR decision, cancellation token, pending
+    // request queue, or secondary result filter in this path.
     const auto normalized_query = normalizeGuiQuery(query);
-    const auto db_path = db_path_;
-    const auto signature = currentSearchSignature();
     const int item_scope = scope_combo_->currentIndex();
     const bool match_path = match_path_check_->isChecked();
     const auto request_id = search_request_id_;
-    auto cancel = std::make_shared<std::atomic_bool>(false);
-    active_search_cancel_ = cancel;
 
-    search_watcher_->setFuture(QtConcurrent::run([db_path, normalized_query, signature, offset, append, item_scope, match_path, request_id, cancel] {
-        SearchOutcome outcome;
-        outcome.query = normalized_query;
-        outcome.query_utf8_hex = utf8Hex(normalized_query);
-        outcome.signature = signature;
-        outcome.offset = offset;
-        outcome.append = append;
-        outcome.request_id = request_id;
-        try {
-            QElapsedTimer timer;
-            timer.start();
-            SearchEngine engine(toUtf8(db_path));
+    last_search_query_ = normalized_query;
+    last_search_utf8_hex_ = utf8Hex(normalized_query);
+    last_search_request_id_ = request_id;
+    last_search_execution_mode_ = QStringLiteral("Shared SearchService (same as CLI)");
 
-            // v0.4.4 correctness-first policy:
-            // - Any non-ASCII query (Chinese/Japanese/Korean/accented text, etc.)
-            //   uses the canonical files table + LIKE path. We deliberately do
-            //   not depend on FTS5/trigram for correctness here.
-            // - ASCII queries may use the accelerated path, but a zero-result
-            //   answer is verified once with the reliable LIKE path.
-            // Performance tuning is intentionally secondary until false
-            // negatives are eliminated on the user's real 2.6M-item index.
-            const bool reliability_first = containsNonAscii(normalized_query);
+    try {
+        QElapsedTimer timer;
+        timer.start();
 
-            if (item_scope == 0 && !match_path) {
-                if (reliability_first) {
-                    outcome.execution_mode = QStringLiteral("Reliable LIKE (non-ASCII)");
-                    outcome.results = engine.searchReliable(toUtf8(normalized_query), kPageSize + 1, offset);
-                } else {
-                    outcome.execution_mode = QStringLiteral("Fast search + reliable zero-result fallback");
-                    outcome.results = engine.search(toUtf8(normalized_query), kPageSize + 1, offset, cancel.get());
-                    if (outcome.results.empty() && !normalized_query.isEmpty() && !cancel->load(std::memory_order_relaxed)) {
-                        outcome.results = engine.searchReliable(toUtf8(normalized_query), kPageSize + 1, offset);
-                        outcome.execution_mode += QStringLiteral(" -> LIKE fallback");
-                    }
-                }
-            } else {
-                auto parsed = parseSearchQuery(toUtf8(normalized_query));
+        SearchService service(toUtf8(db_path_));
+        SearchOptions options;
+        if (item_scope == 1) options.scope = SearchItemScope::Files;
+        else if (item_scope == 2) options.scope = SearchItemScope::Folders;
+        else options.scope = SearchItemScope::All;
+        options.match_path = match_path;
 
-                // Explicit type:file/type:dir in the query wins over the UI filter.
-                if (!parsed.files_only && !parsed.directories_only) {
-                    if (item_scope == 1) parsed.files_only = true;
-                    else if (item_scope == 2) parsed.directories_only = true;
-                }
-                if (match_path) parsed.match_path = true;
+        auto results = service.search(toUtf8(normalized_query), kPageSize + 1, offset, options);
+        last_search_raw_result_count_ = static_cast<int>(results.size());
+        results_have_more_ = results.size() > kPageSize;
+        if (results_have_more_) results.resize(kPageSize);
 
-                if (reliability_first) {
-                    outcome.execution_mode = QStringLiteral("Reliable LIKE + UI filters (non-ASCII)");
-                    outcome.results = engine.searchReliable(parsed, kPageSize + 1, offset);
-                } else {
-                    outcome.execution_mode = QStringLiteral("Fast search + UI filters + reliable zero-result fallback");
-                    outcome.results = engine.search(parsed, kPageSize + 1, offset, cancel.get());
-                    if (outcome.results.empty() && !normalized_query.isEmpty() && !cancel->load(std::memory_order_relaxed)) {
-                        outcome.results = engine.searchReliable(parsed, kPageSize + 1, offset);
-                        outcome.execution_mode += QStringLiteral(" -> LIKE fallback");
-                    }
-                }
-            }
-            outcome.raw_result_count = static_cast<int>(outcome.results.size());
-            if (outcome.results.size() > kPageSize) {
-                outcome.has_more = true;
-                outcome.results.resize(kPageSize);
-            }
-            outcome.elapsed_ms = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
-        } catch (const std::exception& e) {
-            if (cancel->load(std::memory_order_relaxed)) outcome.cancelled = true;
-            else outcome.error = QString::fromUtf8(e.what());
-        }
-        return outcome;
-    }));
+        if (append) model_->appendResults(std::move(results));
+        else model_->setResults(std::move(results));
+
+        last_search_elapsed_ms_ = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
+        last_search_result_count_ = model_->rowCount();
+
+        const auto loaded = model_->rowCount();
+        status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    %4 ms    ·    %5%6")
+            .arg(indexed_count_)
+            .arg(loaded)
+            .arg(results_have_more_ ? QStringLiteral("+") : QString{})
+            .arg(last_search_elapsed_ms_, 0, 'f', 1)
+            .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听"))
+            .arg(name_search_ready_ ? QString{} : QStringLiteral("    ·    名称加速索引未就绪")));
+    } catch (const std::exception& e) {
+        last_search_elapsed_ms_ = 0.0;
+        last_search_raw_result_count_ = 0;
+        last_search_result_count_ = model_->rowCount();
+        status_label_->setText(QStringLiteral("搜索错误：%1").arg(QString::fromUtf8(e.what())));
+    }
 }
 
 void MainWindow::cancelActiveSearch() {
-    if (active_search_cancel_) active_search_cancel_->store(true, std::memory_order_relaxed);
+    // Kept as a no-op for source compatibility with older 0.4.x code paths.
+    // v0.4.6 does not cancel foreground searches.
 }
 
 void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish) {
@@ -855,8 +762,8 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("核心返回（含探测项）：%1").arg(last_search_raw_result_count_);
     details << QStringLiteral("模型当前行数：%1").arg(model_ ? model_->rowCount() : 0);
     details << QStringLiteral("查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
-    details << QStringLiteral("待处理搜索：%1").arg(search_pending_ ? QStringLiteral("是") : QStringLiteral("否"));
-    details << QStringLiteral("搜索线程运行：%1").arg(search_watcher_ && search_watcher_->isRunning() ? QStringLiteral("是") : QStringLiteral("否"));
+    details << QStringLiteral("待处理搜索：否");
+    details << QStringLiteral("搜索执行方式：GUI 主线程同步（v0.4.6 正确性模式）");
     QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));
 }
 

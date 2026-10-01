@@ -1,5 +1,6 @@
 #include "ui/main_window.h"
 
+#include "core/app_paths.h"
 #include "core/database.h"
 #include "core/index_manager.h"
 #include "core/path_utils.h"
@@ -95,9 +96,10 @@ QString bookmarkDefaultName(const QString& query) {
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    const auto data_dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    QDir().mkpath(data_dir);
-    db_path_ = QDir(data_dir).filePath(QStringLiteral("everything-lite.db"));
+    // v0.4.1: GUI and CLI share the same resolver. The resolver also prefers
+    // an existing v0.4 database so upgrading never creates a silent empty DB.
+    db_path_ = fromUtf8(defaultDatabasePath());
+    QDir().mkpath(QFileInfo(db_path_).absolutePath());
 
     buildUi();
     buildMenus();
@@ -111,7 +113,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     search_timer_->setSingleShot(true);
     search_timer_->setInterval(100);
     connect(search_timer_, &QTimer::timeout, this, &MainWindow::runSearch);
-    connect(search_edit_, &QLineEdit::textChanged, this, [this] { search_timer_->start(); });
+    connect(search_edit_, &QLineEdit::textChanged, this, [this](const QString& text) {
+        // Short queries cannot use the trigram index and may require a large
+        // LIKE scan. Give IME/fast typing a little longer to settle, and stop
+        // an obsolete scan immediately instead of making the final query wait.
+        search_timer_->setInterval(text.trimmed().size() > 0 && text.trimmed().size() < 3 ? 240 : 100);
+        cancelActiveSearch();
+        results_have_more_ = false;
+        search_timer_->start();
+    });
     connect(scope_combo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (scope_action_group_) {
             if (index == 0) scope_all_action_->setChecked(true);
@@ -135,13 +145,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     search_watcher_ = new QFutureWatcher<SearchOutcome>(this);
     connect(search_watcher_, &QFutureWatcher<SearchOutcome>::finished, this, [this] {
         auto outcome = search_watcher_->result();
+        active_search_cancel_.reset();
+
+        const bool latest_request = outcome.request_id == search_request_id_;
         const bool still_current = outcome.signature == currentSearchSignature();
-        if (!outcome.error.isEmpty()) {
-            if (still_current) status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
-        } else if (!search_pending_ && still_current) {
+        if (!outcome.cancelled && !outcome.error.isEmpty()) {
+            if (latest_request && still_current) status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
+        } else if (!outcome.cancelled && latest_request && still_current && !search_pending_) {
             if (outcome.append) model_->appendResults(std::move(outcome.results));
             else model_->setResults(std::move(outcome.results));
             results_have_more_ = outcome.has_more;
+            last_search_query_ = outcome.query;
+            last_search_elapsed_ms_ = outcome.elapsed_ms;
+            last_search_result_count_ = model_->rowCount();
             const auto loaded = model_->rowCount();
             status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    %4 ms    ·    %5%6")
                 .arg(indexed_count_)
@@ -152,7 +168,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 .arg(name_search_ready_ ? QString{} : QStringLiteral("    ·    名称加速索引未就绪")));
         }
 
-        if (search_pending_ || !still_current) {
+        // Only explicitly queued searches are launched here. In v0.4 a mere
+        // signature mismatch immediately launched whatever text happened to be
+        // in the editor, bypassing debounce/IME settling. That could start a
+        // slow 1-2 character LIKE scan and block the final 3+ character query.
+        if (search_pending_) {
             search_pending_ = false;
             launchSearch(search_edit_->text(), 0, false);
         }
@@ -188,6 +208,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
 MainWindow::~MainWindow() {
     if (watcher_) watcher_->stop();
+    cancelActiveSearch();
     if (search_watcher_ && search_watcher_->isRunning()) search_watcher_->waitForFinished();
     if (worker_thread_) {
         worker_thread_->quit();
@@ -564,8 +585,10 @@ void MainWindow::runSearch() {
     if (indexing_.load() && indexed_count_ == 0) return;
     pending_search_query_ = search_edit_->text();
     results_have_more_ = false;
+    ++search_request_id_;
     if (search_watcher_->isRunning()) {
         search_pending_ = true;
+        cancelActiveSearch();
         return;
     }
     launchSearch(pending_search_query_, 0, false);
@@ -581,6 +604,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
         if (!append) {
             pending_search_query_ = query;
             search_pending_ = true;
+            cancelActiveSearch();
         }
         return;
     }
@@ -594,13 +618,17 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     const auto signature = currentSearchSignature();
     const int item_scope = scope_combo_->currentIndex();
     const bool match_path = match_path_check_->isChecked();
+    const auto request_id = search_request_id_;
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    active_search_cancel_ = cancel;
 
-    search_watcher_->setFuture(QtConcurrent::run([db_path, query, signature, offset, append, item_scope, match_path] {
+    search_watcher_->setFuture(QtConcurrent::run([db_path, query, signature, offset, append, item_scope, match_path, request_id, cancel] {
         SearchOutcome outcome;
         outcome.query = query;
         outcome.signature = signature;
         outcome.offset = offset;
         outcome.append = append;
+        outcome.request_id = request_id;
         try {
             QElapsedTimer timer;
             timer.start();
@@ -614,17 +642,22 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             }
             if (match_path) parsed.match_path = true;
 
-            outcome.results = engine.search(parsed, kPageSize + 1, offset);
+            outcome.results = engine.search(parsed, kPageSize + 1, offset, cancel.get());
             if (outcome.results.size() > kPageSize) {
                 outcome.has_more = true;
                 outcome.results.resize(kPageSize);
             }
             outcome.elapsed_ms = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
         } catch (const std::exception& e) {
-            outcome.error = QString::fromUtf8(e.what());
+            if (cancel->load(std::memory_order_relaxed)) outcome.cancelled = true;
+            else outcome.error = QString::fromUtf8(e.what());
         }
         return outcome;
     }));
+}
+
+void MainWindow::cancelActiveSearch() {
+    if (active_search_cancel_) active_search_cancel_->store(true, std::memory_order_relaxed);
 }
 
 void MainWindow::startWorker(std::function<void()> job, const QString& start_message) {
@@ -680,12 +713,31 @@ void MainWindow::editRoots() {
 }
 
 void MainWindow::showIndexStatus() {
+    refreshStats();
+    try {
+        Database db(toUtf8(db_path_));
+        db.initialize();
+        name_search_count_ = name_search_available_ ? db.nameSearchIndexCount() : 0;
+    } catch (...) {
+        name_search_count_ = 0;
+    }
     QStringList details;
     details << QStringLiteral("版本：%1").arg(QString::fromLatin1(EVERYTHING_LITE_VERSION));
     details << QStringLiteral("数据库：%1").arg(db_path_);
-    details << QStringLiteral("已索引对象：%1").arg(indexed_count_);
+    details << QStringLiteral("文件记录：%1").arg(indexed_count_);
+    details << QStringLiteral("名称 FTS 记录：%1").arg(name_search_count_);
+    details << QStringLiteral("名称索引状态：%1").arg(
+        !name_search_available_ ? QStringLiteral("unavailable") :
+        !name_search_ready_ ? QStringLiteral("not ready") : QStringLiteral("ready"));
+    if (name_search_ready_) {
+        details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（对 large项可能需要一些时间）");
+    }
     details << QStringLiteral("监听后端：%1").arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未启动"));
-    details << QStringLiteral("名称 Trigram：%1").arg(name_search_ready_ ? QStringLiteral("ready") : (name_search_available_ ? QStringLiteral("not ready") : QStringLiteral("unavailable")));
+    if (!last_search_query_.isNull()) {
+        details << QStringLiteral("最近查询：%1").arg(last_search_query_.isEmpty() ? QStringLiteral("<全部>") : last_search_query_);
+        details << QStringLiteral("最近查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
+        details << QStringLiteral("当前已加载结果：%1").arg(last_search_result_count_);
+    }
     details << QStringLiteral("索引目录：\n  %1").arg(roots_.join(QStringLiteral("\n  ")));
     QMessageBox::information(this, QStringLiteral("索引状态"), details.join(QStringLiteral("\n")));
 }

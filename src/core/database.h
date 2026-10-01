@@ -3,6 +3,7 @@
 #include "core/file_record.h"
 #include "core/search_query.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -34,10 +35,12 @@ public:
     // offset/limit are intentionally exposed for viewport-style incremental loading.
     std::vector<SearchResult> search(const SearchQuery& query,
                                      std::size_t limit = 500,
-                                     std::size_t offset = 0) const;
+                                     std::size_t offset = 0,
+                                     const std::atomic_bool* cancel = nullptr) const;
     std::vector<SearchResult> search(const std::string& query,
                                      std::size_t limit = 500,
-                                     std::size_t offset = 0) const;
+                                     std::size_t offset = 0,
+                                     const std::atomic_bool* cancel = nullptr) const;
 
     std::uint64_t totalFileCount() const;
     std::vector<std::string> roots() const;
@@ -47,6 +50,8 @@ public:
     // until a full rebuild has prepared the trigram index once.
     bool nameSearchIndexAvailable() const;
     bool nameSearchIndexReady() const;
+    std::uint64_t nameSearchIndexCount() const;
+    void verifyNameSearchIndex() const;
     void rebuildNameSearchIndex() const;
 
 private:

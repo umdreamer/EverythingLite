@@ -84,3 +84,13 @@ type:file: 3.754 ms
 ```
 
 这些数据只用于回归检查，不能替代用户 Apple Silicon Mac 上约 large项的真实性能结果。
+
+
+## v0.4.1 回归项
+
+- 中文名称 `砀例甲示例文档.docx` 普通名称查询。
+- 中文目录 `砀例甲资料` 普通名称查询。
+- `path:砀例甲` UTF-8 路径查询。
+- 搜索取消 token 能中断旧查询。
+- 名称 FTS 可见记录数与 Files 记录数检查，并执行 FTS5 external-content `integrity-check` 深度一致性校验。
+- GUI request-id/debounce 逻辑为本版重点；最终 macOS Qt GUI 仍需在实机编译运行验证。

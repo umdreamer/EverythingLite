@@ -1,9 +1,9 @@
+#include "core/app_paths.h"
 #include "core/database.h"
 #include "core/index_manager.h"
 #include "core/search_engine.h"
 
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -14,13 +14,6 @@
 using namespace everything_lite;
 
 namespace {
-
-std::string defaultDbPath() {
-    if (const char* env = std::getenv("EVERYTHING_LITE_DB")) {
-        if (*env) return env;
-    }
-    return (std::filesystem::current_path() / ".everything-lite.db").string();
-}
 
 std::string humanSize(std::uint64_t bytes) {
     static const char* units[] = {"B", "KB", "MB", "GB", "TB"};
@@ -40,11 +33,13 @@ void usage() {
 R"(Everything-Lite CLI
 
 Usage:
-  everything-lite-cli index <root> [root...]
-  everything-lite-cli search <query> [--limit N] [--offset N]
-  everything-lite-cli stats
-  everything-lite-cli clear
-  everything-lite-cli optimize-search
+  everything-lite-cli [--db PATH] db-path
+  everything-lite-cli [--db PATH] index <root> [root...]
+  everything-lite-cli [--db PATH] search <query> [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] stats
+  everything-lite-cli [--db PATH] clear
+  everything-lite-cli [--db PATH] optimize-search
+  everything-lite-cli [--db PATH] check-search-index
   everything-lite-cli benchmark <root> [query...]
 
 Search syntax:
@@ -57,12 +52,17 @@ Search syntax:
 
 Plain terms match file/folder names only by default.
 
+Database selection:
+  1. --db PATH (highest priority for this command)
+  2. EVERYTHING_LITE_DB environment variable
+  3. the shared platform default used by the GUI
+
 Examples:
+  everything-lite-cli db-path
+  everything-lite-cli search '砀例甲' --limit 50
+  everything-lite-cli --db '/path/to/everything-lite.db' search '砀例甲'
   everything-lite-cli search 'ext:pdf example'
   everything-lite-cli search 'path:sample size:>10m type:file'
-
-Environment:
-  EVERYTHING_LITE_DB=/path/to/everything-lite.db
 )";
 }
 
@@ -70,21 +70,36 @@ Environment:
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 2) {
+        std::vector<std::string> args;
+        for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
+        if (args.empty()) {
             usage();
             return 0;
         }
 
-        const std::string command = argv[1];
-        const auto db_path = defaultDbPath();
+        std::string db_path = defaultDatabasePath();
+        if (args.size() >= 2 && args[0] == "--db") {
+            db_path = args[1];
+            args.erase(args.begin(), args.begin() + 2);
+        }
+        if (args.empty()) {
+            usage();
+            return 2;
+        }
+
+        const std::string command = args[0];
+
+        if (command == "db-path") {
+            std::cout << db_path << "\n";
+            return 0;
+        }
 
         if (command == "index") {
-            if (argc < 3) {
+            if (args.size() < 2) {
                 std::cerr << "index requires at least one root directory\n";
                 return 2;
             }
-            std::vector<std::string> roots;
-            for (int i = 2; i < argc; ++i) roots.emplace_back(argv[i]);
+            std::vector<std::string> roots(args.begin() + 1, args.end());
             IndexManager manager(db_path);
             auto stats = manager.rebuildRoots(roots, [](const std::string& root, std::uint64_t scanned) {
                 std::cerr << "\r[索引] " << root << "  " << scanned << " 项" << std::flush;
@@ -98,21 +113,21 @@ int main(int argc, char** argv) {
         }
 
         if (command == "search") {
-            if (argc < 3) {
+            if (args.size() < 2) {
                 std::cerr << "search requires a query\n";
                 return 2;
             }
             std::size_t limit = 50;
             std::size_t offset = 0;
             std::ostringstream query_builder;
-            for (int i = 2; i < argc; ++i) {
-                std::string arg = argv[i];
-                if (arg == "--limit" && i + 1 < argc) {
-                    limit = static_cast<std::size_t>(std::stoul(argv[++i]));
+            for (std::size_t i = 1; i < args.size(); ++i) {
+                const auto& arg = args[i];
+                if (arg == "--limit" && i + 1 < args.size()) {
+                    limit = static_cast<std::size_t>(std::stoul(args[++i]));
                     continue;
                 }
-                if (arg == "--offset" && i + 1 < argc) {
-                    offset = static_cast<std::size_t>(std::stoul(argv[++i]));
+                if (arg == "--offset" && i + 1 < args.size()) {
+                    offset = static_cast<std::size_t>(std::stoul(args[++i]));
                     continue;
                 }
                 if (query_builder.tellp() > 0) query_builder << ' ';
@@ -133,9 +148,15 @@ int main(int argc, char** argv) {
         if (command == "stats") {
             Database db(db_path);
             db.initialize();
+            const auto file_count = db.totalFileCount();
+            const auto fts_count = db.nameSearchIndexAvailable() ? db.nameSearchIndexCount() : 0;
             std::cout << "数据库：" << db_path << "\n";
-            std::cout << "索引项：" << db.totalFileCount() << "\n";
+            std::cout << "索引项：" << file_count << "\n";
             std::cout << "名称 Trigram 索引：" << (db.nameSearchIndexReady() ? "ready" : "not-ready") << "\n";
+            std::cout << "名称 FTS 项：" << fts_count << "\n";
+            if (db.nameSearchIndexReady()) {
+                std::cout << "名称索引深度检查：运行 check-search-index（可能需要一些时间）\n";
+            }
             const auto roots = db.roots();
             std::cout << "索引根目录：" << roots.size() << "\n";
             for (const auto& root : roots) std::cout << "  - " << root << "\n";
@@ -165,15 +186,26 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        if (command == "check-search-index") {
+            Database db(db_path);
+            db.initialize();
+            const auto begin = std::chrono::steady_clock::now();
+            db.verifyNameSearchIndex();
+            const auto end = std::chrono::steady_clock::now();
+            const auto ms = std::chrono::duration<double, std::milli>(end - begin).count();
+            std::cout << "名称 FTS 索引完整性：ok（" << std::fixed << std::setprecision(1) << ms << " ms）\n";
+            return 0;
+        }
+
         if (command == "benchmark") {
-            if (argc < 3) {
+            if (args.size() < 2) {
                 std::cerr << "benchmark requires a root directory\n";
                 return 2;
             }
             namespace fs = std::filesystem;
-            const auto root = fs::absolute(fs::path(argv[2])).lexically_normal().string();
+            const auto root = fs::absolute(fs::path(args[1])).lexically_normal().string();
             std::vector<std::string> queries;
-            for (int i = 3; i < argc; ++i) queries.emplace_back(argv[i]);
+            for (std::size_t i = 2; i < args.size(); ++i) queries.emplace_back(args[i]);
             if (queries.empty()) queries = {"pdf", "sample", "type:file"};
 
             const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();

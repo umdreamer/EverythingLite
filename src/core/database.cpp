@@ -4,6 +4,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <sstream>
@@ -176,11 +177,17 @@ std::string makeFtsExpression(const SearchQuery& query) {
     return out.str();
 }
 
+int cancelProgressCallback(void* opaque) {
+    const auto* cancel = static_cast<const std::atomic_bool*>(opaque);
+    return cancel && cancel->load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 std::vector<SearchResult> runSearch(sqlite3* db,
                                     const SearchQuery& query,
                                     std::size_t limit,
                                     std::size_t offset,
-                                    bool fts_ready) {
+                                    bool fts_ready,
+                                    const std::atomic_bool* cancel) {
     const bool use_fts = canUseNameFts(query, fts_ready);
 
     std::ostringstream sql;
@@ -222,6 +229,10 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     // Match Everything's default presentation more closely: Name, then Path.
     sql << " ORDER BY files.name COLLATE NOCASE ASC, files.parent_path COLLATE NOCASE ASC LIMIT ? OFFSET ?";
 
+    if (cancel) {
+        sqlite3_progress_handler(db, 1000, cancelProgressCallback, const_cast<std::atomic_bool*>(cancel));
+    }
+
     auto stmt = prepare(db, sql.str());
     int bind_index = 1;
     if (use_fts) {
@@ -242,12 +253,18 @@ std::vector<SearchResult> runSearch(sqlite3* db,
 
     std::vector<SearchResult> results;
     results.reserve(limit);
-    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(stmt.get())) == SQLITE_ROW) {
         SearchResult result;
         result.file = readFileRecord(stmt.get());
         result.rank = 0;
         results.push_back(std::move(result));
     }
+    if (cancel) sqlite3_progress_handler(db, 0, nullptr, nullptr);
+    if (rc == SQLITE_INTERRUPT || (cancel && cancel->load(std::memory_order_relaxed))) {
+        throw std::runtime_error("search cancelled");
+    }
+    if (rc != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
     return results;
 }
 
@@ -430,16 +447,18 @@ void Database::clear() const {
 
 std::vector<SearchResult> Database::search(const SearchQuery& query,
                                            std::size_t limit,
-                                           std::size_t offset) const {
+                                           std::size_t offset,
+                                           const std::atomic_bool* cancel) const {
     SqliteConnection conn(db_path_);
     const bool fts_ready = tableExists(conn.get(), "files_name_fts") && metadataFlag(conn.get(), "name_fts_ready");
-    return runSearch(conn.get(), query, limit, offset, fts_ready);
+    return runSearch(conn.get(), query, limit, offset, fts_ready, cancel);
 }
 
 std::vector<SearchResult> Database::search(const std::string& query,
                                            std::size_t limit,
-                                           std::size_t offset) const {
-    return search(parseSearchQuery(query), limit, offset);
+                                           std::size_t offset,
+                                           const std::atomic_bool* cancel) const {
+    return search(parseSearchQuery(query), limit, offset, cancel);
 }
 
 std::uint64_t Database::totalFileCount() const {
@@ -469,6 +488,26 @@ bool Database::nameSearchIndexAvailable() const {
 bool Database::nameSearchIndexReady() const {
     SqliteConnection conn(db_path_);
     return tableExists(conn.get(), "files_name_fts") && metadataFlag(conn.get(), "name_fts_ready");
+}
+
+std::uint64_t Database::nameSearchIndexCount() const {
+    SqliteConnection conn(db_path_);
+    if (!tableExists(conn.get(), "files_name_fts")) return 0;
+    auto stmt = prepare(conn.get(), "SELECT COUNT(*) FROM files_name_fts;");
+    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        return static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 0));
+    }
+    return 0;
+}
+
+void Database::verifyNameSearchIndex() const {
+    SqliteConnection conn(db_path_);
+    if (!tableExists(conn.get(), "files_name_fts")) {
+        throw std::runtime_error("FTS5 trigram index is unavailable");
+    }
+    // FTS5 external-content integrity-check with rank=1 compares the actual
+    // full-text index against the files content table, not merely row counts.
+    conn.exec("INSERT INTO files_name_fts(files_name_fts, rank) VALUES('integrity-check', 1);");
 }
 
 void Database::rebuildNameSearchIndex() const {

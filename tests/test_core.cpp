@@ -1,7 +1,9 @@
+#include "core/database.h"
 #include "core/index_manager.h"
 #include "core/search_engine.h"
 #include "core/search_query.h"
 
+#include <atomic>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -32,11 +34,21 @@ int main() {
     std::ofstream(base / "nested" / "data.csv") << "1,2,3";
     std::ofstream(base / "nested" / "sample" / "ExampleFile.pdf") << std::string(2048, 'p');
     std::ofstream(base / "nested" / "sample" / "unrelated.bin") << "x";
+    fs::create_directories(base / "砀例甲资料");
+    std::ofstream(base / "砀例甲示例文档.docx") << "sample text";
+    std::ofstream(base / "砀例甲资料" / "示例记录.txt") << "record";
 
     const auto db = (db_dir / "index.db").string();
     IndexManager manager(db);
     const auto stats = manager.rebuildRoot(base.string());
-    assert(stats.indexed >= 7); // root + directories + test files
+    assert(stats.indexed >= 10); // root + directories + test files
+
+    Database diagnostics(db);
+    diagnostics.initialize();
+    if (diagnostics.nameSearchIndexReady()) {
+        assert(diagnostics.nameSearchIndexCount() == diagnostics.totalFileCount());
+        diagnostics.verifyNameSearchIndex();
+    }
 
     SearchEngine engine(db);
     auto results = engine.search("alpha", 20);
@@ -68,6 +80,26 @@ int main() {
     results = engine.search("type:dir sample", 20);
     assert(containsName(results, "sample"));
     assert(!containsName(results, "ExampleFile.pdf"));
+
+    // v0.4.1 regression: Chinese 3-character basename terms must use the
+    // trigram path correctly; path: queries must also preserve UTF-8.
+    results = engine.search("砀例甲", 20);
+    assert(containsName(results, "砀例甲示例文档.docx"));
+    assert(containsName(results, "砀例甲资料"));
+
+    results = engine.search("path:砀例甲", 20);
+    assert(containsName(results, "示例记录.txt"));
+
+    // A cancelled GUI-style query must be interruptible instead of blocking
+    // the next request behind a potentially expensive LIKE scan.
+    std::atomic_bool cancelled{true};
+    bool cancellation_observed = false;
+    try {
+        (void)engine.search("砀", 20, 0, &cancelled);
+    } catch (const std::exception&) {
+        cancellation_observed = true;
+    }
+    assert(cancellation_observed);
 
     // Incremental result windows: the second page must continue rather than
     // repeat the first page.

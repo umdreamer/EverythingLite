@@ -3,6 +3,7 @@
 #include "core/database.h"
 #include "core/search_query.h"
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -14,10 +15,12 @@ public:
 
     std::vector<SearchResult> search(const std::string& query,
                                      std::size_t limit = 500,
-                                     std::size_t offset = 0) const;
+                                     std::size_t offset = 0,
+                                     const std::atomic_bool* cancel = nullptr) const;
     std::vector<SearchResult> search(const SearchQuery& query,
                                      std::size_t limit = 500,
-                                     std::size_t offset = 0) const;
+                                     std::size_t offset = 0,
+                                     const std::atomic_bool* cancel = nullptr) const;
 
 private:
     Database database_;

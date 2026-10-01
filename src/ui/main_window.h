@@ -39,6 +39,8 @@ struct SearchOutcome {
     QString signature;
     QString error;
     double elapsed_ms = 0.0;
+    std::uint64_t request_id = 0;
+    bool cancelled = false;
     std::size_t offset = 0;
     bool append = false;
     bool has_more = false;
@@ -104,6 +106,12 @@ private:
     bool name_search_ready_ = false;
     std::atomic_bool indexing_{false};
     std::uint64_t indexed_count_ = 0;
+    std::uint64_t name_search_count_ = 0;
+    std::uint64_t search_request_id_ = 0;
+    std::shared_ptr<std::atomic_bool> active_search_cancel_;
+    QString last_search_query_;
+    double last_search_elapsed_ms_ = 0.0;
+    int last_search_result_count_ = 0;
 
     void buildUi();
     void buildMenus();
@@ -117,6 +125,7 @@ private:
     void refreshStats();
     void runSearch();
     void launchSearch(const QString& query, std::size_t offset = 0, bool append = false);
+    void cancelActiveSearch();
     void loadMoreResults();
     QString currentSearchSignature() const;
     void rebuildIndex();

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 — GUI 搜索可靠性修复
+
+- 修复 GUI 在搜索文本变化时绕过 debounce、提前启动中间查询的问题。
+- 新查询会中断正在执行的旧 SQLite 查询，避免 1～2 字符 LIKE 扫描阻塞最终查询。
+- 每次 GUI 搜索增加 request id，只有最新请求可以更新结果表格。
+- 对 1～2 字符查询使用更长 debounce；3 字符及以上保持快速响应。
+- GUI 与 CLI 统一数据库路径解析；CLI 新增 `db-path` 与 `--db PATH`。
+- 索引状态增加 Files/FTS 可见记录数、最近查询与耗时；CLI 增加 FTS5 `integrity-check` 深度一致性检查。
+- 新增“砀例甲”中文 trigram/path 回归测试和取消查询测试。
+
 ## 0.4.0 - 2026-09-14
 
 ### Added

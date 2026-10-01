@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21.1)
-project(EverythingLite VERSION 0.4.0 LANGUAGES CXX)
+project(EverythingLite VERSION 0.4.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,7 @@ else()
 endif()
 
 add_library(everything_core
+    src/core/app_paths.cpp
     src/core/path_utils.cpp
     src/core/scanner.cpp
     src/core/database.cpp

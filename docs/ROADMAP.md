@@ -1,5 +1,8 @@
 # Everything Lite 产品与技术路线图
 
+> 当前状态（v0.4.1）：v0.4 Everything 风格主界面已完成；v0.4.1 专门修复 GUI 异步搜索、中文输入期间的旧查询阻塞，以及 GUI/CLI 数据库路径诊断。下一主版本仍按计划进入 v0.5 Indexes + Excludes + Preferences。
+
+
 版本基线：v0.4.0  
 目标平台：macOS 优先，Windows / Linux 保持跨平台架构  
 总体目标：在不牺牲 Everything 式“极快文件名搜索”的前提下，尽量保持 Everything 的操作逻辑、菜单结构和搜索匠惯，同时使用 macOS 原生能力改善日常体验。

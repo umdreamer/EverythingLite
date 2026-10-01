@@ -1,0 +1,13 @@
+services:
+  everything-lite:
+    build: .
+    image: everything-lite:0.1.0
+    environment:
+      EVERYTHING_LITE_DB: /data/everything-lite.db
+    volumes:
+      - ${SEARCH_ROOT:-./search}:/search:ro
+      - everything_lite_data:/data
+    command: ["stats"]
+
+volumes:
+  everything_lite_data:

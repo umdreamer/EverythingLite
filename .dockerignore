@@ -1,0 +1,8 @@
+build/
+build-*/
+.git/
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal

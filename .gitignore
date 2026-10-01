@@ -1,0 +1,10 @@
+build/
+build-*/
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep

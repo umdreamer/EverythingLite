@@ -656,7 +656,7 @@ void MainWindow::loadMoreResults() {
 }
 
 void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
-    // v0.4.7-debug: keep the actual search path simple, but make every step
+    // v0.4.8: keep the shared search path simple; Search Trace remains available
     // observable from the terminal. In trace mode we also launch the sibling
     // CLI executable with the exact same DB/query/limit/offset for a true
     // cross-process comparison.
@@ -876,7 +876,7 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("模型当前行数：%1").arg(model_ ? model_->rowCount() : 0);
     details << QStringLiteral("查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
     details << QStringLiteral("待处理搜索：否");
-    details << QStringLiteral("搜索执行方式：GUI 主线程同步 + Search Trace（v0.4.7）");
+    details << QStringLiteral("搜索执行方式：GUI 主线程同步 + Search Trace（v0.4.8）");
     details << QStringLiteral("终端 Trace：%1").arg(searchTraceEnabled() ? QStringLiteral("已启用") : QStringLiteral("未启用"));
     details << QStringLiteral("CLI 探针：%1").arg(cliProbePath());
     QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));

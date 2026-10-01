@@ -1,3 +1,11 @@
+## 0.4.8
+
+- 修复 UTF-8 查询被 locale-sensitive `std::isspace()` 按字节错误拆分的问题。
+- 查询分隔符改为固定 ASCII whitespace，GUI/CLI 不再受 `LC_CTYPE` / `LANG` 差异影响。
+- 修复 `砀例甲` 中 `砀 = E7 A0 80` 的 `A0` 被吞掉、`示例工匠` 中 `匠 = E5 8C A0` 被错误拆词导致漏搜的问题。
+- 新增 parser 级 UTF-8 回归测试：`砀例甲`、`示例工匠`、`工匠`、`匠`、`砀例`、混合 ASCII 空白及 U+00A0。
+- 保留 0.4.7 Search Trace，正常模式默认关闭，必要时可继续使用 `run-macos-debug.sh`。
+
 ## 0.4.7
 
 - 新增搜索终端 Trace：GUI/SearchService/Database/Model 全链路日志。

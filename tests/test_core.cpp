@@ -1,5 +1,6 @@
 #include "core/database.h"
 #include "core/index_manager.h"
+#include "core/path_utils.h"
 #include "core/search_engine.h"
 #include "core/search_query.h"
 #include "core/search_service.h"
@@ -20,6 +21,37 @@ bool containsName(const std::vector<SearchResult>& results, const std::string& n
 }
 
 int main() {
+    // v0.4.8 regression: splitQuery must preserve UTF-8 byte sequences exactly.
+    // In the old implementation std::isspace(byte) was locale-sensitive; the
+    // 0xA0 byte inside 砀 (E7 A0 80) and 匠 (E5 8C A0) could be mistaken for
+    // whitespace in the GUI process, splitting one Chinese term into invalid
+    // byte fragments while the CLI happened to work under a different locale.
+    for (const auto& keyword : {std::string("砀例甲"), std::string("示例工匠"),
+                                std::string("工匠"), std::string("匠"),
+                                std::string("砀例")}) {
+        const auto tokens = splitQuery(keyword);
+        assert(tokens.size() == 1);
+        assert(tokens[0] == keyword);
+
+        const auto parsed_keyword = parseSearchQuery(keyword, 1'000'000);
+        assert(parsed_keyword.terms.size() == 1);
+        assert(parsed_keyword.terms[0] == keyword);
+    }
+
+    const auto mixed_utf8_tokens = splitQuery("砀例甲  示例工匠\t示例乙\n示例丙");
+    assert(mixed_utf8_tokens.size() == 4);
+    assert(mixed_utf8_tokens[0] == "砀例甲");
+    assert(mixed_utf8_tokens[1] == "示例工匠");
+    assert(mixed_utf8_tokens[2] == "示例乙");
+    assert(mixed_utf8_tokens[3] == "示例丙");
+
+    // U+00A0 (C2 A0 in UTF-8) is not an Everything Lite query separator.
+    // This specifically protects all high-bit UTF-8 bytes from locale rules.
+    const std::string nbsp_inside = std::string("A") + "\xC2\xA0" + "B";
+    const auto nbsp_tokens = splitQuery(nbsp_inside);
+    assert(nbsp_tokens.size() == 1);
+    assert(nbsp_tokens[0] == nbsp_inside);
+
     namespace fs = std::filesystem;
     std::error_code ec;
     const auto base = fs::temp_directory_path() / "everything-lite-test-root";

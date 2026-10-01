@@ -1,6 +1,6 @@
 # Everything Lite 产品与技术路线图
 
-> 当前状态（v0.4.7 Search Trace）：搜索正确性进入强制一致性阶段。GUI 与 CLI 共用唯一 SearchService，GUI 暂时使用同步查询以排除异步/cancellation 引入的漏搜。真实数据验证通过后，再进入 v0.5 Indexes + Excludes + Preferences。
+> 当前状态（v0.4.8）：已通过 Search Trace 定位并修复 UTF-8 查询拆词根因。`splitQuery()` 只使用 ASCII whitespace，避免 GUI/CLI locale 差异导致中文字节被吞。当前继续以搜索正确性为第一优先级；真实 Mac 验证稳定后再进入 v0.5。
 
 ### Correctness Gate（自 v0.4.6 起）
 

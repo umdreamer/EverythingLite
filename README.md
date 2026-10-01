@@ -2,12 +2,34 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.7`（Search Trace 诊断版）
+当前版本：`0.4.8`（UTF-8 查询解析修复版）
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
 
-## 1. v0.4.7 Search Trace 诊断版
+## 1. v0.4.8 UTF-8 查询解析修复
+
+0.4.8 根据真实 macOS GUI Trace 找到了 `砀例甲`、`示例工匠` 等关键词漏搜的根因：旧版 `splitQuery()` 对 UTF-8 字符串逐字节调用 `std::isspace()`，GUI locale 会把中文字符内部的 `0xA0` 字节误判为空白。现在查询拆词只识别 ASCII whitespace，因此中文 UTF-8 字节序列不会再被拆坏。
+
+重点验证：
+
+```text
+砀例甲
+示例工匠
+工匠
+匠
+砀例
+```
+
+如需观察解析过程，可继续使用：
+
+```bash
+./scripts/run-macos-debug.sh
+```
+
+正常 Trace 应显示 `砀例甲` 为 `terms=1`，完整 hex 为 `e7 a0 80 e4 be 8b e7 94 b2`。详细说明见 `RELEASE_NOTES_0.4.8.md`。
+
+## 2. v0.4.7 Search Trace 诊断版
 
 当前真实问题仍然是：部分关键词在 CLI 中有结果，但 GUI 漏搜。0.4.7 不再继续猜测根因，而是增加完整的终端搜索追踪。推荐直接执行：
 
@@ -16,7 +38,7 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 ./scripts/run-macos-debug.sh
 ```
 
-窗口标题必须显示 `Everything Lite 0.4.7 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
+在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.8 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
 
 ## 1.1 v0.4.6 重点
 

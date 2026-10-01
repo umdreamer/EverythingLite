@@ -1,7 +1,6 @@
 #include "core/path_utils.h"
 
 #include <algorithm>
-#include <cctype>
 #include <sstream>
 
 namespace everything_lite {
@@ -60,23 +59,50 @@ std::string escapeLike(const std::string& text) {
     return out;
 }
 
+namespace {
+
+// Query syntax is byte-oriented for ASCII operators, but file names and search
+// terms are UTF-8. Never pass arbitrary UTF-8 continuation bytes to locale-
+// sensitive character classification such as std::isspace(): in some locales
+// bytes such as 0xA0 are classified as whitespace even when they are the middle
+// byte of a valid Chinese character (for example, 砀 = E7 A0 80).
+//
+// Everything Lite currently defines token separators as ASCII whitespace only.
+// Keeping this test explicit makes query tokenization deterministic across GUI
+// and CLI processes regardless of LC_CTYPE / LANG.
+bool isAsciiWhitespace(unsigned char c) noexcept {
+    switch (c) {
+        case 0x09: // TAB
+        case 0x0A: // LF
+        case 0x0B: // VT
+        case 0x0C: // FF
+        case 0x0D: // CR
+        case 0x20: // SPACE
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
+
 std::vector<std::string> splitQuery(const std::string& query) {
     std::vector<std::string> tokens;
     std::string current;
     bool quoted = false;
     for (std::size_t i = 0; i < query.size(); ++i) {
-        const char c = query[i];
-        if (c == '"') {
+        const unsigned char c = static_cast<unsigned char>(query[i]);
+        if (c == static_cast<unsigned char>('"')) {
             quoted = !quoted;
             continue;
         }
-        if (!quoted && std::isspace(static_cast<unsigned char>(c))) {
+        if (!quoted && isAsciiWhitespace(c)) {
             if (!current.empty()) {
                 tokens.push_back(asciiFold(current));
                 current.clear();
             }
         } else {
-            current.push_back(c);
+            current.push_back(static_cast<char>(c));
         }
     }
     if (!current.empty()) {

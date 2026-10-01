@@ -2,6 +2,7 @@
 #include "core/index_manager.h"
 #include "core/search_engine.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
@@ -43,6 +44,18 @@ Usage:
   everything-lite-cli search <query> [--limit N]
   everything-lite-cli stats
   everything-lite-cli clear
+  everything-lite-cli benchmark <root> [query...]
+
+Search syntax:
+  ext:pdf              filter by extension
+  path:sample        path contains "sample"
+  size:>10m            file size; supports b/k/m/g/t and > >= < <=
+  modified:7d          modified within the last 7 days (h/d/w)
+  type:file | type:dir files or directories only
+
+Examples:
+  everything-lite-cli search 'ext:pdf example'
+  everything-lite-cli search 'path:sample size:>10m type:file'
 
 Environment:
   EVERYTHING_LITE_DB=/path/to/everything-lite.db
@@ -124,6 +137,54 @@ int main(int argc, char** argv) {
             db.initialize();
             db.clear();
             std::cout << "索引已清空\n";
+            return 0;
+        }
+
+        if (command == "benchmark") {
+            if (argc < 3) {
+                std::cerr << "benchmark requires a root directory\n";
+                return 2;
+            }
+            namespace fs = std::filesystem;
+            const auto root = fs::absolute(fs::path(argv[2])).lexically_normal().string();
+            std::vector<std::string> queries;
+            for (int i = 3; i < argc; ++i) queries.emplace_back(argv[i]);
+            if (queries.empty()) queries = {"pdf", "sample", "type:file"};
+
+            const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+            const auto bench_dir = fs::temp_directory_path() / ("everything-lite-benchmark-" + std::to_string(stamp));
+            fs::create_directories(bench_dir);
+            const auto bench_db = (bench_dir / "benchmark.db").string();
+
+            const auto index_begin = std::chrono::steady_clock::now();
+            IndexManager manager(bench_db);
+            const auto stats = manager.rebuildRoot(root, [](const std::string&, std::uint64_t count) {
+                if (count % 10000 == 0) std::cerr << "\r[benchmark] " << count << " 项" << std::flush;
+            });
+            const auto index_end = std::chrono::steady_clock::now();
+            const auto index_ms = std::chrono::duration<double, std::milli>(index_end - index_begin).count();
+            std::cerr << "\r";
+
+            std::cout << "Benchmark root: " << root << "\n";
+            std::cout << "Indexed: " << stats.indexed << " items\n";
+            std::cout << "Index time: " << std::fixed << std::setprecision(1) << index_ms << " ms\n";
+            if (stats.indexed > 0) {
+                std::cout << "Index rate: " << std::setprecision(0)
+                          << (static_cast<double>(stats.indexed) / (index_ms / 1000.0)) << " items/s\n";
+            }
+
+            SearchEngine engine(bench_db);
+            for (const auto& query : queries) {
+                const auto begin = std::chrono::steady_clock::now();
+                const auto results = engine.search(query, 1000);
+                const auto end = std::chrono::steady_clock::now();
+                const auto ms = std::chrono::duration<double, std::milli>(end - begin).count();
+                std::cout << "Query [" << query << "]: " << std::setprecision(3) << ms
+                          << " ms, " << results.size() << " results\n";
+            }
+
+            std::error_code ec;
+            fs::remove_all(bench_dir, ec);
             return 0;
         }
 

@@ -8,14 +8,16 @@
 #include "ui/root_settings_dialog.h"
 #include "ui/search_result_model.h"
 
-#include <QAction>
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QClipboard>
+#include <QCloseEvent>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QFont>
+#include <QFutureWatcher>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QKeySequence>
@@ -36,9 +38,9 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QtConcurrent>
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <vector>
@@ -79,7 +81,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     search_timer_ = new QTimer(this);
     search_timer_->setSingleShot(true);
-    search_timer_->setInterval(120);
+    search_timer_->setInterval(100);
     connect(search_timer_, &QTimer::timeout, this, &MainWindow::runSearch);
     connect(search_edit_, &QLineEdit::textChanged, this, [this] { search_timer_->start(); });
 
@@ -88,9 +90,30 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     event_timer_->setInterval(700);
     connect(event_timer_, &QTimer::timeout, this, &MainWindow::processPendingEvents);
 
+    search_watcher_ = new QFutureWatcher<SearchOutcome>(this);
+    connect(search_watcher_, &QFutureWatcher<SearchOutcome>::finished, this, [this] {
+        auto outcome = search_watcher_->result();
+        if (!outcome.error.isEmpty()) {
+            status_label_->setText(QStringLiteral("搜索错误：%1").arg(outcome.error));
+        } else if (!search_pending_ && search_edit_->text() == outcome.query) {
+            const auto result_count = outcome.results.size();
+            model_->setResults(std::move(outcome.results));
+            status_label_->setText(QStringLiteral("索引 %1 项    ·    结果 %2    ·    %3 ms    ·    %4")
+                .arg(indexed_count_)
+                .arg(result_count)
+                .arg(outcome.elapsed_ms, 0, 'f', 1)
+                .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听")));
+        }
+        if (search_pending_ || search_edit_->text() != outcome.query) {
+            search_pending_ = false;
+            launchSearch(search_edit_->text());
+        }
+    });
+
     connect(rebuild_button_, &QPushButton::clicked, this, &MainWindow::rebuildIndex);
     connect(roots_button_, &QPushButton::clicked, this, &MainWindow::editRoots);
     connect(table_, &QTableView::doubleClicked, this, [this] { openCurrent(); });
+    connect(table_, &QWidget::customContextMenuRequested, this, &MainWindow::showContextMenu);
 
     auto* findShortcut = new QShortcut(QKeySequence::Find, this);
     connect(findShortcut, &QShortcut::activated, this, [this] {
@@ -98,16 +121,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         search_edit_->selectAll();
     });
 
-    auto* revealAction = new QAction(QStringLiteral("在 Finder 中显示"), this);
-    table_->addAction(revealAction);
-    table_->setContextMenuPolicy(Qt::ActionsContextMenu);
-    connect(revealAction, &QAction::triggered, this, &MainWindow::revealCurrent);
-
-    auto* openAction = new QAction(QStringLiteral("打开"), this);
-    openAction->setShortcut(QKeySequence(Qt::Key_Return));
-    openAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-    table_->addAction(openAction);
-    connect(openAction, &QAction::triggered, this, &MainWindow::openCurrent);
+    auto* openShortcut = new QShortcut(QKeySequence(Qt::Key_Return), table_);
+    connect(openShortcut, &QShortcut::activated, this, &MainWindow::openCurrent);
 
     refreshStats();
     restartWatcher();
@@ -117,12 +132,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
 MainWindow::~MainWindow() {
     if (watcher_) watcher_->stop();
+    if (search_watcher_ && search_watcher_->isRunning()) search_watcher_->waitForFinished();
     if (worker_thread_) {
         worker_thread_->quit();
         worker_thread_->wait();
         delete worker_thread_;
         worker_thread_ = nullptr;
     }
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    saveSettings();
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::buildUi() {
@@ -139,7 +160,7 @@ void MainWindow::buildUi() {
     top->setSpacing(8);
 
     search_edit_ = new QLineEdit(this);
-    search_edit_->setPlaceholderText(QStringLiteral("搜索文件名或路径…  支持空格分词和 \"短语\""));
+    search_edit_->setPlaceholderText(QStringLiteral("搜索…  例：ext:pdf  path:sample  size:>10m  modified:7d  type:file"));
     search_edit_->setClearButtonEnabled(true);
     search_edit_->setMinimumHeight(38);
     QFont search_font = search_edit_->font();
@@ -169,8 +190,10 @@ void MainWindow::buildUi() {
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setAlternatingRowColors(true);
-    table_->setSortingEnabled(false);
+    table_->setSortingEnabled(true);
+    table_->sortByColumn(0, Qt::AscendingOrder);
     table_->setShowGrid(false);
+    table_->setContextMenuPolicy(Qt::CustomContextMenu);
     table_->verticalHeader()->setVisible(false);
     table_->verticalHeader()->setDefaultSectionSize(26);
     table_->horizontalHeader()->setStretchLastSection(false);
@@ -195,11 +218,22 @@ void MainWindow::loadSettings() {
     QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
     roots_ = settings.value(QStringLiteral("index/roots")).toStringList();
     if (roots_.isEmpty()) roots_ = defaultRoots();
+    const auto geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
+    if (!geometry.isEmpty()) restoreGeometry(geometry);
+    const auto header_state = settings.value(QStringLiteral("table/header")).toByteArray();
+    if (!header_state.isEmpty()) table_->horizontalHeader()->restoreState(header_state);
+    const int sort_column = settings.value(QStringLiteral("table/sortColumn"), 0).toInt();
+    const auto sort_order = static_cast<Qt::SortOrder>(settings.value(QStringLiteral("table/sortOrder"), static_cast<int>(Qt::AscendingOrder)).toInt());
+    table_->sortByColumn(sort_column, sort_order);
 }
 
 void MainWindow::saveSettings() {
     QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
     settings.setValue(QStringLiteral("index/roots"), roots_);
+    settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
+    settings.setValue(QStringLiteral("table/header"), table_->horizontalHeader()->saveState());
+    settings.setValue(QStringLiteral("table/sortColumn"), table_->horizontalHeader()->sortIndicatorSection());
+    settings.setValue(QStringLiteral("table/sortOrder"), static_cast<int>(table_->horizontalHeader()->sortIndicatorOrder()));
 }
 
 void MainWindow::updateScopeLabel() {
@@ -209,7 +243,7 @@ void MainWindow::updateScopeLabel() {
     }
     const auto preview = roots_.size() <= 3 ? roots_.join(QStringLiteral("    "))
                                             : roots_.mid(0, 3).join(QStringLiteral("    ")) + QStringLiteral("    …");
-    scope_label_->setText(QStringLiteral("索引范围：%1").arg(preview));
+    scope_label_->setText(QStringLiteral("索引范围（%1 个目录）：%2").arg(roots_.size()).arg(preview));
 }
 
 void MainWindow::refreshStats() {
@@ -227,22 +261,37 @@ void MainWindow::refreshStats() {
 
 void MainWindow::runSearch() {
     if (indexing_.load() && indexed_count_ == 0) return;
-    try {
-        QElapsedTimer timer;
-        timer.start();
-        SearchEngine engine(toUtf8(db_path_));
-        auto results = engine.search(toUtf8(search_edit_->text()), 500);
-        const auto result_count = results.size();
-        model_->setResults(std::move(results));
-        const double ms = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
-        status_label_->setText(QStringLiteral("索引 %1 项    ·    结果 %2    ·    %3 ms    ·    %4")
-            .arg(indexed_count_)
-            .arg(result_count)
-            .arg(ms, 0, 'f', 1)
-            .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听")));
-    } catch (const std::exception& e) {
-        status_label_->setText(QStringLiteral("搜索错误：%1").arg(QString::fromUtf8(e.what())));
+    pending_search_query_ = search_edit_->text();
+    if (search_watcher_->isRunning()) {
+        search_pending_ = true;
+        return;
     }
+    launchSearch(pending_search_query_);
+}
+
+void MainWindow::launchSearch(const QString& query) {
+    if (search_watcher_->isRunning()) {
+        pending_search_query_ = query;
+        search_pending_ = true;
+        return;
+    }
+    search_pending_ = false;
+    pending_search_query_ = query;
+    const auto db_path = db_path_;
+    search_watcher_->setFuture(QtConcurrent::run([db_path, query] {
+        SearchOutcome outcome;
+        outcome.query = query;
+        try {
+            QElapsedTimer timer;
+            timer.start();
+            SearchEngine engine(toUtf8(db_path));
+            outcome.results = engine.search(toUtf8(query), 1000);
+            outcome.elapsed_ms = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
+        } catch (const std::exception& e) {
+            outcome.error = QString::fromUtf8(e.what());
+        }
+        return outcome;
+    }));
 }
 
 void MainWindow::startWorker(std::function<void()> job, const QString& start_message) {
@@ -274,8 +323,7 @@ void MainWindow::rebuildIndex() {
             for (const auto& root : roots) native_roots.push_back(toUtf8(root));
             manager.rebuildRoots(native_roots, [this](const std::string& root, std::uint64_t count) {
                 QMetaObject::invokeMethod(this, [this, root, count] {
-                    status_label_->setText(QStringLiteral("正在索引：%1    %2 项")
-                        .arg(fromUtf8(root)).arg(count));
+                    status_label_->setText(QStringLiteral("正在索引：%1    %2 项").arg(fromUtf8(root)).arg(count));
                 }, Qt::QueuedConnection);
             });
         } catch (const std::exception& e) {
@@ -315,6 +363,39 @@ void MainWindow::revealCurrent() {
     const auto target = model_->isDirectoryAt(current.row()) ? path : QFileInfo(path).absolutePath();
     QDesktopServices::openUrl(QUrl::fromLocalFile(target));
 #endif
+}
+
+void MainWindow::copyCurrentPath() {
+    const auto current = table_->currentIndex();
+    if (!current.isValid()) return;
+    const auto path = model_->pathAt(current.row());
+    if (!path.isEmpty()) QApplication::clipboard()->setText(path);
+}
+
+void MainWindow::copyCurrentName() {
+    const auto current = table_->currentIndex();
+    if (!current.isValid()) return;
+    const auto name = model_->nameAt(current.row());
+    if (!name.isEmpty()) QApplication::clipboard()->setText(name);
+}
+
+void MainWindow::showContextMenu(const QPoint& pos) {
+    const auto index = table_->indexAt(pos);
+    if (!index.isValid()) return;
+    table_->setCurrentIndex(index);
+    table_->selectRow(index.row());
+
+    QMenu menu(this);
+    auto* open = menu.addAction(QStringLiteral("打开"));
+    auto* reveal = menu.addAction(QStringLiteral("在 Finder 中显示"));
+    menu.addSeparator();
+    auto* copy_path = menu.addAction(QStringLiteral("复制完整路径"));
+    auto* copy_name = menu.addAction(QStringLiteral("复制文件名"));
+    const auto* selected = menu.exec(table_->viewport()->mapToGlobal(pos));
+    if (selected == open) openCurrent();
+    else if (selected == reveal) revealCurrent();
+    else if (selected == copy_path) copyCurrentPath();
+    else if (selected == copy_name) copyCurrentName();
 }
 
 void MainWindow::restartWatcher() {
@@ -359,17 +440,18 @@ void MainWindow::processPendingEvents() {
     if (paths.isEmpty() && rescans.isEmpty()) return;
 
     const auto db_path = db_path_;
-    startWorker([this, db_path, paths, rescans] {
+    const auto roots = roots_;
+    startWorker([this, db_path, paths, rescans, roots] {
         try {
             IndexManager manager(toUtf8(db_path));
-            for (const auto& root : rescans) {
-                manager.rebuildRoot(toUtf8(root));
-            }
+            for (const auto& root : rescans) manager.rebuildRoot(toUtf8(root));
             for (const auto& path : paths) {
-                const auto root = rootForPath(path);
-                if (!root.isEmpty() && !rescans.contains(root)) {
-                    manager.applyPathChange(toUtf8(root), toUtf8(path));
+                QString best;
+                const auto native_path = toUtf8(path);
+                for (const auto& root : roots) {
+                    if (pathIsWithin(native_path, toUtf8(root)) && root.size() > best.size()) best = root;
                 }
+                if (!best.isEmpty() && !rescans.contains(best)) manager.applyPathChange(toUtf8(best), native_path);
             }
         } catch (...) {
             // A later FSEvents event or manual rebuild will reconcile the index.

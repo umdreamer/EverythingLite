@@ -29,14 +29,14 @@ open build-macos/everything-lite.app
 
 本地开发版运行在已经安装 Homebrew Qt 的开发机上，不需要做独立分发部署。`macdeployqt` 的任务是把 Qt Framework、插件和第三方动态库复制进 `.app`，用于在没有 Qt 的其他 Mac 上运行。Homebrew 当前将 Qt 拆成多个 formula，而 `qt` 元包又聚合了大量模块；直接从该聚合环境运行 `macdeployqt` 可能扫描到本项目不需要的 QtPdf、QtSvg、QtVirtualKeyboard、额外 imageformat 插件以及 webp/brotli 动态库，从而导致 rpath 解析失败。
 
-因此 0.1.1 将两个阶段分开：
+因此 0.2.0 将两个阶段分开：
 
 - `build-macos.sh`：开发、测试、本机使用；
 - 独立分发/DMG：后续单独做 deploy + codesign + notarization 流程。
 
 ## 4. FSEvents
 
-0.1.1 已从 macOS 13 起被废弃的 `FSEventStreamScheduleWithRunLoop()` 切换为 `FSEventStreamSetDispatchQueue()`，监听回调运行在独立串行 dispatch queue 中。
+0.2.0 已从 macOS 13 起被废弃的 `FSEventStreamScheduleWithRunLoop()` 切换为 `FSEventStreamSetDispatchQueue()`，监听回调运行在独立串行 dispatch queue 中。
 
 ## 5. 诊断
 
@@ -48,3 +48,18 @@ open build-macos/everything-lite.app
 ```
 
 把两段输出一起保留，可以直接判断是 Qt 动态库、插件路径、签名、权限还是程序本身的问题。
+
+
+## 6. v0.2.0 性能测试
+
+构建后可以直接运行：
+
+```bash
+./scripts/benchmark-macos.sh "$HOME/Documents"
+```
+
+或使用 CLI 自定义查询：
+
+```bash
+./build-macos/everything-lite-cli benchmark "$HOME" 'ext:pdf' 'path:sample'
+```

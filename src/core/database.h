@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/file_record.h"
+#include "core/search_query.h"
 
 #include <cstdint>
 #include <string>
@@ -30,6 +31,7 @@ public:
     std::uint64_t deleteRoot(const std::string& root) const;
     void clear() const;
 
+    std::vector<SearchResult> search(const SearchQuery& query, std::size_t limit = 500) const;
     std::vector<SearchResult> search(const std::string& query, std::size_t limit = 500) const;
 
     std::uint64_t totalFileCount() const;

@@ -14,12 +14,12 @@ if ! command -v cmake >/dev/null 2>&1; then
   exit 1
 fi
 
-# Everything Lite only uses Qt Core/Gui/Widgets. Homebrew's `qt` formula is a
+# Everything Lite uses Qt Core/Gui/Widgets/Concurrent. Homebrew's `qt` formula is a
 # meta-package containing many unrelated modules. Pointing CMake at qtbase
 # avoids dragging QtPdf/QtSvg/QtVirtualKeyboard and their plugins into a simple
 # Widgets application.
 if ! brew --prefix qtbase >/dev/null 2>&1; then
-  echo "Qt Base 未安装。请执行：brew install qtbase" >&2
+  echo "Qt Base（含 Widgets/Concurrent）未安装。请执行：brew install qtbase" >&2
   echo "如果已经执行过 brew install qt，qtbase 通常已经作为依赖安装。" >&2
   exit 1
 fi

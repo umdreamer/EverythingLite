@@ -1,101 +1,90 @@
 # Everything Lite
 
-一个面向 macOS 的本地文件快速搜索工具原型，目标是在交互体验上接近 Windows Everything，同时保留 Windows/Linux 的后续跨平台扩展空间。
+Everything Lite 是一个面向 macOS 的本地文件快速搜索工具，目标是在日常交互上接近 Windows Everything，同时保持核心引擎跨平台。项目采用 C++17 + Qt 6 Widgets + SQLite + CMake；macOS 实时更新使用 FSEvents。
 
-当前版本：`0.1.1`
+当前版本：`0.2.0`
 
-## 1. 当前已经实现的能力
+## 1. v0.2.0 已实现能力
 
-- C++17 核心引擎
-- SQLite 本地索引数据库
-- 首次/手动全量扫描
-- 文件名与路径搜索
-- 单词前缀优先、包含匹配补充
-- 空格多词 AND 搜索
-- 双引号短语输入解析
-- Qt 6 Widgets 桌面界面
-- 可配置索引目录
-- 后台重建索引
-- 结果表格：名称、路径、大小、修改时间
+- C++17 独立核心引擎，Qt 只负责桌面 UI
+- SQLite 本地索引数据库，WAL 模式
+- 多索引目录
+- 手动完整重建 + `scan_generation` 一致性清理
+- 文件名和完整路径搜索
+- 单关键词前缀优先、包含匹配补足
+- 多关键词 AND 搜索、双引号短语
+- 搜索过滤语法：`ext:`、`path:`、`size:`、`modified:`、`type:`
+- Qt 查询异步化：数据库搜索不阻塞输入框
+- 搜索结果按名称、路径、大小、修改时间排序
 - 双击打开文件/目录
-- macOS Finder 中定位
-- macOS FSEvents 实时文件变更监听
-- FSEvents 事件丢失时自动触发根目录重扫
-- Docker/CLI 方式验证核心扫描、索引与搜索能力
-- CTest 核心自动测试
+- 右键：打开、Finder 定位、复制完整路径、复制文件名
+- 窗口尺寸、表头状态、排序方式、索引目录持久化
+- macOS FSEvents 实时监听新增、删除、重命名和变化
+- FSEvents 丢事件时自动根目录重扫
+- CLI 与 Docker 核心验证
+- CLI 真实目录 benchmark 命令
+- CTest 自动测试
 
-## 2. 界面
+`0.2.0` 的重点是“日常可用 + 可测量性能”，暂不加入全文内容索引、OCR、Embedding 和 AI。
 
-界面遵循“搜索优先”的思路：顶部只有搜索框、索引目录和重建索引，中央使用高密度结果表，底部显示索引量、结果数量、搜索耗时与监听后端。
-
-界面草图：`assets/ui-mockup.svg`
-
-> 该图片是设计草图，不是运行时截图。实际 Qt 界面使用 macOS 原生 Qt Widgets 风格，因此会自动跟随系统控件外观。
-
-## 3. 架构
+## 2. 架构
 
 ```text
 Qt Desktop UI
-    ↓
-Search / Index Service
-    ↓
-SearchEngine      IndexManager
-      ↓              ↓
-           SQLite Database
-              ↑
-          FileScanner
-              ↑
-        Platform Watcher
-              ↑
+   │
+   ├─ Async Search (QtConcurrent)
+   │       ↓
+   │   SearchEngine
+   │       ↓
+   └─ Index / FSEvents
+           ↓
+      IndexManager
+           ↓
+      SQLite Database
+           ↑
+       FileScanner
+           ↑
+   Platform File Watcher
+           ↑
  macOS FSEvents / future Windows / Linux backends
 ```
 
-核心层不依赖 Qt，因此 Docker 和 CLI 可以在没有图形界面的环境中运行；Qt 只负责桌面交互。
+核心层不依赖 Qt。Docker、CLI、自动测试和未来 Windows/Linux 后端都复用同一套 Scanner / IndexManager / Database / SearchEngine。
 
-详细方案见：`docs/ARCHITECTURE.md`
+详细设计见 `docs/ARCHITECTURE.md`。
 
-## 4. macOS 原生部署
+## 3. macOS 构建与运行
 
-### 4.1 安装依赖
-
-推荐使用 Homebrew：
+安装依赖：
 
 ```bash
 brew install cmake qtbase
 ```
 
-### 4.2 一键构建
+构建：
 
 ```bash
 cd everything-lite
 ./scripts/build-macos.sh
 ```
 
-脚本会：
+运行：
 
-1. 检测 Homebrew、CMake 和 `qtbase`；
-2. 清理旧的 `build-macos`，避免上次失败部署污染 App Bundle；
-3. 使用 CMake 构建 Release 版本；
-4. 运行核心测试；
-5. 生成可在当前开发机直接运行的 `everything-lite.app`。
+```bash
+./scripts/run-macos.sh
+```
 
-本地开发版默认不再执行 `macdeployqt`。独立分发包的 Framework 收集、签名和公证作为单独发布步骤处理。
-
-完成后运行：
+或者：
 
 ```bash
 open build-macos/everything-lite.app
 ```
 
-### 4.3 第一次使用
+构建脚本默认生成“本机开发/使用版”，不运行 `macdeployqt`。这样最适合当前迭代阶段，也避开 Homebrew Qt 聚合模块造成的无关 Framework/rpath 问题。独立分发 DMG、codesign、notarization 留到 1.0 发布阶段。
 
-1. 打开 Everything Lite；
-2. 点击“索引目录…”；
-3. 选择需要搜索的目录；
-4. 点击“重建索引”；
-5. 建库完成后直接在顶部输入文件名或路径关键词。
+## 4. 第一次使用
 
-默认建议从以下三个目录开始：
+打开程序后点击“索引目录…”，可以同时加入多个目录。建议先从：
 
 ```text
 ~/Desktop
@@ -103,71 +92,148 @@ open build-macos/everything-lite.app
 ~/Downloads
 ```
 
-确认性能和权限都没有问题后，再考虑把整个 Home 目录加入索引。
+开始，点击“重建索引”。重建完成后直接输入关键词即可。后续新增、删除、重命名和移动文件由 FSEvents 增量同步。
 
-### 4.4 macOS 权限说明
-
-如果需要索引 `~/Library`、某些应用数据目录或其他受 macOS 隐私保护的位置，可能需要在：
+如果要索引 `~/Library` 或其他 macOS 隐私保护目录，可能需要：
 
 ```text
 系统设置 → 隐私与安全性 → 完全磁盘访问权限
 ```
 
-中给 Everything Lite 授权。
+## 5. 搜索语法
 
-FSEvents 也受正常文件系统权限约束；无权限访问的目录不会被完整索引。
+普通搜索：
 
-## 5. Docker 本地试用
-
-Docker 版本用于验证“扫描 → 建库 → 搜索”核心引擎，不用于替代 macOS 原生 Qt 桌面界面。
-
-原因是 Docker Desktop for Mac 中运行的是 Linux 容器，容器看到的是宿主机挂载后的文件视图，而不是 macOS 原生文件系统事件环境，因此不能把 Linux 容器内的监听行为等同于 macOS FSEvents。
-
-### 5.1 构建
-
-```bash
-docker compose build
+```text
+paper
 ```
 
-### 5.2 索引一个目录
+多关键词 AND：
 
-例如索引 `~/Documents`：
-
-```bash
-SEARCH_ROOT="$HOME/Documents" \
-docker compose run --rm everything-lite index /search
+```text
+paper 2026
 ```
 
-索引数据库保存在 Docker volume `everything_lite_data` 中。
+短语：
 
-### 5.3 搜索
-
-```bash
-SEARCH_ROOT="$HOME/Documents" \
-docker compose run --rm everything-lite search report --limit 30
+```text
+"Example Collection"
 ```
 
-### 5.4 查看状态
+扩展名：
 
-```bash
-docker compose run --rm everything-lite stats
+```text
+ext:pdf
+ext:pdf example
 ```
 
-### 5.5 清空索引
+路径包含：
 
-```bash
-docker compose run --rm everything-lite clear
+```text
+path:sample droplet
+path:"Sample Projects" paper
 ```
 
-也可以直接使用：
+文件大小：
 
-```bash
-./scripts/docker-demo.sh "$HOME/Documents" pdf
+```text
+size:>100m
+size:>=10mb
+size:<1g
 ```
 
-## 6. CLI 本地使用
+支持 `b/k/kb/m/mb/g/gb/t/tb`，按 1024 进制计算。
 
-不安装 Qt 也可以只构建核心和 CLI：
+最近修改：
+
+```text
+modified:24h
+modified:7d
+modified:4w
+```
+
+类型：
+
+```text
+type:file
+type:dir
+```
+
+可以组合：
+
+```text
+ext:pdf path:sample size:>10m modified:30d type:file example
+```
+
+当前 `modified:` 表示“最近一段时间内修改”，支持小时、天、周；绝对日期语法后续再增加。
+
+## 6. 结果排序与操作
+
+点击表头可按以下列升序/降序排序：
+
+- 名称
+- 所在位置
+- 大小
+- 修改时间
+
+右键结果支持：
+
+- 打开
+- 在 Finder 中显示
+- 复制完整路径
+- 复制文件名
+
+窗口位置/大小、列宽/顺序、排序方式和索引目录均通过 `QSettings` 自动保存。
+
+## 7. 异步搜索
+
+v0.1.x 的 SQLite 查询直接运行在 GUI 线程。v0.2.0 改为：
+
+```text
+输入变化
+→ 100 ms debounce
+→ QtConcurrent 后台查询
+→ 若查询期间继续输入，只保留最新待查询字符串
+→ 后台完成后更新结果模型
+```
+
+因此即使查询耗时上升，搜索框仍保持响应。SQLite WAL 允许后台索引写入和前台搜索读取更好地并行。
+
+## 8. 性能 benchmark
+
+v0.2.0 增加真实目录 benchmark：
+
+```bash
+./build-macos/everything-lite-cli benchmark "$HOME/Documents"
+```
+
+自定义查询：
+
+```bash
+./build-macos/everything-lite-cli benchmark "$HOME" \
+  'ext:pdf' \
+  'sample' \
+  'path:sample type:file'
+```
+
+它使用临时 SQLite 数据库，不污染正式 GUI 索引，输出：
+
+- 索引项数量
+- 首次索引总时间
+- 每秒索引项数
+- 各查询耗时与返回数量
+
+也可以运行：
+
+```bash
+./scripts/benchmark-macos.sh "$HOME/Documents"
+```
+
+详细方法见 `docs/BENCHMARK.md`。
+
+## 9. CLI 使用
+
+只构建核心和 CLI：
 
 ```bash
 cmake -S . -B build-cli -DBUILD_GUI=OFF -DBUILD_TESTS=ON
@@ -175,51 +241,49 @@ cmake --build build-cli -j
 ctest --test-dir build-cli --output-on-failure
 ```
 
-设置数据库位置：
+指定正式数据库：
 
 ```bash
 export EVERYTHING_LITE_DB="$HOME/.everything-lite.db"
 ```
 
-建立索引：
+索引多个目录：
 
 ```bash
-./build-cli/everything-lite-cli index "$HOME/Documents"
+./build-cli/everything-lite-cli index "$HOME/Documents" "$HOME/Downloads"
 ```
 
 搜索：
 
 ```bash
-./build-cli/everything-lite-cli search paper --limit 50
+./build-cli/everything-lite-cli search 'ext:pdf example' --limit 50
 ```
 
-## 7. 搜索规则
+## 10. Docker
 
-当前版本以文件名和完整路径为搜索对象。
+Docker 只用于 headless 核心/CLI 验证，不替代 macOS 原生 Qt UI 和 FSEvents。
 
-```text
-paper
+```bash
+docker compose build
 ```
 
-优先返回名称或路径以 `paper` 开头的结果，再补充包含 `paper` 的结果。
+索引：
 
-```text
-paper 2026
+```bash
+SEARCH_ROOT="$HOME/Documents" \
+docker compose run --rm everything-lite index /search
 ```
 
-表示结果必须同时包含 `paper` 和 `2026`。
+搜索：
 
-```text
-"Example Collection"
+```bash
+SEARCH_ROOT="$HOME/Documents" \
+docker compose run --rm everything-lite search 'ext:pdf report' --limit 30
 ```
 
-双引号中的内容作为一个搜索词处理。
+## 11. 当前数据库策略
 
-当前数据库会预先存储 ASCII 小写形式，因此英文 A-Z 大小写不敏感；中文文件名不受大小写问题影响。完整 Unicode case-folding 尚未引入 ICU/utf8proc，属于后续增强项。
-
-## 8. 数据库设计
-
-SQLite 文件表主要字段：
+核心表字段：
 
 ```text
 path
@@ -235,107 +299,57 @@ search_path
 scan_generation
 ```
 
-完整重建不是“先清空再扫描”，而是使用 `scan_generation`：
+主要索引：
 
 ```text
-开始扫描 → 产生新 generation
-       ↓
-扫描到的项目全部写入新 generation
-       ↓
-扫描完成后删除该 root 下旧 generation 项目
+search_name
+ext
+size
+(root, scan_generation)
+modified_time
 ```
 
-这样重建期间旧索引仍然可以继续搜索，也能在扫描结束时清理已经不存在的文件。
+完整重建采用 generation：新扫描结果写入新 generation，成功结束后再删除旧 generation 项目，因此不会在扫描开始时先把旧索引清空。
 
-SQLite 使用 WAL 模式，以减少后台写索引时对前台读搜索的影响。
+## 12. 当前限制
 
-## 9. macOS 实时监听
+- 文件名/路径索引，不搜索文件正文。
+- `path:` 和普通“包含匹配”需要 `%keyword%`，在百万级索引上可能成为瓶颈；需要通过真实 benchmark 决定是否引入 trigram/自定义内存索引。
+- 英文 ASCII 大小写不敏感；尚未加入完整 Unicode case-folding 库。
+- GUI 当前每次最多取 1000 条结果，再在本地结果模型中排序。
+- 系统级全局快捷键暂未加入。Qt 本身没有统一稳定的跨平台 global hotkey API，后续会放到 platform 层分别实现。
+- 独立可分发 macOS Bundle（无 Homebrew Qt 依赖）尚未做 codesign/notarization。
 
-macOS 使用 FSEvents：
+## 13. Roadmap
 
-```text
-FSEventStreamCreate
-→ FSEventStreamSetDispatchQueue
-→ FSEventStreamStart
-→ callback
-```
+### v0.2.x
 
-使用 `kFSEventStreamCreateFlagFileEvents` 获取尽可能细粒度的文件事件。
+- 在真实 Mac 上完成 10 万 / 50 万 / 100 万级 benchmark
+- 根据 benchmark 做 SQL/query plan 优化
+- 搜索历史和常用过滤器（按需要）
+- 索引进度/取消机制增强
 
-普通变化采用：
+### v0.3.x
 
-```text
-文件变化
-→ 700 ms 防抖
-→ 增量更新对应路径
-```
+- 百万级查询优化
+- trigram / prefix memory index 按证据引入
+- 外接磁盘生命周期处理
+- Windows USN Journal、Linux inotify backend
+- platform global hotkey
 
-如果发生事件队列丢失、Event ID 回绕、根目录变化等情况，则设置 `needs_full_rescan`，对相应索引根目录重新扫描，以恢复一致性。
+### v1.0
 
-## 10. 当前限制
+- 独立 `.app`
+- deploy、codesign、notarization
+- DMG
+- 无 Homebrew Qt 运行依赖
 
-这是可以运行和继续开发的 `0.1.1`，还不是 Everything 的完全替代品。目前明确保留以下边界：
+## 14. 文档
 
-- Windows USN Journal 尚未实现；
-- Linux inotify 尚未实现；
-- 非 macOS 平台当前 watcher 为手动刷新占位实现；
-- 不搜索文件正文；
-- 不做 OCR；
-- 不做内容哈希；
-- 多词包含搜索在百万级索引下仍有继续优化空间；
-- Unicode 完整大小写折叠尚未实现；
-- 尚未建立内存 Trie/Trigram 索引；
-- 尚未做 macOS 公证、正式签名和自动升级。
-
-这些限制不会影响第一阶段的核心目标：先在 macOS 上做出一个可用的“本地文件名快速搜索器”。
-
-## 11. 下一阶段建议
-
-`0.2` 建议优先做：
-
-```text
-1. 实测 10 万 / 100 万文件索引性能
-2. 搜索线程彻底异步化
-3. FSEvents 事件合并和 rename 处理增强
-4. Unicode case folding
-5. 最近访问 / 类型 / 大小 / 日期过滤器
-6. 全局快捷键呼出
-```
-
-`0.3` 再考虑：
-
-```text
-Trie / Trigram
-全文搜索
-OCR
-AI 文件语义搜索
-```
-
-不要在第一版就把全文检索和 AI 混进核心路径，否则会破坏 Everything 类产品最重要的“轻、快、确定性”。
-
-## 12. 参考资料
-
-- Qt for macOS Deployment: https://doc.qt.io/qt-6/macos-deployment.html
-- Qt CMake Deployment: https://doc.qt.io/qt-6/cmake-deployment.html
-- Apple File System Events Programming Guide: https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/Introduction/Introduction.html
-- Apple Using the File System Events API: https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html
-- SQLite Documentation: https://sqlite.org/docs.html
-- SQLite WAL: https://sqlite.org/wal.html
-
-## macOS 0.1.1 构建说明
-
-macOS 本地开发版现在明确使用 Homebrew `qtbase`，并且 `build-macos.sh` 默认不再执行 `macdeployqt`。这是为了把“本机开发运行”和“独立分发打包”分开，避免 Homebrew `qt` 元包中的无关 QtPdf/QtSvg/QtVirtualKeyboard 插件影响一个只依赖 Qt Widgets 的应用。详细说明见 `docs/MACOS_BUILD.md`。
-
-推荐：
-
-```bash
-brew install cmake qtbase
-./scripts/build-macos.sh
-open build-macos/everything-lite.app
-```
-
-如果需要查看启动错误：
-
-```bash
-./scripts/run-macos.sh
-```
+- `docs/ARCHITECTURE.md`：系统架构
+- `docs/PROJECT_STRUCTURE.md`：工程目录
+- `docs/MACOS_BUILD.md`：Mac 构建
+- `docs/SEARCH_SYNTAX.md`：搜索语法
+- `docs/BENCHMARK.md`：性能测试
+- `docs/TEST_REPORT.md`：自动测试记录
+- `CHANGELOG.md`：版本变化

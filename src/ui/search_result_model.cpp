@@ -1,8 +1,9 @@
 #include "ui/search_result_model.h"
 
 #include <QDateTime>
+#include <QString>
 
-#include <utility>
+#include <algorithm>
 
 namespace everything_lite {
 
@@ -34,8 +35,15 @@ QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
     if (role == Qt::TextAlignmentRole && (index.column() == 2 || index.column() == 3)) {
         return static_cast<int>(Qt::AlignVCenter | Qt::AlignRight);
     }
-    if (role == Qt::ToolTipRole) {
-        return QString::fromUtf8(file.path.c_str());
+    if (role == Qt::ToolTipRole) return QString::fromUtf8(file.path.c_str());
+    if (role == Qt::UserRole) {
+        switch (index.column()) {
+            case 0: return QString::fromUtf8(file.name.c_str()).toCaseFolded();
+            case 1: return QString::fromUtf8(file.parent_path.c_str()).toCaseFolded();
+            case 2: return QVariant::fromValue<qulonglong>(file.size);
+            case 3: return QVariant::fromValue<qlonglong>(file.modified_time);
+            default: return {};
+        }
     }
     return {};
 }
@@ -51,9 +59,19 @@ QVariant SearchResultModel::headerData(int section, Qt::Orientation orientation,
     }
 }
 
+void SearchResultModel::sort(int column, Qt::SortOrder order) {
+    if (column < 0 || column >= 4) return;
+    sort_column_ = column;
+    sort_order_ = order;
+    emit layoutAboutToBeChanged();
+    applySort();
+    emit layoutChanged();
+}
+
 void SearchResultModel::setResults(std::vector<SearchResult> results) {
     beginResetModel();
     results_ = std::move(results);
+    applySort();
     endResetModel();
 }
 
@@ -62,9 +80,32 @@ QString SearchResultModel::pathAt(int row) const {
     return QString::fromUtf8(results_[static_cast<std::size_t>(row)].file.path.c_str());
 }
 
+QString SearchResultModel::nameAt(int row) const {
+    if (row < 0 || row >= static_cast<int>(results_.size())) return {};
+    return QString::fromUtf8(results_[static_cast<std::size_t>(row)].file.name.c_str());
+}
+
 bool SearchResultModel::isDirectoryAt(int row) const {
     if (row < 0 || row >= static_cast<int>(results_.size())) return false;
     return results_[static_cast<std::size_t>(row)].file.is_directory;
+}
+
+void SearchResultModel::applySort() {
+    if (sort_column_ < 0) return;
+    const auto column = sort_column_;
+    const auto order = sort_order_;
+    std::stable_sort(results_.begin(), results_.end(), [column, order](const SearchResult& a, const SearchResult& b) {
+        int cmp = 0;
+        switch (column) {
+            case 0: cmp = QString::fromUtf8(a.file.name.c_str()).compare(QString::fromUtf8(b.file.name.c_str()), Qt::CaseInsensitive); break;
+            case 1: cmp = QString::fromUtf8(a.file.parent_path.c_str()).compare(QString::fromUtf8(b.file.parent_path.c_str()), Qt::CaseInsensitive); break;
+            case 2: cmp = a.file.size < b.file.size ? -1 : (a.file.size > b.file.size ? 1 : 0); break;
+            case 3: cmp = a.file.modified_time < b.file.modified_time ? -1 : (a.file.modified_time > b.file.modified_time ? 1 : 0); break;
+            default: break;
+        }
+        if (cmp == 0) cmp = a.file.path.compare(b.file.path);
+        return order == Qt::AscendingOrder ? cmp < 0 : cmp > 0;
+    });
 }
 
 QString SearchResultModel::formatSize(std::uint64_t bytes) {

@@ -1,56 +1,50 @@
-# 项目目录说明
+# Everything Lite 工程目录（v0.2.0）
 
 ```text
 everything-lite/
 ├── CMakeLists.txt
+├── README.md
+├── CHANGELOG.md
 ├── Dockerfile
 ├── docker-compose.yml
-├── README.md
 ├── assets/
-│   ├── ui-mockup.svg
-│   └── ui-mockup.svg
 ├── configs/
-├── data/
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── BENCHMARK.md
+│   ├── MACOS_BUILD.md
 │   ├── PROJECT_STRUCTURE.md
+│   ├── SEARCH_SYNTAX.md
 │   └── TEST_REPORT.md
-├── logs/
 ├── scripts/
+│   ├── benchmark-macos.sh
 │   ├── build-macos.sh
-│   └── docker-demo.sh
+│   ├── diagnose-macos.sh
+│   ├── docker-demo.sh
+│   └── run-macos.sh
 ├── src/
 │   ├── cli/
 │   │   └── main.cpp
 │   ├── core/
-│   │   ├── database.cpp
-│   │   ├── database.h
+│   │   ├── database.cpp/.h
 │   │   ├── file_record.h
-│   │   ├── index_manager.cpp
-│   │   ├── index_manager.h
-│   │   ├── path_utils.cpp
-│   │   ├── path_utils.h
-│   │   ├── scanner.cpp
-│   │   ├── scanner.h
-│   │   ├── search_engine.cpp
-│   │   └── search_engine.h
+│   │   ├── index_manager.cpp/.h
+│   │   ├── path_utils.cpp/.h
+│   │   ├── scanner.cpp/.h
+│   │   ├── search_engine.cpp/.h
+│   │   └── search_query.cpp/.h
 │   ├── platform/
 │   │   ├── file_watcher.h
-│   │   ├── mac_fsevents_watcher.cpp
-│   │   ├── mac_fsevents_watcher.h
+│   │   ├── mac_fsevents_watcher.cpp/.h
 │   │   ├── null_watcher.h
-│   │   ├── watcher_factory.cpp
-│   │   └── watcher_factory.h
+│   │   └── watcher_factory.cpp/.h
 │   └── ui/
 │       ├── main.cpp
-│       ├── main_window.cpp
-│       ├── main_window.h
-│       ├── root_settings_dialog.cpp
-│       ├── root_settings_dialog.h
-│       ├── search_result_model.cpp
-│       └── search_result_model.h
+│       ├── main_window.cpp/.h
+│       ├── root_settings_dialog.cpp/.h
+│       └── search_result_model.cpp/.h
 └── tests/
     └── test_core.cpp
 ```
 
-`core` 是整个工程最重要的部分，不依赖 Qt；`ui` 只做桌面交互；`platform` 专门隔离 FSEvents 等操作系统 API；`cli` 和 Docker 共用 `core`，因此后续可以在不启动图形界面的情况下做百万文件 benchmark 和回归测试。
+核心模块含义：`scanner` 负责读取文件系统元数据，`index_manager` 负责全量/增量索引事务流程，`database` 负责 SQLite，`search_query` 负责把用户输入解析成过滤条件，`search_engine` 提供稳定查询接口，`platform` 隔离操作系统文件事件，`ui` 只负责 Qt 桌面交互。

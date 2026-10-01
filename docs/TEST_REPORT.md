@@ -1,66 +1,57 @@
-# Everything Lite 0.1.1 测试记录
+# Everything Lite v0.2.0 测试报告
 
-测试日期：2026-09-10
+## 1. 自动测试环境
 
-## 1. Linux 核心自动测试
+当前开发容器：Linux + GCC 14.2 + SQLite 3.46.1。GUI/macOS FSEvents 不能在该 Linux 容器中执行；v0.1.1 的 Qt GUI 和 FSEvents 已由用户在 Apple Silicon Mac + AppleClang 17 实机验证通过。
 
-在 Linux x86_64 环境中重新编译跨平台 C++/SQLite 核心：
+## 2. v0.2.0 Core 编译
 
-```bash
-cmake -S . -B build-test -DBUILD_GUI=OFF -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-test -j2
-ctest --test-dir build-test --output-on-failure
+```text
+cmake -S . -B build-linux -DBUILD_GUI=OFF -DBUILD_TESTS=ON
+cmake --build build-linux -j4
+ctest --test-dir build-linux --output-on-failure
 ```
 
 结果：
 
 ```text
+1/1 Test #1: core ... Passed
 100% tests passed, 0 tests failed
 ```
 
-测试覆盖创建临时目录、SQLite 建库、文件名搜索、文件删除后的增量索引清理以及索引 root 切换。
+## 3. 自动测试覆盖
 
-## 2. macOS 实机验证
+- 完整 root 建库
+- 普通文件名搜索
+- `ext:pdf`
+- `path:sample`
+- `size:>1k type:file`
+- `type:dir`
+- `SearchQuery` 组合解析
+- 删除文件后的增量索引清理
+- 多 root 建库
+- 移除旧 root 后数据库清理
 
-用户在 Apple Silicon Mac 上使用 AppleClang 17 实际执行 `./scripts/build-macos.sh`。0.1.0 原代码的 CMake 配置、C++ 核心编译、Qt Widgets GUI 编译、macOS FSEvents 源码编译、CLI、CTest 和 `.app` Bundle 链接均成功：
+## 4. 合成 benchmark 冒烟测试
+
+生成约 4000 个空/小文件，其中约 1000 个 PDF，运行 CLI benchmark。当前容器一次结果约为：
 
 ```text
-[100%] Linking CXX executable everything-lite.app/Contents/MacOS/everything-lite
-[100%] Built target everything-lite
-1/1 Test #1: core ... Passed
-100% tests passed out of 1
+Indexed: 4003 items
+Index time: 57.9 ms
+Index rate: 69129 items/s
+Query [ext:pdf]: 3.623 ms, 1000 results
+Query [report]: 3.302 ms, 1000 results
+Query [type:file size:<1k]: 6.804 ms, 1000 results
 ```
 
-当时唯一失败阶段是随后执行的 `macdeployqt` 独立部署步骤。错误涉及 QtPdf、QtSvg、QtVirtualKeyboard 以及 webp/brotli 等与本项目 Qt Widgets 核心功能无关或间接引入的 Homebrew Qt 模块/插件。
+这些数字仅用于发现数量级异常，不能代表 Mac 上真实目录性能。下一步应在用户 Mac 上用真实 10 万、50 万、100 万项目进行 benchmark。
 
-## 3. 0.1.1 针对 Mac 日志的修改
+## 5. v0.2.0 待 Mac 实机验证
 
-- CMake SQLite imported target 优先改用 `SQLite3::SQLite3`，消除新版 CMake 的 deprecated warning；
-- macOS FSEvents 从 `FSEventStreamScheduleWithRunLoop()` 改为 `FSEventStreamSetDispatchQueue()`；
-- `build-macos.sh` 明确使用 Homebrew `qtbase` 作为 `CMAKE_PREFIX_PATH`；
-- 本地构建默认不调用 `macdeployqt`；
-- 默认执行 clean build，清除此前被失败部署步骤修改过的 App Bundle；
-- 增加 `run-macos.sh`，便于直接在终端观察 GUI 启动错误；
-- 增加 `diagnose-macos.sh`，输出架构、Qt 路径、动态库依赖和签名状态。
-
-## 4. 尚待实机验证
-
-0.1.1 需要在 Mac 上再次执行：
-
-```bash
-./scripts/build-macos.sh
-./scripts/run-macos.sh
-```
-
-重点验证：
-
-- Qt GUI 正常启动；
-- 首次重建索引；
-- 文件新建/删除/改名后 FSEvents 自动更新；
-- 10 万、100 万真实文件的索引和查询性能；
-- 完全磁盘访问权限；
-- 睡眠/唤醒后的监听一致性。
-
-## 5. 当前判断
-
-现有证据表明核心工程、Qt GUI 链接和 macOS 平台源码已经能够在用户 Mac 上通过编译。当前主要剩余风险从“能不能编译”转移到了“运行期权限与 FSEvents 行为”和“独立分发包的 Qt Framework/插件收集、codesign、公证”。
+- QtConcurrent 异步搜索 GUI 编译/运行
+- 表头排序
+- 右键复制路径/文件名
+- QSettings 窗口/表头持久化
+- 搜索语法在真实 GUI 中的交互体验
+- 大规模真实目录 benchmark

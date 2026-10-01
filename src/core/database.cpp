@@ -95,42 +95,54 @@ FileRecord readFileRecord(sqlite3_stmt* stmt) {
 }
 
 std::vector<SearchResult> runSearch(sqlite3* db,
-                                    const std::vector<std::string>& tokens,
+                                    const SearchQuery& query,
                                     std::size_t limit,
                                     bool prefix_only,
                                     const std::unordered_set<std::string>& exclude_paths = {}) {
     std::ostringstream sql;
     sql << "SELECT path,parent_path,name,ext,root,size,modified_time,is_dir,scan_generation FROM files";
-    if (!tokens.empty()) {
+
+    std::vector<std::string> where;
+    for (std::size_t i = 0; i < query.terms.size(); ++i) {
+        where.emplace_back("(search_name LIKE ? ESCAPE '\\' OR search_path LIKE ? ESCAPE '\\')");
+    }
+    if (query.extension) where.emplace_back("ext = ? COLLATE NOCASE");
+    if (query.path_term) where.emplace_back("search_path LIKE ? ESCAPE '\\'");
+    if (query.min_size) where.emplace_back("size >= ?");
+    if (query.max_size) where.emplace_back("size <= ?");
+    if (query.modified_after) where.emplace_back("modified_time >= ?");
+    if (query.files_only) where.emplace_back("is_dir = 0");
+    if (query.directories_only) where.emplace_back("is_dir = 1");
+
+    if (!where.empty()) {
         sql << " WHERE ";
-        for (std::size_t i = 0; i < tokens.size(); ++i) {
+        for (std::size_t i = 0; i < where.size(); ++i) {
             if (i) sql << " AND ";
-            if (prefix_only && tokens.size() == 1) {
-                sql << "(search_name LIKE ? ESCAPE '\\' OR search_path LIKE ? ESCAPE '\\')";
-            } else {
-                sql << "(search_name LIKE ? ESCAPE '\\' OR search_path LIKE ? ESCAPE '\\')";
-            }
+            sql << where[i];
         }
     }
     sql << " ORDER BY is_dir DESC, name COLLATE NOCASE ASC LIMIT ?";
 
     auto stmt = prepare(db, sql.str());
     int bind_index = 1;
-    for (const auto& token : tokens) {
+    for (const auto& token : query.terms) {
         const auto escaped = escapeLike(token);
-        const auto pattern = (prefix_only && tokens.size() == 1) ? (escaped + "%") : ("%" + escaped + "%");
+        const auto pattern = (prefix_only && query.terms.size() == 1) ? (escaped + "%") : ("%" + escaped + "%");
         bindText(stmt.get(), bind_index++, pattern);
         bindText(stmt.get(), bind_index++, pattern);
     }
+    if (query.extension) bindText(stmt.get(), bind_index++, *query.extension);
+    if (query.path_term) bindText(stmt.get(), bind_index++, "%" + escapeLike(*query.path_term) + "%");
+    if (query.min_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.min_size));
+    if (query.max_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.max_size));
+    if (query.modified_after) sqlite3_bind_int64(stmt.get(), bind_index++, *query.modified_after);
     sqlite3_bind_int64(stmt.get(), bind_index, static_cast<sqlite3_int64>(limit + exclude_paths.size()));
 
     std::vector<SearchResult> results;
     results.reserve(limit);
     while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
         auto record = readFileRecord(stmt.get());
-        if (!exclude_paths.empty() && exclude_paths.find(record.path) != exclude_paths.end()) {
-            continue;
-        }
+        if (!exclude_paths.empty() && exclude_paths.find(record.path) != exclude_paths.end()) continue;
         SearchResult result;
         result.file = std::move(record);
         result.rank = prefix_only ? 1 : 2;
@@ -162,6 +174,8 @@ CREATE TABLE IF NOT EXISTS files (
     scan_generation INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_files_search_name ON files(search_name);
+CREATE INDEX IF NOT EXISTS idx_files_ext ON files(ext COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_files_size ON files(size);
 CREATE INDEX IF NOT EXISTS idx_files_root_generation ON files(root, scan_generation);
 CREATE INDEX IF NOT EXISTS idx_files_modified ON files(modified_time DESC);
 CREATE TABLE IF NOT EXISTS roots (
@@ -296,24 +310,23 @@ void Database::clear() const {
     conn.exec("DELETE FROM files; DELETE FROM roots;");
 }
 
-std::vector<SearchResult> Database::search(const std::string& query, std::size_t limit) const {
+std::vector<SearchResult> Database::search(const SearchQuery& query, std::size_t limit) const {
     SqliteConnection conn(db_path_);
-    const auto tokens = splitQuery(query);
-    if (tokens.empty()) {
-        return runSearch(conn.get(), tokens, limit, false);
-    }
-
-    if (tokens.size() == 1) {
-        auto prefix = runSearch(conn.get(), tokens, limit, true);
+    if (query.terms.size() == 1) {
+        auto prefix = runSearch(conn.get(), query, limit, true);
         if (prefix.size() >= limit) return prefix;
         std::unordered_set<std::string> seen;
         seen.reserve(prefix.size() * 2 + 1);
         for (const auto& item : prefix) seen.insert(item.file.path);
-        auto contains = runSearch(conn.get(), tokens, limit - prefix.size(), false, seen);
+        auto contains = runSearch(conn.get(), query, limit - prefix.size(), false, seen);
         prefix.insert(prefix.end(), std::make_move_iterator(contains.begin()), std::make_move_iterator(contains.end()));
         return prefix;
     }
-    return runSearch(conn.get(), tokens, limit, false);
+    return runSearch(conn.get(), query, limit, false);
+}
+
+std::vector<SearchResult> Database::search(const std::string& query, std::size_t limit) const {
+    return search(parseSearchQuery(query), limit);
 }
 
 std::uint64_t Database::totalFileCount() const {

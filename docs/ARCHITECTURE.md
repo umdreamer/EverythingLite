@@ -1,225 +1,108 @@
-# Everything Lite 技术设计方案
+# Everything Lite v0.2.0 架构设计
 
-## 一、目标与边界
+## 1. 目标
 
-Everything Lite 的第一阶段目标非常明确：在 macOS 上实现一个接近 Everything 使用感受的桌面文件搜索工具。用户启动后可以选择若干本地目录进行索引，程序在后台把文件名、路径、大小、修改时间和目录属性写入 SQLite；之后每次搜索都查询本地索引，不再遍历磁盘。macOS 通过 FSEvents 监听文件系统变化，并对索引进行增量维护。
+Everything Lite 首先解决“按文件名/路径极快找到本地文件”。架构优先保证索引一致性、交互响应和跨平台边界清晰，而不是提前加入全文内容、OCR 或 AI。
 
-第一版只解决“快速找到文件在哪里”，暂不解决文件正文全文检索、OCR、Embedding、RAG 等问题。这样可以把系统性能、一致性和跨平台抽象先做扎实。
-
-## 二、UI 设计
-
-主窗口只有三个核心操作入口：搜索框、索引目录、重建索引。结果区域使用 `QTableView + QAbstractTableModel`，避免 `QTableWidget` 在结果量较大时产生过多 Item 对象。列固定为“名称、所在位置、大小、修改时间”。双击结果执行系统默认打开；右键可在 Finder 中显示。
-
-底部状态栏同时显示索引项数量、当前结果数量、一次查询耗时和文件监听后端。这个信息对后续做性能测试非常重要，也可以快速判断当前使用的是 macOS FSEvents 还是非 macOS 的手动刷新后端。
-
-## 三、模块划分
+## 2. 分层
 
 ```text
-src/
-├── core/
-│   ├── file_record.h
-│   ├── path_utils.*
-│   ├── scanner.*
-│   ├── database.*
-│   ├── search_engine.*
-│   └── index_manager.*
-├── platform/
-│   ├── file_watcher.h
-│   ├── watcher_factory.*
-│   ├── mac_fsevents_watcher.*
-│   └── null_watcher.h
-├── cli/
-│   └── main.cpp
-└── ui/
-    ├── main.cpp
-    ├── main_window.*
-    ├── search_result_model.*
-    └── root_settings_dialog.*
-```
-
-核心层不依赖 Qt，只依赖 C++ 标准库和 SQLite。这样同一套索引核心既可以被 Qt Desktop 调用，也可以被 CLI 和 Docker 调用。Qt UI 只负责输入、显示、打开文件和组织后台任务。
-
-## 四、首次索引流程
-
-```text
-选择索引根目录
-      ↓
-生成新的 scan_generation
-      ↓
-FileScanner 递归扫描
-      ↓
-每 1000 条组成 batch
-      ↓
-SQLite 单事务批量 UPSERT
-      ↓
-扫描完成
-      ↓
-删除同 root 下旧 generation 的记录
-```
-
-批量事务可以显著降低逐文件 SQLite commit 的成本。`scan_generation` 解决了重建时索引一致性问题：旧索引不需要在扫描开始前清空，只有新一轮扫描成功完成后才删除没有被本轮扫描重新看到的旧记录。
-
-## 五、SQLite 数据层
-
-主表：
-
-```sql
-files(
-    id,
-    path,
-    parent_path,
-    name,
-    ext,
-    root,
-    size,
-    modified_time,
-    is_dir,
-    search_name,
-    search_path,
-    scan_generation
-)
-```
-
-`path` 唯一。`search_name` 和 `search_path` 保存搜索归一化后的字符串，避免每次查询都重新做英文大小写处理。建立 `search_name`、`root + scan_generation` 和 `modified_time` 索引。
-
-数据库连接启用：
-
-```text
-journal_mode=WAL
-synchronous=NORMAL
-temp_store=MEMORY
-busy_timeout=5000
-```
-
-WAL 的作用是让索引后台写入与前台搜索读取更容易并行进行。
-
-## 六、搜索流程
-
-单词搜索采用两阶段：
-
-```text
-第一阶段：前缀匹配
-第二阶段：包含匹配补足结果
-```
-
-这样典型的 Everything 用法——“记得文件名开头几个字符”——可以优先命中 B-Tree 友好的查询路径；只有结果不足时才执行 `%token%` 包含搜索。
-
-多词搜索采用 AND 语义：
-
-```text
-rowing 2026
-```
-
-要求每个 token 都至少出现在文件名或完整路径中。双引号可把包含空格的短语合并为一个 token。
-
-第一阶段每次最多返回 500 条结果，避免 UI 因为用户输入一个常见字母而一次构建数万条显示对象。
-
-## 七、macOS FSEvents
-
-FSEvents 后端实现 `FileWatcher` 统一接口。
-
-```cpp
-class FileWatcher {
-public:
-    virtual void setRoots(...) = 0;
-    virtual void setCallback(...) = 0;
-    virtual bool start() = 0;
-    virtual void stop() = 0;
-};
-```
-
-macOS 实现使用 FSEvents + 串行 Dispatch Queue。`FSEventStreamSetDispatchQueue()` 负责调度回调，不再使用 macOS 13 起已废弃的 RunLoop 调度 API。收到事件以后不直接操作 SQLite，而是把路径交给 Qt 主线程做 700 ms 防抖和合并，再启动后台更新任务。
-
-普通单文件事件：
-
-```text
-存在 → 重新读取 metadata → UPSERT
-不存在 → 删除该 path 以及可能的子路径
-```
-
-目录事件：
-
-```text
-删除该目录旧 subtree
-→ 重新扫描当前 subtree
-→ 批量写回
-```
-
-当 FSEvents 报告 `MustScanSubDirs`、`UserDropped`、`KernelDropped`、`EventIdsWrapped` 或 `RootChanged` 时，不再假定细粒度事件完整，而是对对应根目录执行完整重建。这是保证索引最终一致性的兜底机制。
-
-## 八、线程模型
-
-```text
-Qt Main Thread
-├── 输入与结果显示
-├── 查询数据库
-└── 接收 FSEvents 后的队列化通知
-
-Index Worker Thread
-├── 全量扫描
-├── 增量扫描
-└── SQLite batch 写入
-
-FSEvents Thread
-└── Serial Dispatch Queue + FSEventStream callback
-```
-
-当前 0.1 查询仍在 UI 线程执行，因为普通文件名查询时间很短，并且数据库使用 WAL。若百万级索引下 `%token%` 包含查询出现明显 UI 卡顿，0.2 将 SearchEngine 单独移动到长期 Search Worker 线程，并使用查询序号丢弃过时结果。
-
-## 九、Docker 的角色
-
-Docker 只运行核心 CLI：
-
-```text
-宿主目录 bind mount 到 /search
-SQLite volume 挂载到 /data
-CLI index /search
-CLI search keyword
-```
-
-它适合验证：扫描器、SQLite schema、批量写入、查询逻辑和无 GUI 环境构建。但 Docker Desktop for Mac 的 Linux 容器不能成为 macOS 原生 FSEvents/Qt Desktop 的等价运行环境，因此正式桌面使用必须构建原生 `.app`。
-
-## 十、跨平台扩展
-
-接口已经为后续平台预留：
-
-```text
-macOS  → FSEvents       已实现
-Windows → USN Journal   待实现
-Linux   → inotify       待实现
-```
-
-Scanner、Database、IndexManager 和 SearchEngine 不需要随平台改变。后续只需新增 watcher backend，再在 `watcher_factory.cpp` 中选择平台实现。
-
-## 十一、性能路线
-
-0.1 不过早引入复杂数据结构。SQLite 已足以验证产品形态。性能优化按照真实 benchmark 决定：
-
-```text
-SQLite B-Tree + WAL
+Qt UI
+├── Search input / table / context actions
+├── QSettings persistence
+└── QtConcurrent async query
         ↓
-优化 SQL 与批量事务
+SearchEngine
         ↓
-搜索线程异步化
-        ↓
-Unicode 归一化
-        ↓
-Trigram / Trie / mmap 内存索引
+SearchQuery parser ──→ Database search
+                         ↓
+                       SQLite
+                         ↑
+IndexManager ← FileScanner
+      ↑
+FileWatcher abstraction
+      ↑
+macOS FSEvents
 ```
 
-只有当真实百万级目录 benchmark 证明 SQLite 包含查询已经成为瓶颈时，才进入 Trie/Trigram 层。这样避免在还没有实际瓶颈时过度设计。
+Qt 不进入 Core。CLI、Docker 和测试都可在无 GUI 环境构建。
 
-## 十二、验收标准
+## 3. 索引流程
 
-第一阶段以以下标准作为可用性验收：
+完整重建使用 generation，而不是先清库：
 
-1. macOS 可成功构建 Qt `.app`；
-2. 可以选择多个索引目录；
-3. 可以完整建库；
-4. 输入关键词能够返回正确文件；
-5. 文件新增、删除、改名后能够通过 FSEvents 更新；
-6. 双击可以打开；
-7. Finder 可以定位；
-8. Docker CLI 可以挂载目录、建库和查询；
-9. CTest 核心测试通过；
-10. 索引丢事件时有全量重建兜底机制。
+```text
+beginRootScan(new generation)
+→ FileScanner 递归扫描
+→ batch UPSERT
+→ delete stale rows where generation != current
+→ completeRootScan
+```
+
+这样扫描期间旧数据仍可读；只有成功完成扫描后才清理旧项。
+
+增量变化：
+
+```text
+FSEvents
+→ debounce / event aggregation
+→ IndexManager::applyPathChange
+→ 文件存在：重新读取并 UPSERT
+→ 文件不存在：删除 path + descendants
+```
+
+目录变化会重新扫描该子树。FSEvents 报告事件丢失或必须重扫时，回退到完整 root rebuild，优先保证最终一致。
+
+## 4. SQLite
+
+SQLite 采用 WAL、NORMAL synchronous、busy timeout。核心字段包含 path、name、ext、root、size、modified_time、is_dir、search_name、search_path、scan_generation。
+
+索引包含：
+
+```text
+search_name
+ext
+size
+(root, scan_generation)
+modified_time
+```
+
+单普通关键词执行两段查询：先 `keyword%` 前缀，再 `%keyword%` 包含并去重；多关键词使用 AND 包含。过滤条件由 `SearchQuery` 转换为 SQL WHERE。
+
+## 5. SearchQuery
+
+v0.2.0 解析：
+
+```text
+ext:
+path:
+size:
+modified:
+type:
+```
+
+过滤词不参与普通关键词匹配；剩余 terms 同时匹配 `search_name` 与 `search_path`。
+
+## 6. GUI 异步查询
+
+GUI 线程不直接执行 SQLite search。输入后 100 ms debounce，再由 QtConcurrent 执行查询。若查询运行期间继续输入，不并发启动无限任务，而是记录“存在更新查询”；当前查询结束后立即执行最新输入，中间过时输入不会逐条执行。
+
+这保证输入框和窗口事件循环不会因为慢查询卡住，同时避免持续打字产生大量并发 SQLite 读取。
+
+## 7. 多 root
+
+用户可配置多个目录。`IndexManager::rebuildRoots` 会规范化、去重，并在核心层消除被父 root 覆盖的嵌套 root。数据库中已不再配置的 root 会被清理。Watcher 同时监听用户当前配置 root。
+
+## 8. UI Model/View
+
+结果使用 `QTableView + QAbstractTableModel`。不使用 `QTableWidget`，避免大量结果时逐 item 控件开销。v0.2.0 模型最多接收 1000 条结果，并支持四列本地排序。
+
+## 9. 平台边界
+
+当前：macOS 使用 FSEvents；非 macOS 暂为 NullWatcher。后续 Windows 应实现 USN Journal/ReadDirectoryChangesW，Linux 实现 inotify/fanotify，并保持 `FileWatcher` 接口稳定。
+
+系统级 global hotkey 也应进入 platform 层，而不是把第三方 Qt hotkey 依赖写进核心。
+
+## 10. 性能决策原则
+
+当前不引入 Trie。原因是：B-tree 前缀查询、SQLite WAL 和 1000 条上限已足以支撑 MVP；真正风险在 `%keyword%` 和 `path:%keyword%`。只有真实 10 万/50 万/100 万数据 benchmark 表明这些查询无法接受时，再引入 trigram、自定义倒排结构、mmap 或内存索引。

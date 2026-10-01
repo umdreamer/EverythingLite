@@ -1,3 +1,11 @@
+## 0.4.9
+
+- GUI 搜索改为“输入完成后搜索”：最后一次用户编辑后空闲 800 ms 才执行查询。
+- 搜索框监听由 `textChanged` 改为 `textEdited`，程序内部 `setText()` 不再误触发延迟查询。
+- 增加中文 IME composition 保护：预编辑/候选选择期间停止搜索计时，候选正式提交后才重新计时。
+- Enter 保留为立即搜索；IME 正在组词时不会把 Enter 当成查询命令。
+- 保留 v0.4.8 的 UTF-8/ASCII whitespace 修复和 v0.4.7 Search Trace，不改变搜索语义。
+
 ## 0.4.8
 
 - 修复 UTF-8 查询被 locale-sensitive `std::isspace()` 按字节错误拆分的问题。

@@ -18,6 +18,8 @@ class QAction;
 class QActionGroup;
 class QCheckBox;
 class QCloseEvent;
+class QEvent;
+class QObject;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -50,9 +52,11 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     static constexpr std::size_t kPageSize = 1000;
+    static constexpr int kSearchIdleDelayMs = 800;
 
     QString db_path_;
     QStringList roots_;
@@ -88,6 +92,7 @@ private:
     QSet<QString> pending_rescan_roots_;
     QString pending_search_query_;
     bool results_have_more_ = false;
+    bool search_ime_composing_ = false;
     bool name_search_available_ = false;
     bool name_search_ready_ = false;
     std::atomic_bool indexing_{false};

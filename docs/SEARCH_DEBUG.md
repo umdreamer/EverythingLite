@@ -1,4 +1,4 @@
-# GUI 搜索漏搜调试指南（0.4.8）
+# GUI 搜索漏搜调试指南（0.4.9）
 
 ## 1. 编译
 
@@ -15,7 +15,7 @@
 请确认窗口标题包含：
 
 ```text
-Everything Lite 0.4.8 [SEARCH TRACE]
+Everything Lite 0.4.9 [SEARCH TRACE]
 ```
 
 如果没有这个标题，就不是当前诊断模式。

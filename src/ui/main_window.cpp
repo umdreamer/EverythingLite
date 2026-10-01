@@ -24,6 +24,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -31,6 +32,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QInputMethodEvent>
 #include <QItemSelectionModel>
 #include <QKeySequence>
 #include <QLabel>
@@ -181,20 +183,31 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     search_timer_ = new QTimer(this);
     search_timer_->setSingleShot(true);
-    search_timer_->setInterval(100);
-    connect(search_timer_, &QTimer::timeout, this, &MainWindow::runSearch);
-    connect(search_edit_, &QLineEdit::textChanged, this, [this](const QString& text) {
-        // Short queries cannot use the trigram index and may require a large
-        // LIKE scan. Give IME/fast typing a little longer to settle, and stop
-        // an obsolete scan immediately instead of making the final query wait.
-        search_timer_->setInterval(text.trimmed().size() > 0 && text.trimmed().size() < 3 ? 240 : 100);
-        results_have_more_ = false;
-        search_timer_->start();
+    search_timer_->setInterval(kSearchIdleDelayMs);
+    connect(search_timer_, &QTimer::timeout, this, [this] {
+        // v0.4.9: never start a search while an IME composition is active.
+        // The timer is restarted after the composition is committed.
+        if (search_ime_composing_) return;
+        runSearch();
     });
+
+    // Search only after the user has stopped editing for a short idle window.
+    // textEdited() intentionally ignores programmatic setText() calls (for
+    // example when applying a bookmark), which already trigger their own
+    // explicit search. Every keystroke restarts the timer.
+    connect(search_edit_, &QLineEdit::textEdited, this, [this](const QString&) {
+        results_have_more_ = false;
+        search_timer_->stop();
+        if (!search_ime_composing_) {
+            search_timer_->start(kSearchIdleDelayMs);
+        }
+    });
+    search_edit_->installEventFilter(this);
+
     connect(search_edit_, &QLineEdit::returnPressed, this, [this] {
-        // v0.4.5: allow an explicit retry even when the text has not changed.
-        // A previous zero-result answer must never make the same keyword
-        // impossible to query again without editing the text.
+        // Enter remains the explicit immediate-search action, but an Enter used
+        // by the IME to choose/commit a candidate must not search preedit text.
+        if (search_ime_composing_) return;
         search_timer_->stop();
         runSearch();
     });
@@ -205,12 +218,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             else if (index == 2) scope_folders_action_->setChecked(true);
         }
         updateSearchStateLabel();
-        search_timer_->start();
+        search_timer_->start(kSearchIdleDelayMs);
     });
     connect(match_path_check_, &QCheckBox::toggled, this, [this](bool checked) {
         if (match_path_action_ && match_path_action_->isChecked() != checked) match_path_action_->setChecked(checked);
         updateSearchStateLabel();
-        search_timer_->start();
+        search_timer_->start(kSearchIdleDelayMs);
     });
 
     event_timer_ = new QTimer(this);
@@ -275,6 +288,31 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     saveSettings();
     saveBookmarks();
     QMainWindow::closeEvent(event);
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == search_edit_ && event && event->type() == QEvent::InputMethod) {
+        auto* input_event = static_cast<QInputMethodEvent*>(event);
+        const bool composing_now = !input_event->preeditString().isEmpty();
+
+        if (composing_now) {
+            search_ime_composing_ = true;
+            if (search_timer_) search_timer_->stop();
+            if (searchTraceEnabled()) {
+                searchTrace("GUI-INPUT", "IME preedit active; search postponed");
+            }
+        } else if (search_ime_composing_) {
+            // This event commits or cancels the composition. The QLineEdit will
+            // process the commit after this filter returns; the delayed timer
+            // therefore sees the final committed text, never the preedit text.
+            search_ime_composing_ = false;
+            if (search_timer_) search_timer_->start(kSearchIdleDelayMs);
+            if (searchTraceEnabled()) {
+                searchTrace("GUI-INPUT", "IME composition finished; idle timer started");
+            }
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::buildUi() {
@@ -656,7 +694,7 @@ void MainWindow::loadMoreResults() {
 }
 
 void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
-    // v0.4.8: keep the shared search path simple; Search Trace remains available
+    // v0.4.9: keep the shared search path simple; input timing is handled before this point
     // observable from the terminal. In trace mode we also launch the sibling
     // CLI executable with the exact same DB/query/limit/offset for a true
     // cross-process comparison.
@@ -876,7 +914,7 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("模型当前行数：%1").arg(model_ ? model_->rowCount() : 0);
     details << QStringLiteral("查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
     details << QStringLiteral("待处理搜索：否");
-    details << QStringLiteral("搜索执行方式：GUI 主线程同步 + Search Trace（v0.4.8）");
+    details << QStringLiteral("搜索执行方式：输入完成后延迟搜索（800 ms）+ IME 组词保护 + GUI 主线程同步（v0.4.9）");
     details << QStringLiteral("终端 Trace：%1").arg(searchTraceEnabled() ? QStringLiteral("已启用") : QStringLiteral("未启用"));
     details << QStringLiteral("CLI 探针：%1").arg(cliProbePath());
     QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));

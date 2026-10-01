@@ -2,10 +2,27 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.8`（UTF-8 查询解析修复版）
+当前版本：`0.4.9`（输入完成后搜索 / IME 防提前搜索版）
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
+
+
+## 1. v0.4.9 输入完成后再搜索
+
+0.4.9 保留 0.4.8 的 UTF-8 查询修复，不修改搜索结果语义。本版只调整 GUI 的搜索触发时机：用户连续输入时不立即查询，每次编辑都会重置 800 ms 单次计时器；只有最后一次输入后连续空闲 800 ms 才执行搜索。中文输入法处于拼音预编辑、候选选择等 IME composition 状态时会完全停止搜索计时，候选词正式提交后才重新计时。
+
+行为规则：
+
+```text
+连续输入           → 不搜索，持续重置计时器
+中文 IME 正在组词   → 不搜索
+候选词提交          → 开始 800 ms 空闲计时
+停止输入 800 ms     → 自动搜索
+按 Enter            → 立即搜索（IME 组词期间除外）
+```
+
+这样可以避免在输入 `砀例甲`、`示例工匠` 等词时，关键词尚未完成就启动同步数据库查询造成界面卡顿。后续 v0.5 的 Preferences 将把该延迟开放为可配置项。
 
 ## 1. v0.4.8 UTF-8 查询解析修复
 
@@ -38,7 +55,7 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 ./scripts/run-macos-debug.sh
 ```
 
-在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.8 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
+在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.9 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
 
 ## 1.1 v0.4.6 重点
 

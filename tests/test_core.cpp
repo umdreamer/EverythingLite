@@ -47,7 +47,7 @@ int main() {
 
     // U+00A0 (C2 A0 in UTF-8) is not an Everything Lite query separator.
     // This specifically protects all high-bit UTF-8 bytes from locale rules.
-    const std::string nbsp_inside = std::string("A") + "\xC2\xA0" + "B";
+    const std::string nbsp_inside = std::string("a") + "\xC2\xA0" + "b";
     const auto nbsp_tokens = splitQuery(nbsp_inside);
     assert(nbsp_tokens.size() == 1);
     assert(nbsp_tokens[0] == nbsp_inside);

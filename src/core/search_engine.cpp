@@ -20,4 +20,16 @@ std::vector<SearchResult> SearchEngine::search(const SearchQuery& query,
     return database_.search(query, limit, offset, cancel);
 }
 
+std::vector<SearchResult> SearchEngine::searchReliable(const std::string& query,
+                                                        std::size_t limit,
+                                                        std::size_t offset) const {
+    return database_.searchReliable(query, limit, offset);
+}
+
+std::vector<SearchResult> SearchEngine::searchReliable(const SearchQuery& query,
+                                                        std::size_t limit,
+                                                        std::size_t offset) const {
+    return database_.searchReliable(query, limit, offset);
+}
+
 } // namespace everything_lite

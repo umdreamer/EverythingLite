@@ -36,6 +36,7 @@ Usage:
   everything-lite-cli [--db PATH] db-path
   everything-lite-cli [--db PATH] index <root> [root...]
   everything-lite-cli [--db PATH] search <query> [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] search-safe <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] stats
   everything-lite-cli [--db PATH] clear
   everything-lite-cli [--db PATH] optimize-search
@@ -112,7 +113,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        if (command == "search") {
+        if (command == "search" || command == "search-safe") {
             if (args.size() < 2) {
                 std::cerr << "search requires a query\n";
                 return 2;
@@ -134,7 +135,9 @@ int main(int argc, char** argv) {
                 query_builder << arg;
             }
             SearchEngine engine(db_path);
-            const auto results = engine.search(query_builder.str(), limit, offset);
+            const auto results = command == "search-safe"
+                ? engine.searchReliable(query_builder.str(), limit, offset)
+                : engine.search(query_builder.str(), limit, offset);
             for (const auto& result : results) {
                 std::cout << (result.file.is_directory ? "[D] " : "[F] ")
                           << result.file.name << "\t"

@@ -187,8 +187,9 @@ std::vector<SearchResult> runSearch(sqlite3* db,
                                     std::size_t limit,
                                     std::size_t offset,
                                     bool fts_ready,
-                                    const std::atomic_bool* cancel) {
-    const bool use_fts = canUseNameFts(query, fts_ready);
+                                    const std::atomic_bool* cancel,
+                                    bool force_like = false) {
+    const bool use_fts = !force_like && canUseNameFts(query, fts_ready);
 
     std::ostringstream sql;
     if (use_fts) {
@@ -451,7 +452,7 @@ std::vector<SearchResult> Database::search(const SearchQuery& query,
                                            const std::atomic_bool* cancel) const {
     SqliteConnection conn(db_path_);
     const bool fts_ready = tableExists(conn.get(), "files_name_fts") && metadataFlag(conn.get(), "name_fts_ready");
-    return runSearch(conn.get(), query, limit, offset, fts_ready, cancel);
+    return runSearch(conn.get(), query, limit, offset, fts_ready, cancel, false);
 }
 
 std::vector<SearchResult> Database::search(const std::string& query,
@@ -459,6 +460,23 @@ std::vector<SearchResult> Database::search(const std::string& query,
                                            std::size_t offset,
                                            const std::atomic_bool* cancel) const {
     return search(parseSearchQuery(query), limit, offset, cancel);
+}
+
+std::vector<SearchResult> Database::searchReliable(const SearchQuery& query,
+                                                   std::size_t limit,
+                                                   std::size_t offset) const {
+    SqliteConnection conn(db_path_);
+    // Deliberately bypass the optional FTS index. The canonical `files` table
+    // is the source of truth and therefore defines correctness. No progress
+    // handler is installed on this path so the GUI and CLI execute identical
+    // SQL semantics.
+    return runSearch(conn.get(), query, limit, offset, false, nullptr, true);
+}
+
+std::vector<SearchResult> Database::searchReliable(const std::string& query,
+                                                   std::size_t limit,
+                                                   std::size_t offset) const {
+    return searchReliable(parseSearchQuery(query), limit, offset);
 }
 
 std::uint64_t Database::totalFileCount() const {

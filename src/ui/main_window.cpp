@@ -87,6 +87,13 @@ QString utf8Hex(const QString& value) {
     return QString::fromLatin1(value.toUtf8().toHex(' '));
 }
 
+bool containsNonAscii(const QString& value) {
+    for (const QChar ch : value) {
+        if (ch.unicode() > 0x7f) return true;
+    }
+    return false;
+}
+
 QStringList defaultRoots() {
     QStringList roots;
     const auto home = QDir::homePath();
@@ -677,14 +684,29 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             timer.start();
             SearchEngine engine(toUtf8(db_path));
 
-            // In the default GUI state use the exact same string overload as
-            // the CLI. This removes the last semantic difference between
-            // `everything-lite-cli search X` and typing X into the GUI.
+            // v0.4.4 correctness-first policy:
+            // - Any non-ASCII query (Chinese/Japanese/Korean/accented text, etc.)
+            //   uses the canonical files table + LIKE path. We deliberately do
+            //   not depend on FTS5/trigram for correctness here.
+            // - ASCII queries may use the accelerated path, but a zero-result
+            //   answer is verified once with the reliable LIKE path.
+            // Performance tuning is intentionally secondary until false
+            // negatives are eliminated on the user's real 2.6M-item index.
+            const bool reliability_first = containsNonAscii(normalized_query);
+
             if (item_scope == 0 && !match_path) {
-                outcome.execution_mode = QStringLiteral("CLI-compatible raw query");
-                outcome.results = engine.search(toUtf8(normalized_query), kPageSize + 1, offset, cancel.get());
+                if (reliability_first) {
+                    outcome.execution_mode = QStringLiteral("Reliable LIKE (non-ASCII)");
+                    outcome.results = engine.searchReliable(toUtf8(normalized_query), kPageSize + 1, offset);
+                } else {
+                    outcome.execution_mode = QStringLiteral("Fast search + reliable zero-result fallback");
+                    outcome.results = engine.search(toUtf8(normalized_query), kPageSize + 1, offset, cancel.get());
+                    if (outcome.results.empty() && !normalized_query.isEmpty() && !cancel->load(std::memory_order_relaxed)) {
+                        outcome.results = engine.searchReliable(toUtf8(normalized_query), kPageSize + 1, offset);
+                        outcome.execution_mode += QStringLiteral(" -> LIKE fallback");
+                    }
+                }
             } else {
-                outcome.execution_mode = QStringLiteral("GUI query + UI filters");
                 auto parsed = parseSearchQuery(toUtf8(normalized_query));
 
                 // Explicit type:file/type:dir in the query wins over the UI filter.
@@ -693,7 +715,18 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
                     else if (item_scope == 2) parsed.directories_only = true;
                 }
                 if (match_path) parsed.match_path = true;
-                outcome.results = engine.search(parsed, kPageSize + 1, offset, cancel.get());
+
+                if (reliability_first) {
+                    outcome.execution_mode = QStringLiteral("Reliable LIKE + UI filters (non-ASCII)");
+                    outcome.results = engine.searchReliable(parsed, kPageSize + 1, offset);
+                } else {
+                    outcome.execution_mode = QStringLiteral("Fast search + UI filters + reliable zero-result fallback");
+                    outcome.results = engine.search(parsed, kPageSize + 1, offset, cancel.get());
+                    if (outcome.results.empty() && !normalized_query.isEmpty() && !cancel->load(std::memory_order_relaxed)) {
+                        outcome.results = engine.searchReliable(parsed, kPageSize + 1, offset);
+                        outcome.execution_mode += QStringLiteral(" -> LIKE fallback");
+                    }
+                }
             }
             outcome.raw_result_count = static_cast<int>(outcome.results.size());
             if (outcome.results.size() > kPageSize) {

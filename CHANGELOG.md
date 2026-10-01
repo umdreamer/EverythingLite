@@ -1,6 +1,15 @@
 # Changelog
 
-## v0.4.3 — GUI/CLI 查询链路一致性修复
+## 0.4.4
+
+- 搜索策略改为正确性优先。
+- 新增 `searchReliable`，直接使用 `files` 表 + LIKE，绕过 FTS5。
+- GUI 中文/非 ASCII 查询默认使用 Reliable LIKE。
+- ASCII 快速搜索返回 0 时自动执行 Reliable LIKE 复核。
+- CLI 新增 `search-safe`。
+- 新增“砀例甲”“示例工匠”中文回归测试。
+
+## v0.4.4 — GUI/CLI 查询链路一致性修复
 
 - 默认“全部 + 不匹配路径”状态下，GUI 直接调用与 CLI 完全相同的字符串搜索入口。
 - GUI 查询统一 NFC 归一化，并移除 U+200B/U+FEFF/U+2060 等不可见格式字符。

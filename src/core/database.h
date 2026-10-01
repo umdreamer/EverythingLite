@@ -42,6 +42,17 @@ public:
                                      std::size_t offset = 0,
                                      const std::atomic_bool* cancel = nullptr) const;
 
+    // Correctness-first search path. This deliberately bypasses FTS5/trigram
+    // and uses the canonical files table with LIKE predicates. It is slower
+    // on very large indexes, but it is the reference implementation used as
+    // a fallback whenever an accelerated search could miss a valid result.
+    std::vector<SearchResult> searchReliable(const SearchQuery& query,
+                                             std::size_t limit = 500,
+                                             std::size_t offset = 0) const;
+    std::vector<SearchResult> searchReliable(const std::string& query,
+                                             std::size_t limit = 500,
+                                             std::size_t offset = 0) const;
+
     std::uint64_t totalFileCount() const;
     std::vector<std::string> roots() const;
 

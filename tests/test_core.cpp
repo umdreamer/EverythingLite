@@ -37,6 +37,7 @@ int main() {
     fs::create_directories(base / "砀例甲资料");
     std::ofstream(base / "砀例甲示例文档.docx") << "sample text";
     std::ofstream(base / "砀例甲资料" / "示例记录.txt") << "record";
+    std::ofstream(base / "示例工匠示例文件.pdf") << "sample text";
 
     const auto db = (db_dir / "index.db").string();
     IndexManager manager(db);
@@ -89,6 +90,15 @@ int main() {
 
     results = engine.search("path:砀例甲", 20);
     assert(containsName(results, "示例记录.txt"));
+
+    // v0.4.4 correctness-first reference path: the canonical files table must
+    // return Chinese terms independently of FTS5/trigram behavior.
+    results = engine.searchReliable("砀例甲", 20);
+    assert(containsName(results, "砀例甲示例文档.docx"));
+    assert(containsName(results, "砀例甲资料"));
+
+    results = engine.searchReliable("示例工匠", 20);
+    assert(containsName(results, "示例工匠示例文件.pdf"));
 
     // A cancelled GUI-style query must be interruptible instead of blocking
     // the next request behind a potentially expensive LIKE scan.

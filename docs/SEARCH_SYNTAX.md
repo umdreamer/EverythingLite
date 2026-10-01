@@ -101,3 +101,13 @@ ext:pdf size:>10m modified:30d type:file example
 - Search → Match Path 等价于为普通词启用完整路径匹配。
 - Search → All / Files / Folders 等价于 UI 级类型过滤；查询中显式 `type:file` / `type:dir` 优先。
 - 尚未实现的 Match Case / Whole Word / Regex 不会提前显示为可用开关，计划在 v0.6 实现。
+
+## v0.4.4：正确性优先搜索
+
+GUI 对包含非 ASCII 字符的查询（如 `砀例甲`、`示例工匠`）默认使用 canonical `files` 表的 LIKE 子串匹配，暂时绕过 FTS5 trigram，以避免加速索引路径导致漏搜。ASCII 查询仍可使用快速路径，但 0 结果会自动用 LIKE 复核。
+
+CLI 可显式验证可靠路径：
+
+```bash
+./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
+```

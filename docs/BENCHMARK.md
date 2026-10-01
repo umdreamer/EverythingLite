@@ -1,4 +1,4 @@
-# Everything Lite 性能测试 v0.3.0
+# Everything Lite 性能测试（v0.4.0 兼容）
 
 ## 1. 真实基线（v0.2.0）
 

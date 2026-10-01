@@ -130,3 +130,23 @@ files
 ### 结果窗口
 
 SearchEngine 对外提供 `limit + offset`。Qt 首批加载 1000 条，滚动接近底部再请求下一批。这样数据库匹配数量与 UI 当前持有数量解耦。
+
+## v0.4 Desktop Shell
+
+v0.4 不修改 Core 边界，新增的是 Qt Desktop Shell：
+
+```text
+macOS Native Menu Bar / Qt MenuBar
+             ↓
+      MainWindow actions
+             ↓
+Search controls / Bookmarks / Export / Finder / Quick Look
+             ↓
+        SearchEngine
+             ↓
+      SQLite / FTS5
+```
+
+菜单只调用 Service/Core 已存在的能力，不允许 UI 直接修改 SQLite。Bookmarks 与窗口布局属于 UI 状态，使用 QSettings；文件索引仍只由 Database / IndexManager 管理。
+
+macOS 特定行为目前保持在 UI 边缘（`open -R`、`qlmanage -p`），长期会抽象到 platform 层。v0.8 计划将 Quick Look、Open With 和全局快捷键改成正式 macOS 后端。

@@ -48,3 +48,14 @@ everything-lite/
 ```
 
 核心模块含义：`scanner` 负责读取文件系统元数据，`index_manager` 负责全量/增量索引事务流程，`database` 负责 SQLite，`search_query` 负责把用户输入解析成过滤条件，`search_engine` 提供稳定查询接口，`platform` 隔离操作系统文件事件，`ui` 只负责 Qt 桌面交互。
+
+## v0.4 新增/重点文档
+
+```text
+docs/
+├── ROADMAP.md                  # v0.4 到 v1.0 的正式版本路线
+├── UI_GUIDE.md                 # 菜单、主窗口、快捷键
+└── EVERYTHING_COMPATIBILITY.md # 与 Everything 的功能映射
+```
+
+v0.4 的 UI 菜单实现继续集中在 `src/ui/main_window.*`，避免在 v0.5 Preferences/Exclude 架构尚未确定前过早拆分大量 UI 类。v0.5 开始增加独立 Preferences 与 Exclude rule model。

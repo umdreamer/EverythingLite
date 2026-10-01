@@ -1,4 +1,4 @@
-# Everything Lite 搜索语法 v0.3.0
+# Everything Lite 搜索语法 v0.4.0
 
 ## 默认语义：只匹配名称
 
@@ -94,3 +94,10 @@ ext:pdf size:>10m modified:30d type:file example
 ## 性能说明
 
 普通 basename 查询在 SQLite FTS5 trigram 可用且查询词至少 3 个 Unicode 字符时使用 trigram 索引。1~2 字符、`path:` 和“匹配路径”当前使用兼容 SQL 路径。
+
+
+## v0.4 菜单映射
+
+- Search → Match Path 等价于为普通词启用完整路径匹配。
+- Search → All / Files / Folders 等价于 UI 级类型过滤；查询中显式 `type:file` / `type:dir` 优先。
+- 尚未实现的 Match Case / Whole Word / Regex 不会提前显示为可用开关，计划在 v0.6 实现。

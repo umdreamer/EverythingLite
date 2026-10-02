@@ -32,6 +32,7 @@ class QWidget;
 
 namespace everything_lite {
 
+class DesktopActions;
 class SearchResultModel;
 class SearchWorker;
 
@@ -56,6 +57,7 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    friend class UiTest;
     static constexpr std::size_t kPageSize = 1000;
     static constexpr int kSearchIdleDelayMs = 800;
 
@@ -70,6 +72,10 @@ private:
     QCheckBox* match_path_check_ = nullptr;
     QLabel* scope_label_ = nullptr;
     QLabel* status_label_ = nullptr;
+    QLabel* watcher_error_label_ = nullptr;
+    QString watcher_error_;
+    std::uint64_t watcher_generation_ = 0;
+    DesktopActions* desktop_actions_ = nullptr;
     QLabel* search_state_label_ = nullptr;
     QTableView* table_ = nullptr;
     SearchResultModel* model_ = nullptr;
@@ -140,6 +146,7 @@ private:
     void exportLoadedResults();
     void showContextMenu(const QPoint& pos);
     void restartWatcher();
+    void receiveWatcherEvent(std::uint64_t generation, const FileEvent& event);
     void scheduleFileEvent(const FileEvent& event);
     void processPendingEvents();
     QString rootForPath(const QString& path) const;

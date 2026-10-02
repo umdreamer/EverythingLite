@@ -23,7 +23,8 @@
       "inherits": "core-debug",
       "binaryDir": "${sourceDir}/build/gui-debug",
       "cacheVariables": {
-        "BUILD_GUI": "ON"
+        "BUILD_GUI": "ON",
+        "REQUIRE_GUI": "ON"
       }
     }
   ],

@@ -8,6 +8,8 @@
 #include "core/search_query.h"
 #include "platform/watcher_factory.h"
 #include "ui/root_settings_dialog.h"
+#include "ui/desktop_actions.h"
+#include "ui/file_preview.h"
 #include "ui/search_result_model.h"
 #include "ui/search_worker.h"
 
@@ -136,12 +138,13 @@ void runCliProbe(const QString& db_path, const QString& query, std::size_t limit
 
 QStringList defaultRoots() {
     QStringList roots;
-    const auto home = QDir::homePath();
-    for (const auto& name : {QStringLiteral("Desktop"), QStringLiteral("Documents"), QStringLiteral("Downloads")}) {
-        const auto path = QDir(home).filePath(name);
-        if (QFileInfo::exists(path)) roots << QDir::cleanPath(path);
+    for (const auto location : {QStandardPaths::DesktopLocation,QStandardPaths::DocumentsLocation,QStandardPaths::DownloadLocation}) {
+        const auto writable_path = QStandardPaths::writableLocation(location);
+        if (writable_path.isEmpty()) continue;
+        const auto path = QDir::cleanPath(writable_path);
+        if (QFileInfo(path).isDir() && !roots.contains(path)) roots << path;
     }
-    if (roots.isEmpty()) roots << home;
+    if (roots.isEmpty()) roots << QDir::homePath();
     return roots;
 }
 
@@ -165,6 +168,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     searchTrace("GUI", "MainWindow db=\"" + toUtf8(db_path_) + "\"");
 
     buildUi();
+    desktop_actions_ = new DesktopActions(this);
+    connect(desktop_actions_, &DesktopActions::feedback, this, [this](const QString& message) {
+        statusBar()->showMessage(message, 10000);
+    });
+    connect(desktop_actions_, &DesktopActions::previewFallback, this, [this](const QString& path) {
+        (new FilePreview(path, this))->show();
+    });
 
     buildMenus();
     loadSettings();
@@ -423,6 +433,12 @@ void MainWindow::buildUi() {
     search_state_label_ = new QLabel(this);
     search_state_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     statusBar()->addWidget(status_label_, 1);
+    watcher_error_label_ = new QLabel(this);
+    watcher_error_label_->setTextFormat(Qt::PlainText);
+    watcher_error_label_->setWordWrap(true);
+    watcher_error_label_->setStyleSheet(QStringLiteral("color: #b33"));
+    watcher_error_label_->hide();
+    statusBar()->addPermanentWidget(watcher_error_label_);
     statusBar()->addPermanentWidget(search_state_label_);
     statusBar()->setSizeGripEnabled(false);
 }
@@ -447,15 +463,13 @@ void MainWindow::buildMenus() {
     auto* open_with = file_menu->addAction(QStringLiteral("打开方式…"));
     connect(open_with, &QAction::triggered, this, &MainWindow::openWithCurrent);
 
-#ifdef Q_OS_MACOS
     auto* quick_look = file_menu->addAction(QStringLiteral("快速查看"));
     quick_look->setShortcut(QKeySequence(Qt::Key_Space));
     connect(quick_look, &QAction::triggered, this, &MainWindow::quickLookCurrent);
-#endif
 
     file_menu->addSeparator();
     auto* export_action = file_menu->addAction(QStringLiteral("导出已加载结果…"));
-    export_action->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+    export_action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     connect(export_action, &QAction::triggered, this, &MainWindow::exportLoadedResults);
 
     file_menu->addSeparator();
@@ -470,7 +484,7 @@ void MainWindow::buildMenus() {
 
     auto* edit_menu = menuBar()->addMenu(QStringLiteral("编辑(&E)"));
     auto* copy_path = edit_menu->addAction(QStringLiteral("复制完整路径"));
-    copy_path->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+    copy_path->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
     connect(copy_path, &QAction::triggered, this, &MainWindow::copyCurrentPath);
 
     auto* copy_name = edit_menu->addAction(QStringLiteral("复制名称"));
@@ -490,7 +504,7 @@ void MainWindow::buildMenus() {
 
     auto* view_menu = menuBar()->addMenu(QStringLiteral("查看(&V)"));
     auto* refresh_action = view_menu->addAction(QStringLiteral("刷新结果"));
-    refresh_action->setShortcut(QKeySequence(QStringLiteral("Ctrl+R")));
+    refresh_action->setShortcut(QKeySequence::Refresh);
     connect(refresh_action, &QAction::triggered, this, &MainWindow::runSearch);
 
     view_menu->addSeparator();
@@ -652,7 +666,7 @@ void MainWindow::rebuildBookmarksMenu() {
     bookmarks_menu_->clear();
 
     add_bookmark_action_ = bookmarks_menu_->addAction(QStringLiteral("添加到书签…"));
-    add_bookmark_action_->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
+    add_bookmark_action_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
     connect(add_bookmark_action_, &QAction::triggered, this, &MainWindow::addCurrentBookmark);
 
     organize_bookmarks_action_ = bookmarks_menu_->addAction(QStringLiteral("整理书签…"));
@@ -947,6 +961,7 @@ void MainWindow::showIndexStatus() {
         details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（大量索引项可能需要一些时间）");
     }
     details << QStringLiteral("监听后端：%1").arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未启动"));
+    if (!watcher_error_.isEmpty()) details << QStringLiteral("监听错误：%1").arg(watcher_error_);
     if (!last_search_query_.isNull()) {
         details << QStringLiteral("最近查询：%1").arg(last_search_query_.isEmpty() ? QStringLiteral("<全部>") : last_search_query_);
         details << QStringLiteral("最近查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
@@ -1008,7 +1023,7 @@ QStringList MainWindow::selectedNames() const {
 void MainWindow::openCurrent() {
     const auto paths = selectedPaths();
     if (paths.isEmpty()) return;
-    for (const auto& path : paths.mid(0, 20)) QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    for (const auto& path : paths.mid(0, 20)) desktop_actions_->open(path);
     if (paths.size() > 20) statusBar()->showMessage(QStringLiteral("一次最多打开前 20 个所选项目。"), 4000);
 }
 
@@ -1022,10 +1037,12 @@ void MainWindow::openWithCurrent() {
                                                  QLineEdit::Normal, {}, &ok).trimmed();
     if (!ok || app_name.isEmpty()) return;
     for (const auto& path : paths.mid(0, 20)) {
-        QProcess::startDetached(QStringLiteral("/usr/bin/open"), {QStringLiteral("-a"), app_name, path});
+        desktop_actions_->openWithApplication(path, app_name);
     }
 #else
-    QMessageBox::information(this, QStringLiteral("打开方式"), QStringLiteral("当前平台的“打开方式”选择器将在后续平台适配版本中实现。"));
+    const auto executable = QFileDialog::getOpenFileName(this, QStringLiteral("选择可执行应用文件"), QStringLiteral("/usr/bin"));
+    if (executable.isEmpty()) return;
+    for (const auto& path : paths.mid(0, 20)) desktop_actions_->openWithExecutable(path, executable);
 #endif
 }
 
@@ -1034,12 +1051,7 @@ void MainWindow::revealCurrent() {
     if (!current.isValid()) return;
     const auto path = model_->pathAt(current.row());
     if (path.isEmpty()) return;
-#ifdef Q_OS_MACOS
-    QProcess::startDetached(QStringLiteral("/usr/bin/open"), {QStringLiteral("-R"), path});
-#else
-    const auto target = model_->isDirectoryAt(current.row()) ? path : QFileInfo(path).absolutePath();
-    QDesktopServices::openUrl(QUrl::fromLocalFile(target));
-#endif
+    desktop_actions_->reveal(path);
 }
 
 void MainWindow::quickLookCurrent() {
@@ -1047,11 +1059,7 @@ void MainWindow::quickLookCurrent() {
     if (!current.isValid()) return;
     const auto path = model_->pathAt(current.row());
     if (path.isEmpty()) return;
-#ifdef Q_OS_MACOS
-    QProcess::startDetached(QStringLiteral("/usr/bin/qlmanage"), {QStringLiteral("-p"), path});
-#else
-    openCurrent();
-#endif
+    desktop_actions_->preview(path);
 }
 
 void MainWindow::copyCurrentPath() {
@@ -1097,19 +1105,20 @@ void MainWindow::showContextMenu(const QPoint& pos) {
 
     QMenu menu(this);
     auto* open = menu.addAction(QStringLiteral("打开"));
-#ifdef Q_OS_MACOS
     auto* quick_look = menu.addAction(QStringLiteral("快速查看"));
-#endif
+    quick_look->setShortcut(QKeySequence(Qt::Key_Space));
+#ifdef Q_OS_MACOS
     auto* reveal = menu.addAction(QStringLiteral("在 Finder 中显示"));
+#else
+    auto* reveal = menu.addAction(QStringLiteral("打开所在位置"));
+#endif
     auto* open_with = menu.addAction(QStringLiteral("打开方式…"));
     menu.addSeparator();
     auto* copy_path = menu.addAction(QStringLiteral("复制完整路径"));
     auto* copy_name = menu.addAction(QStringLiteral("复制名称"));
     const auto* selected = menu.exec(table_->viewport()->mapToGlobal(pos));
     if (selected == open) openCurrent();
-#ifdef Q_OS_MACOS
     else if (selected == quick_look) quickLookCurrent();
-#endif
     else if (selected == reveal) revealCurrent();
     else if (selected == open_with) openWithCurrent();
     else if (selected == copy_path) copyCurrentPath();
@@ -1117,23 +1126,53 @@ void MainWindow::showContextMenu(const QPoint& pos) {
 }
 
 void MainWindow::restartWatcher() {
+    const auto generation = ++watcher_generation_;
     if (watcher_) watcher_->stop();
     watcher_ = createPlatformWatcher();
     std::vector<std::string> native_roots;
     for (const auto& root : roots_) native_roots.push_back(toUtf8(root));
     watcher_->setRoots(std::move(native_roots));
-    watcher_->setCallback([this](const FileEvent& event) {
-        QMetaObject::invokeMethod(this, [this, event] { scheduleFileEvent(event); }, Qt::QueuedConnection);
+    watcher_->setCallback([this, generation](const FileEvent& event) {
+        QMetaObject::invokeMethod(this, [this, generation, event] {
+            receiveWatcherEvent(generation, event);
+        }, Qt::QueuedConnection);
     });
-    watcher_->start();
+    watcher_error_.clear();
+    if (!watcher_->start()) {
+        watcher_error_ = fromUtf8(watcher_->lastError());
+        if (watcher_error_.isEmpty()) watcher_error_ = QStringLiteral("文件监听启动失败");
+    } else if (!watcher_->lastError().empty()) {
+        watcher_error_ = fromUtf8(watcher_->lastError());
+    }
+    watcher_error_label_->setText(watcher_error_);
+    watcher_error_label_->setVisible(!watcher_error_.isEmpty());
     refreshStats();
 }
 
+void MainWindow::receiveWatcherEvent(std::uint64_t generation, const FileEvent& event) {
+    if (generation != watcher_generation_) return;
+    scheduleFileEvent(event);
+}
+
 void MainWindow::scheduleFileEvent(const FileEvent& event) {
+    const auto error = !event.error.empty() ? fromUtf8(event.error)
+                                          : watcher_ ? fromUtf8(watcher_->lastError()) : QString{};
+    if (!error.isEmpty()) {
+        watcher_error_ = error;
+        watcher_error_label_->setText(error);
+        watcher_error_label_->show();
+    }
     if (event.path.empty()) return;
     const auto path = fromUtf8(event.path);
     const auto root = rootForPath(path);
     if (root.isEmpty()) return;
+    if (event.needs_full_rescan && error.isEmpty()) {
+        // A current coverage rebuild with empty lastError means the watcher
+        // recovered. Statistics and ordinary path events never erase errors.
+        watcher_error_.clear();
+        watcher_error_label_->clear();
+        watcher_error_label_->hide();
+    }
     if (event.needs_full_rescan) {
         pending_rescan_roots_.insert(root);
     } else {

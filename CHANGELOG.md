@@ -1,6 +1,15 @@
 # 更新记录
 
-本项目通过 Vibe Coding 方式开发。以下条目概述版本快照中的实现记录，不代表交互或性能验收结论。0.4.5、0.4.10 缺少独立源码快照；记录依据见 [历史版本边界](docs/history/VERSIONS.md)。
+本项目通过 Vibe Coding 方式开发。以下条目概述版本快照中的实现记录，不代表交互或性能验收结论。历史导入时，0.4.5、0.4.10 缺少独立源码快照；记录依据见 [历史版本边界](docs/history/VERSIONS.md)。
+
+## 0.4.12
+
+- Mac 与 Linux 共用 0.4.11 搜索核心和 Qt 主窗口，两端同步版本。
+- Linux 新增递归 inotify，处理目录变化、根重建、事件溢出与监听错误状态。
+- Linux 新增文件定位、可执行程序选择和快速查看，系统服务失败提供有限回退。
+- GUI 显示名称为 Everything Lite，GUI 文件为 EverythingLite，CLI 为 everything-lite-cli；保留内部设置与数据库兼容。
+- 新增 Ubuntu 24.04 开发镜像、Linux 构建与 Debian 打包脚本、桌面入口与图标。
+- 增加平台监听、桌面接口、Qt 界面与合成 CLI 结果对照；实际运行范围见 [测试说明](docs/TEST_REPORT.md)。
 
 ## 0.4.11
 

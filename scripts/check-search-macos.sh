@@ -11,7 +11,7 @@ if [[ ! -x "$CLI" ]]; then
   exit 1
 fi
 
-echo "=== Everything Lite v0.4.1 搜索诊断 ==="
+echo "=== everything-lite-cli 搜索诊断 ==="
 echo "数据库：$($CLI db-path)"
 echo
 echo "--- stats ---"

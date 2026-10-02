@@ -4,7 +4,7 @@ Everything Lite 使用提示驱动的 AI 生成与迭代开发。贡献可采用
 
 ## 开发环境
 
-在仓库根目录持续维护 `src/`、`tests/`、`scripts/` 与 `docs/`。不复制新的版本目录，不将本地归档作为开发入口。构建说明见 [开发指南](docs/DEVELOPMENT.md) 和 [macOS 构建](docs/MACOS_BUILD.md)。
+在仓库根目录持续维护 `src/`、`tests/`、`scripts/` 与 `docs/`。不复制新的版本目录，不将本地归档作为开发入口。构建说明见 [开发指南](docs/DEVELOPMENT.md) 和 [macOS 构建](docs/MACOS_BUILD.md) 与 [Linux 构建](docs/LINUX_BUILD.md)。
 
 核心回归应使用 Debug：
 

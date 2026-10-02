@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Everything Lite
+Comment=Search local file names, paths and properties
+Exec=EverythingLite
+Icon=everything-lite
+Terminal=false
+Categories=Utility;FileTools;
+StartupNotify=true

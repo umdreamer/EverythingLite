@@ -2,7 +2,7 @@
 
 > **Vibe Coding 项目**：本项目通过提示驱动的 AI 生成、修改与迭代形成，非个人逐行手工编写。该开发方式不等于代码已经得到全面验证；功能实现、自动测试、交互验收与性能验证应分别评估。
 
-Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前版本为 **0.4.11**。技术栈为 C++17、Qt 6 Widgets、SQLite 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
+Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前版本为 **0.4.12**。技术栈为 C++17、Qt 6 Widgets、SQLite 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
 
 ## 功能
 
@@ -10,7 +10,9 @@ CLI 与 GUI 共用 `SearchService`。普通关键词默认只匹配文件或文�
 
 GUI 在最后一次编辑后等待 800 ms 提交查询，中文输入法组词期间暂停自动搜索。`SearchWorker` 在专用 `QThread` 中初始化并复用搜索服务；过期 request ID 的结果被丢弃，搜索期间保留已显示结果。结果每批加载 1000 条，表头排序及 CSV 导出作用于已加载结果。书签、窗口布局及索引目录配置使用 QSettings 保存。
 
-macOS 使用 FSEvents 监听文件变化，并提供 Finder 定位、Quick Look 及打开方式操作。其他平台当前使用 `NullWatcher`，尚未实现实时文件监听。项目不提供文件正文全文搜索。
+macOS 使用 FSEvents，Linux 使用递归 inotify 监听文件变化。两平台共用搜索核心和 Qt 主窗口；文件定位、打开方式与快速查看由平台适配。Linux 以 Ubuntu 24.04 LTS 为基线，Debian 系发行版需在目标环境构建及验证。项目不提供文件正文全文搜索。
+
+GUI 显示名称为 **Everything Lite**，GUI 可执行文件名为 `EverythingLite`（macOS 为 `EverythingLite.app`），命令行程序名为 `everything-lite-cli`。文件名、界面名称与内部配置标识分别按用途命名，已有数据库及 QSettings 标识保持兼容。
 
 ## 构建与测试
 
@@ -22,7 +24,7 @@ cmake --build --preset core-debug --parallel 4
 ctest --preset core-debug
 ```
 
-核心测试含 `assert`，回归使用 Debug。目前 CTest 注册一个 `core` 测试入口；不要并发运行多份核心测试，它们使用固定临时目录。测试覆盖范围与验收边界见 [测试说明](docs/TEST_REPORT.md)。
+核心测试含 `assert`，回归使用 Debug。平台监听及 GUI 测试仅在相应构建配置中启用；不要并发运行多份核心测试，它们使用固定临时目录。测试覆盖范围与验收边界见 [测试说明](docs/TEST_REPORT.md)。
 
 macOS GUI 还需要 Qt 6 Widgets。使用 Homebrew 安装依赖后构建：
 
@@ -31,11 +33,21 @@ brew install cmake qtbase sqlite
 cmake --preset gui-debug -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase)"
 cmake --build --preset gui-debug --parallel 4
 ctest --preset gui-debug
-test -x build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
-./build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
+test -x build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite
+./build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite
 ```
 
-Qt 缺失时 CMake 会跳过 GUI，因此必须确认应用可执行文件实际生成。该构建用于本机开发，独立分发仍需部署 Qt 依赖、签名和公证。详见 [macOS 构建](docs/MACOS_BUILD.md)。
+GUI Debug 预设设置 `REQUIRE_GUI=ON`，缺少 Qt 时配置失败；通用配置仍允许跳过 GUI。该构建用于本机开发，独立分发仍需部署 Qt 依赖、签名和公证。详见 [macOS 构建](docs/MACOS_BUILD.md)。
+
+Ubuntu 24.04 桌面构建：
+
+```bash
+sudo apt-get install build-essential cmake libsqlite3-dev qt6-base-dev qt6-base-dev-tools libgl1-mesa-dev dbus xdg-utils qt6-wayland
+./scripts/build-linux.sh
+./scripts/run-linux.sh
+```
+
+Debian 安装包由 `./scripts/package-linux.sh` 生成，默认只写入 `dist/`。运行时依赖和容器验证见 [Linux 构建](docs/LINUX_BUILD.md)，共享能力与验收边界见 [平台一致性](docs/PLATFORM_PARITY.md)。
 
 ## CLI 示例
 
@@ -55,7 +67,7 @@ touch "$EL_SAMPLE_DIR/sample/sample.txt" "$EL_SAMPLE_DIR/sample/砀例甲/exampl
 
 ## 限制与验证边界
 
-GUI 尚未完成公开记录的人工交互验收。Core 测试通过不能证明中文输入法、窗口操作、FSEvents 事件稳定性或大数据库性能已经验收。短关键词和完整路径查询可能走较慢的扫描路径；当前排序不是数据库全部匹配结果的全局排序。Trace 模式的独立 CLI 探针可能同步等待，调试模式的响应表现不能作为普通模式性能结论。
+GUI 尚未完成公开记录的目标桌面人工交互验收。自动测试通过不能证明实际中文输入法、窗口焦点、原生预览或大数据库性能已经验收。短关键词和完整路径查询可能走较慢的扫描路径；当前排序不是数据库全部匹配结果的全局排序。Trace 模式的独立 CLI 探针可能同步等待，调试模式的响应表现不能作为普通模式性能结论。
 
 ## 文档
 

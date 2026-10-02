@@ -21,6 +21,9 @@ int main(int argc, char* argv[]) {
     }
 
     QApplication app(argc, argv);
+#ifdef Q_OS_LINUX
+    QGuiApplication::setDesktopFileName(QStringLiteral("org.everythinglite.EverythingLite"));
+#endif
     QCoreApplication::setOrganizationName(QStringLiteral("CICHI"));
     QCoreApplication::setApplicationName(QStringLiteral("Everything Lite"));
     QCoreApplication::setApplicationVersion(QStringLiteral(EVERYTHING_LITE_VERSION));

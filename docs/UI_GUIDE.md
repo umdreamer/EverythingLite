@@ -1,4 +1,4 @@
-# 界面与操作（0.4.11）
+# 界面与操作（0.4.12）
 
 ## 主窗口与搜索
 
@@ -10,7 +10,7 @@
 
 ## 文件与编辑
 
-File 菜单提供新搜索窗口、打开、Finder 定位、打开方式、Quick Look 与导出已加载结果。macOS Quick Look 通过外部系统工具调用，打开方式通过应用名称调用系统打开命令。CSV 只导出已加载模型，不能当作完整匹配集合。
+文件菜单提供新搜索窗口、打开、所在位置、打开方式、快速查看与导出已加载结果。Mac 使用 Finder 与系统 Quick Look，打开方式按应用名称调用系统工具。Linux 文件定位使用 FileManager1，失败时打开父目录并提示；打开方式选择本地可执行程序；快速查看优先使用 GNOME Sushi，缺少服务时展示 Qt 基础预览。CSV 只导出已加载模型，不能当作完整匹配集合。
 
 结果支持多选。复制路径或名称把所有选中项目以换行分隔复制到剪贴板。导出和剪贴板内容可能包含个人路径，公开分享前必须检查。
 
@@ -26,6 +26,8 @@ Tools 菜单提供索引目录配置、重建索引、索引状态和最近搜�
 
 索引状态和最近搜索诊断会展示数据库、根目录或关键词等本地信息。测试仅使用合成目录；更换数据库不会自动更换 QSettings 中的索引范围。
 
-## macOS 快捷键
+## 快捷键
 
 Command+N 新建窗口，Command+O 打开选中项，Command+F 聚焦搜索框，Command+A 全选已加载结果，Command+, 打开 Preferences，Command+Q 退出。Space 调用 Quick Look，结果列表中的 Return 打开当前项目。实际按键及焦点行为需要在目标系统上人工确认。
+
+Linux 使用 Qt 标准快捷键，常见为 Ctrl+N、Ctrl+O、Ctrl+F、Ctrl+A；Space 为快速查看。命令行程序名为 everything-lite-cli，GUI 显示名称为 Everything Lite，GUI 文件名为 EverythingLite。

@@ -2,7 +2,7 @@
 
 ## 工程入口
 
-应用版本为 0.4.11，源码在仓库根目录。当前开发入口为 `src/`、`tests/`、`scripts/` 与 `docs/`，不建立新的版本副本目录。本地 `archive/` 是原始资料存放位置，不属于公开构建输入，也不能作为日常开发入口。版本证据边界见 [历史版本](history/VERSIONS.md)。
+应用版本为 0.4.12，源码在仓库根目录。当前开发入口为 `src/`、`tests/`、`scripts/` 与 `docs/`，不建立新的版本副本目录。本地 `archive/` 是原始资料存放位置，不属于公开构建输入，也不能作为日常开发入口。版本证据边界见 [历史版本](history/VERSIONS.md)。
 
 ## Core 与 GUI
 
@@ -14,7 +14,7 @@ cmake --build --preset core-debug --parallel 4
 ctest --preset core-debug
 ```
 
-测试使用 `assert`，Release 常定义 `NDEBUG`，因此回归应使用 Debug。当前 CTest 只有一个 `core` 入口；测试采用固定临时目录，不并发运行多个测试实例。
+测试使用 `assert`，Release 常定义 `NDEBUG`，因此回归应使用 Debug。平台监听及 GUI 测试按配置启用；测试采用固定临时目录，不并发运行多个测试实例。
 
 macOS GUI：
 
@@ -22,11 +22,13 @@ macOS GUI：
 cmake --preset gui-debug -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase)"
 cmake --build --preset gui-debug --parallel 4
 ctest --preset gui-debug
-test -x build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
-./build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
+test -x build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite
+./build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite
 ```
 
-Qt 缺失时 CMake 跳过 GUI，必须检查可执行文件。首次配置后可增量 build 与 ctest；依赖或配置变化后重新 configure。预设使用 Unix Makefiles，其他生成器需要独立构建目录。详见 [macOS 构建](MACOS_BUILD.md)。
+GUI 预设要求 Qt；通用配置仍允许跳过 GUI，必须检查可执行文件。首次配置后可增量 build 与 ctest；依赖或配置变化后重新 configure。预设使用 Unix Makefiles，其他生成器需要独立构建目录。详见 [macOS 构建](MACOS_BUILD.md)。
+
+Linux 构建、打包与容器测试见 [Linux 构建](LINUX_BUILD.md)，共享行为与系统差异见 [平台一致性](PLATFORM_PARITY.md)。
 
 ## 隔离示例
 

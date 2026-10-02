@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build-macos}"
-APP="$BUILD_DIR/everything-lite.app"
-BIN="$APP/Contents/MacOS/everything-lite"
+APP="$BUILD_DIR/EverythingLite.app"
+BIN="$APP/Contents/MacOS/EverythingLite"
 LOG_DIR="${TRACE_LOG_DIR:-$ROOT_DIR/debug-logs}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/search-trace-$STAMP.log"

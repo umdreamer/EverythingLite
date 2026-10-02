@@ -23,7 +23,7 @@
 
 ```bash
 ./build/core-debug/everything-lite-cli --trace-search --db ./sample.db probe-search '砀例甲' --limit 50
-EVERYTHING_LITE_DB="$PWD/sample.db" EVERYTHING_LITE_SEARCH_TRACE=1 ./build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite --debug-search
+EVERYTHING_LITE_DB="$PWD/sample.db" EVERYTHING_LITE_SEARCH_TRACE=1 ./build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite --debug-search
 ```
 
 GUI 仍使用 QSettings 的索引目录，必须在界面内改为合成目录。Trace 可输出版本、可执行文件与数据库路径、查询原文、规范化文本、UTF-8、过滤参数、SQL、绑定值、结果路径及模型行数。公开文档使用 `砀例甲`（三字）、`示例工匠`（四字）和 `sample` 作为合成查询。

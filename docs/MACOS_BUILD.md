@@ -8,34 +8,34 @@
 brew install cmake qtbase sqlite
 ```
 
-当前 GUI 仅查找 Qt Widgets，Core 不依赖 Qt。使用 Qt Base 的安装前缀配置 GUI：
+GUI 测试还使用 Qt Test；Mac 不需要 Qt DBus。应用查找 Qt Widgets，Core 不依赖 Qt。使用 Qt Base 的安装前缀配置 GUI：
 
 ```bash
 cmake --preset gui-debug -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase)"
 cmake --build --preset gui-debug --parallel 4
 ctest --preset gui-debug
-test -x build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
+test -x build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite
 ```
 
-CMake 在找不到 Qt6 Widgets 时仅警告并跳过 GUI，因此构建退出码不能独立证明 GUI 产物存在。Debug 用于使核心测试断言生效，GUI 交互仍需人工检查。
+GUI Debug 预设启用 REQUIRE_GUI，缺少 Qt Widgets 时配置失败。其他配置可能跳过 GUI，因此仍须检查实际产物。Debug 用于使核心测试断言生效，GUI 交互仍需人工检查。
 
 ## 本机运行
 
 ```bash
-./build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
+./build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite
 ```
 
 默认数据库与 GUI 设置用于实际索引。隔离演示应设置独立数据库并在界面中选择合成目录：
 
 ```bash
-EVERYTHING_LITE_DB="$PWD/sample.db" ./build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
+EVERYTHING_LITE_DB="$PWD/sample.db" ./build/gui-debug/EverythingLite.app/Contents/MacOS/EverythingLite
 ```
 
 此处仅隔离数据库，不隔离 QSettings。避免在演示环境中沿用日常索引根目录。
 
 ## 本机脚本
 
-`./scripts/build-macos.sh` 提供 Release 本机构建，默认清除 `build-macos/`。设置 `CLEAN_BUILD=0` 可进行增量构建；其 Release CTest 结果不能代替 Debug 回归。
+`./scripts/build-macos.sh` 默认增量进行 Release 本机构建，输出到 `build-macos/`。`EL_BUILD_TYPE=Debug` 启用 Debug 与测试，`CLEAN_BUILD=1` 使用编译器 clean-first，不删除用户指定目录。Release 不执行包含 assert 的回归。
 
 ```bash
 CLEAN_BUILD=0 ./scripts/build-macos.sh

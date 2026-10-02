@@ -1,7 +1,13 @@
+# 更新记录
+
+本项目通过 Vibe Coding 方式开发。以下条目概述版本快照中的实现记录，不代表交互或性能验收结论。0.4.5、0.4.10 缺少独立源码快照；记录依据见 [历史版本边界](docs/history/VERSIONS.md)。
+
 ## 0.4.11
 
-- 将 GUI 的 SQLite 搜索从主线程迁移到专用 `SearchWorker`/`QThread`，查询期间输入框、鼠标和窗口重绘保持响应。
-- 后台线程懒初始化并复用 `SearchService`，首次数据库/FTS 初始化也不再阻塞 GUI。
+实现记录依据源码线程结构；GUI 响应、IME 与交互尚未人工验收。Trace 的独立 CLI 探针可能同步等待。
+
+- 将 GUI 的 SQLite 搜索从主线程迁移到专用 `SearchWorker`/`QThread`。
+- 后台线程懒初始化并复用 `SearchService`，首次数据库/FTS 初始化在该线程执行。
 - 保留 800 ms 输入完成后搜索和中文 IME composition 保护。
 - 使用 request ID 丢弃过期结果；搜索过程中继续输入时不会闪回旧结果。
 - 同一时刻只执行一个 SQLite 查询；若查询期间产生新请求，只保留“需要搜索最新状态”这一项，避免任务堆积。
@@ -41,8 +47,6 @@
 - CLI 新增 `--trace-search` 与 `probe-search` 摘要命令。
 - Database trace 输出 SQLite 版本/source id、FTS 状态、最终 SQL、bind 参数、结果数和前 5 条路径。
 
-# Changelog
-
 ## 0.4.6
 
 - 新增应用级唯一 `SearchService`，CLI `search` 与 GUI 共用同一个搜索入口。
@@ -72,7 +76,7 @@
 - CLI 新增 `search-safe`。
 - 新增“砀例甲”“示例工匠”中文回归测试。
 
-## v0.4.4 — GUI/CLI 查询链路一致性修复
+## v0.4.3 — GUI/CLI 查询链路一致性修复
 
 - 默认“全部 + 不匹配路径”状态下，GUI 直接调用与 CLI 完全相同的字符串搜索入口。
 - GUI 查询统一 NFC 归一化，并移除 U+200B/U+FEFF/U+2060 等不可见格式字符。
@@ -99,7 +103,7 @@
 - 索引状态增加 Files/FTS 可见记录数、最近查询与耗时；CLI 增加 FTS5 `integrity-check` 深度一致性检查。
 - 新增“砀例甲”中文 trigram/path 回归测试和取消查询测试。
 
-## 0.4.0 - 2026-09-14
+## 0.4.0
 
 ### Added
 

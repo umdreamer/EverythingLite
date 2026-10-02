@@ -1,28 +1,19 @@
-# Everything Lite 0.4.11 Release Notes
+# Everything Lite 0.4.11 发布说明
 
-## 目标
+## 变更范围
 
-解决 v0.4.10 中“每次真正搜索时 GUI 卡住、macOS 鼠标转圈，结果出来后才恢复”的体验问题。搜索结果正确性保持不变，本版只重构执行线程与结果调度。
+后台搜索工作线程。
 
-## 主要修改
+增加 `SearchWorker` 与专用 `QThread`，把 SQLite 查询及搜索服务首次初始化移至工作线程，并在后续请求中复用服务。
 
-1. 新增 `src/ui/search_worker.h/.cpp`。SQLite/SearchService 搜索在专用 `QThread` 中执行，GUI 主线程不再直接调用查询。
-2. SearchWorker 在后台线程首次使用时创建 SearchService，并在后续查询中复用。首次数据库/FTS 初始化成本同样移出 GUI。
-3. 800 ms debounce 与中文 IME composition 保护继续保留。
-4. 搜索期间不清空当前表格，状态栏显示“正在后台搜索…可继续输入”。结果完成后一次性更新。
-5. 每次输入/范围变化都会使旧 request ID 失效。后台旧查询即使完成，也不会覆盖新关键词的结果。
-6. 同时最多执行一个 SQLite 查询。如果查询期间最新关键词已准备好，只记录一个 pending 状态，旧查询结束后直接搜索最新 UI 状态，避免积压多个查询。
-7. 不使用 SQLite cancellation/progress-handler 作为正常 GUI 路径，继续优先保证搜索正确性。
+继续采用 800 ms 防抖和 IME 保护。搜索期间保留旧结果；输入或范围变化使 request ID 失效，过期结果被丢弃。每个窗口正常调度最多执行一个搜索查询，期间仅保留待搜索标记，结束后读取最新 UI 状态，不累积中间查询。
 
-## 保留的修复
+正常 GUI 查询不使用 SQLite 在线取消，默认仍与 CLI 共用 `SearchService`。保留 UTF-8 ASCII 空白拆词、启动不自动查询及 Search Trace。
 
-- v0.4.8：UTF-8 查询拆词改为严格 ASCII whitespace，`砀例甲`、`示例工匠` 等不再因 `0xA0` 被拆坏。
-- v0.4.9：停止输入 800 ms 后才查询；中文输入法组词期间不搜索。
-- v0.4.10：启动时不执行空关键词 1001 条同步查询。
-- v0.4.7：`run-macos-debug.sh` 与 Search Trace 仍保留。
+此版本的线程改动不代表已完成 GUI 人工验收。Trace 模式还会同步等待独立 CLI 探针，可能影响窗口响应。Debug Core 测试、GUI 产物确认、IME、过期结果、分页、退出和事件更新须分别验证。
 
-## 验证重点
+## 验证与使用边界
 
-在 Mac 上运行后连续搜索 `砀例甲`、`示例工匠`、`示例丙`、`pdf` 等关键词。即使某次 SQLite 查询需要数百毫秒或数秒，输入框、鼠标、窗口拖动不应出现系统转圈；状态栏会显示后台搜索状态。
+本说明保留功能演进，不沿用个人机器数据或历史通过率作为当前验证结果。未复测的行为不得标记为通过。当前构建步骤见 [开发指南](../DEVELOPMENT.md)，验证范围见 [测试说明](../TEST_REPORT.md)，版本来源见 [历史版本](../history/VERSIONS.md)。
 
-当前容器缺少 Qt6 Widgets/macOS SDK，因此 GUI 最终编译与 macOS 交互需要在目标 Mac 上验证；Core/CLI 自动测试已通过。
+公开复现使用独立数据库及合成目录；不上传日常索引或原始 Trace。当前运行方式应按 0.4.11 文档执行，旧版本策略仅用于理解演进。

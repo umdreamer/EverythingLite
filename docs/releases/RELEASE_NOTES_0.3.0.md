@@ -1,74 +1,17 @@
-# Everything Lite v0.3.0 Release Notes
+# Everything Lite 0.3.0 发布说明
 
-## 为什么做这一版
+## 变更范围
 
-v0.2 在真实 macOS Home 目录上索引 [private benchmark removed] 项后，结构化过滤非常快，但普通子串搜索明显失速：`ext:pdf` 约 100 ms、`modified:7d` 约 20 ms，而 `pdf` 约 [redacted]、`2026` 约 [redacted]、`path:sample` 约 [redacted]。
+名称搜索与分批加载。
 
-原因有两个：
+普通关键词调整为只匹配文件或文件夹名称，路径匹配通过 `path:` 或 Match Path 显式启用。增加文件/文件夹范围控制。
 
-1. v0.2 普通关键词错误地同时匹配 `search_name OR search_path`，导致父目录关键词产生大量非预期结果，也扩大了扫描量。
-2. SQLite B-tree 无法有效处理 `%keyword%` 任意子串。
+SQLite 支持 FTS5 trigram 时，可为至少三个 Unicode 码点的名称关键词建立加速路径；短词和完整路径匹配保留兼容 SQL。名称加速索引可由已有 `files` 表构建，并通过触发器维护。
 
-## v0.3 的方案
+GUI 改为每批 1000 条继续加载，1000 不再是最终匹配结果的固定上限。此变化不等于全局排序、完整导出或大规模性能已完成验收。
 
-### 1. Everything 风格的搜索语义
+## 验证与使用边界
 
-普通词只匹配 basename。文件和文件夹仍都属于结果项，但可用 GUI 下拉框切换“全部 / 仅文件 / 仅文件夹”。完整路径搜索需要显式勾选“匹配路径”或使用 `path:`。
+本说明保留功能演进，不沿用个人机器数据或历史通过率作为当前验证结果。未复测的行为不得标记为通过。当前构建步骤见 [开发指南](../DEVELOPMENT.md)，验证范围见 [测试说明](../TEST_REPORT.md)，版本来源见 [历史版本](../history/VERSIONS.md)。
 
-### 2. SQLite FTS5 trigram
-
-普通名称查询在满足条件时使用 FTS5 trigram：
-
-```text
->= 3 Unicode 字符
-+ 未开启 Match Path
-+ FTS5 trigram 可用
-```
-
-短查询和路径查询继续 fallback。
-
-### 3. v0.2 无重扫升级
-
-首次运行 v0.3 时，如果检测到已有数据库但 trigram 尚未建立，程序直接从 `files` 表后台构建 FTS 索引，不重新遍历磁盘。建立完成后触发器维护 FTS 与主表一致。
-
-### 4. 无限向下浏览
-
-1000 不再是最终结果上限。GUI 采用每批 1000 的 incremental loading：接近底部自动请求下一批。状态栏用 `1000+`、`2000+` 表示后面仍有结果。
-
-## 升级方式
-
-正常编译运行即可：
-
-```bash
-./scripts/build-macos.sh
-./scripts/run-macos.sh
-```
-
-已有 v0.2 数据库会自动执行一次名称索引迁移。也可手动：
-
-```bash
-./build-macos/everything-lite-cli optimize-search
-```
-
-检查：
-
-```bash
-./build-macos/everything-lite-cli stats
-```
-
-应看到：
-
-```text
-名称 Trigram 索引：ready
-```
-
-## 建议复测
-
-使用与 v0.2 完全相同的真实目录和查询：
-
-```bash
-./build-macos/everything-lite-cli benchmark "$HOME" \
-  'pdf' 'sample' 'ext:pdf' 'path:sample' 'modified:7d' 'size:>100m type:file'
-```
-
-重点比较 `pdf` 和 `2026`。`path:sample` 当前仍没有独立路径 trigram，因此预计仍显著慢于名称搜索。
+公开复现使用独立数据库及合成目录；不上传日常索引或原始 Trace。当前运行方式应按 0.4.11 文档执行，旧版本策略仅用于理解演进。

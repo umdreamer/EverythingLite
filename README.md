@@ -1,59 +1,68 @@
 # Everything Lite
 
-Everything Lite 是本地文件名与路径搜索工具，当前应用版本为 **0.4.11**。源码仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
+> **Vibe Coding 项目**：本项目通过提示驱动的 AI 生成、修改与迭代形成，非个人逐行手工编写。该开发方式不等于代码已经得到全面验证；功能实现、自动测试、交互验收与性能验证应分别评估。
 
-技术栈为 C++17、Qt 6 Widgets、SQLite 和 CMake；macOS 使用 FSEvents 进行文件变化监听，其他平台目前使用 NullWatcher，尚没有实时监听实现。
+Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前版本为 **0.4.11**。技术栈为 C++17、Qt 6 Widgets、SQLite 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
 
-源码现在直接位于本仓库根目录。继续开发时使用 `src/`、`tests/`、`scripts/` 和 `docs/`，不再复制新的版本目录。原始压缩包、旧版本解压目录和原有构建产物保留在本地 `archive/`，该目录不进入 Git 或 Docker 构建上下文。
+## 功能
 
-## 当前行为
+CLI 与 GUI 共用 `SearchService`。普通关键词默认只匹配文件或文件夹名称；`path:` 或 Match Path 显式启用完整路径匹配。支持 `ext:`、`size:`、`modified:` 与 `type:file` / `type:dir`，并在 SQLite 支持且名称索引就绪时使用 FTS5 trigram 加速。
 
-CLI 与 GUI 共用 `SearchService`。GUI 在停止输入 800 ms 后提交查询，中文 IME 组词期间暂停计时；SQLite 查询及 SearchService 初始化由 `SearchWorker` 在专用 QThread 中执行。过期 request ID 的结果被丢弃，后台同时仅执行一项查询，搜索期间保留旧结果。启动时不自动进行空关键词查询。这些是当前源码实现，交互验收仍应按发布说明在真实数据库上进行。
+GUI 在最后一次编辑后等待 800 ms 提交查询，中文输入法组词期间暂停自动搜索。`SearchWorker` 在专用 `QThread` 中初始化并复用搜索服务；过期 request ID 的结果被丢弃，搜索期间保留已显示结果。结果每批加载 1000 条，表头排序及 CSV 导出作用于已加载结果。书签、窗口布局及索引目录配置使用 QSettings 保存。
 
-普通关键词默认只匹配文件或文件夹名称；`path:` 或 Match Path 显式启用路径匹配。支持 `ext:`、`size:`、`modified:` 和 `type:file` / `type:dir`。GUI 每批加载 1000 条，当前排序主要针对已加载结果。书签、窗口布局和索引目录设置使用 QSettings。完整说明见 [搜索语法](docs/SEARCH_SYNTAX.md)、[UI 指南](docs/UI_GUIDE.md) 和 [0.4.11 发布说明](docs/releases/RELEASE_NOTES_0.4.11.md)。
+macOS 使用 FSEvents 监听文件变化，并提供 Finder 定位、Quick Look 及打开方式操作。其他平台当前使用 `NullWatcher`，尚未实现实时文件监听。项目不提供文件正文全文搜索。
 
 ## 构建与测试
 
-在已经安装 CMake、C++ 编译器和 SQLite 开发库的环境中，可独立构建 Core/CLI。以下预设使用 Unix Makefiles，适合 macOS/Linux：
+Core/CLI 需要 CMake 3.21.1 或更高版本、C++17 编译器、SQLite 开发库及构建工具。仓库预设使用 Unix Makefiles：
 
 ```bash
 cmake --preset core-debug
 cmake --build --preset core-debug --parallel 4
 ctest --preset core-debug
-./build/core-debug/everything-lite-cli
 ```
 
-macOS GUI 开发使用已有 Homebrew Qt Base 环境：
+核心测试含 `assert`，回归使用 Debug。目前 CTest 注册一个 `core` 测试入口；不要并发运行多份核心测试，它们使用固定临时目录。测试覆盖范围与验收边界见 [测试说明](docs/TEST_REPORT.md)。
+
+macOS GUI 还需要 Qt 6 Widgets。使用 Homebrew 安装依赖后构建：
 
 ```bash
+brew install cmake qtbase sqlite
 cmake --preset gui-debug -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase)"
 cmake --build --preset gui-debug --parallel 4
 ctest --preset gui-debug
+test -x build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
 ./build/gui-debug/everything-lite.app/Contents/MacOS/everything-lite
 ```
 
-预设使用 Debug，使现有测试中的 `assert` 生效。原有 `./scripts/build-macos.sh` 仍可用于 Release 本机构建；它默认删除 `build-macos/`，日常增量构建可设置 `CLEAN_BUILD=0`。CMake 在 Qt 缺失时仅警告并跳过 GUI，因此应额外确认 `.app` 实际生成，不能仅凭构建退出码宣称 GUI 成功。详见 [开发指南](docs/DEVELOPMENT.md)。
+Qt 缺失时 CMake 会跳过 GUI，因此必须确认应用可执行文件实际生成。该构建用于本机开发，独立分发仍需部署 Qt 依赖、签名和公证。详见 [macOS 构建](docs/MACOS_BUILD.md)。
 
-## 本地版本历史
+## CLI 示例
 
-本仓库从实际压缩包重建了 14 个版本快照：0.1.0、0.1.1、0.2.0、0.3.0、0.4.0、0.4.1、0.4.2、0.4.3、0.4.4、0.4.6、0.4.7-debug、0.4.8、0.4.9、0.4.11。每个快照对应独立提交与同名 `v` 标签，例如 `v0.1.0`、`v0.4.7-debug`、`v0.4.11`；整理工作另作提交，不改变原版标签。
-
-**0.4.5 和 0.4.10 缺少独立源码快照**。后续版本中的发布说明已保留，但未据此伪造这两个版本的源码、提交或标签。导入时间和提交身份使用本次实际环境；原始开发时间、作者和细粒度开发过程无法由这些压缩包确认。校验值与对应提交见 [导入清单](docs/history/import-manifest.json)，完整边界见 [仓库整理报告](docs/history/REPOSITORY_MIGRATION.md)。
+以下样例仅创建合成文件并使用独立数据库。`--db` 应放在命令名之前，避免操作日常索引。
 
 ```bash
-git log --oneline --reverse
-git tag --list --sort=version:refname
-git show v0.4.11:CMakeLists.txt
+EL_SAMPLE_DIR="$(mktemp -d)"
+mkdir -p "$EL_SAMPLE_DIR/sample/砀例甲" "$EL_SAMPLE_DIR/sample/示例工匠"
+touch "$EL_SAMPLE_DIR/sample/sample.txt" "$EL_SAMPLE_DIR/sample/砀例甲/example.pdf"
+./build/core-debug/everything-lite-cli --db "$EL_SAMPLE_DIR/sample.db" index "$EL_SAMPLE_DIR/sample"
+./build/core-debug/everything-lite-cli --db "$EL_SAMPLE_DIR/sample.db" search '砀例甲'
+./build/core-debug/everything-lite-cli --db "$EL_SAMPLE_DIR/sample.db" search 'ext:pdf'
+./build/core-debug/everything-lite-cli --db "$EL_SAMPLE_DIR/sample.db" stats
 ```
 
-以后每次完成一个可验证的改动，测试后本地提交，再同步到 GitHub；达到发布条件时再修改版本信息、更新发布说明并打标签。远程地址可用 `git remote -v` 查看。
+数据库记录文件路径与属性；搜索、诊断和导出输出也可能包含路径。Search Trace 启用后会记录关键词及 SQL 参数，原始日志不能上传。详见 [隐私与公开材料](docs/PRIVACY.md)。
 
-## 文档与后续方向
+## 限制与验证边界
 
-[工程目录](docs/PROJECT_STRUCTURE.md) 与 [当前架构](docs/ARCHITECTURE.md) 对应 0.4.11；[CHANGELOG](CHANGELOG.md) 和 [发布说明目录](docs/releases/) 保留版本演进；[本次验证记录](docs/history/VERIFICATION.md) 说明整理后的实际检查及局限。历史交付测试记录保留在 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)，不代表本次重新验证的结果。
+GUI 尚未完成公开记录的人工交互验收。Core 测试通过不能证明中文输入法、窗口操作、FSEvents 事件稳定性或大数据库性能已经验收。短关键词和完整路径查询可能走较慢的扫描路径；当前排序不是数据库全部匹配结果的全局排序。Trace 模式的独立 CLI 探针可能同步等待，调试模式的响应表现不能作为普通模式性能结论。
 
-下一主版本的既有方向是 Indexes / Excludes / Preferences，验收目标见 [路线图](docs/ROADMAP.md)。当前仍需关注短关键词及路径搜索性能、真实大索引上的 GUI 响应、已加载窗口排序，以及 macOS 分发所需的部署与签名；本次整理没有实现这些功能。
+## 文档
 
-## 许可证
+使用说明见 [搜索语法](docs/SEARCH_SYNTAX.md)、[界面指南](docs/UI_GUIDE.md) 与 [搜索诊断](docs/SEARCH_DEBUG.md)。工程说明见 [架构](docs/ARCHITECTURE.md)、[目录结构](docs/PROJECT_STRUCTURE.md)、[开发指南](docs/DEVELOPMENT.md) 与 [性能测量](docs/BENCHMARK.md)。版本演进见 [CHANGELOG](CHANGELOG.md)、[发布说明索引](docs/RELEASES.md) 与 [历史版本边界](docs/history/VERSIONS.md)。后续方向见 [路线图](docs/ROADMAP.md)，官方资料见 [参考资料](docs/REFERENCES.md)。
 
-当前项目源码采用 [MIT License](LICENSE)，版权署名为 `Copyright (c) 2026 umdreamer`。标准许可证文本参考 [Open Source Initiative — The MIT License](https://opensource.org/license/mit)。外部依赖仍受其各自许可证约束。本次新增许可证不改变 0.4.11 应用版本，也不重写已导入的历史标签。
+## 贡献与许可证
+
+贡献流程见 [CONTRIBUTING](CONTRIBUTING.md)，安全问题处理见 [SECURITY](SECURITY.md)。代码、测试和文档应同步维护，贡献内容不得包含个人路径、日常索引、原始日志或未经验证的性能结论。
+
+项目源码采用 [MIT License](LICENSE)。Qt、SQLite 等外部依赖受各自许可证约束。

@@ -1,74 +1,33 @@
-# Everything Lite 性能测试（v0.4.0 兼容）
+# 性能测量
 
-## 1. 真实基线（v0.2.0）
+## 测量边界
 
-macOS 实测索引项：[private benchmark removed]。
+仓库不发布个人索引规模、真实检索词或个人机器性能数据，也不承诺固定查询延迟。性能受文件数量、名称分布、磁盘、SQLite 功能、索引状态、缓存、过滤条件及分页 offset 影响。单次命令计时不足以推断一般性能，更不能据此证明 GUI 交互流畅。
 
-```text
-Index time: [redacted] ms
-Index rate: [redacted] items/s
-pdf: [redacted] ms
-sample: [redacted] ms
-ext:pdf: [redacted] ms
-path:sample: [redacted] ms
-modified:7d: [redacted] ms
-size:>100m type:file: [redacted] ms
-```
+## 合成样例
 
-这说明瓶颈不是 SQLite 本身，而是任意子串与完整路径扫描。
-
-## 2. v0.3 复测命令
+先按 [开发指南](DEVELOPMENT.md) 创建合成文件，并用独立 `--db` 索引。小样例用于检查命令与语义，不代表大数据库性能。扩大数据集时应记录生成规则、对象数量和名称分布，所有路径与查询继续使用合成内容。
 
 ```bash
-./build-macos/everything-lite-cli benchmark "$HOME" \
-  'pdf' \
-  'sample' \
-  'ext:pdf' \
-  'path:sample' \
-  'modified:7d' \
-  'size:>100m type:file'
+./build/core-debug/everything-lite-cli --db ./sample.db stats
+./build/core-debug/everything-lite-cli --db ./sample.db check-search-index
+time ./build/core-debug/everything-lite-cli --db ./sample.db search 'sample' --limit 1000
+time ./build/core-debug/everything-lite-cli --db ./sample.db search '砀例甲' --limit 1000
+time ./build/core-debug/everything-lite-cli --db ./sample.db search '示例工匠' --limit 1000
+time ./build/core-debug/everything-lite-cli --db ./sample.db search 'path:砀例甲' --limit 1000
+time ./build/core-debug/everything-lite-cli --db ./sample.db search 'sample' --limit 1000 --offset 1000
 ```
 
-注意：benchmark 使用临时数据库，因此会完整扫描一次，并建立 trigram 名称索引。该过程不修改 GUI 正式数据库。
+`time` 包括进程启动、数据库初始化与输出成本，不能等同于纯 SQL 时间。检查索引完整性也可能产生额外工作，不应把检查耗时计入普通搜索样本。
 
-## 3. 正式数据库只测查询
-
-先看状态：
+## 内置 benchmark
 
 ```bash
-./build-macos/everything-lite-cli stats
+./build/core-debug/everything-lite-cli benchmark ./sample 'sample' '砀例甲' '示例工匠' 'ext:pdf' 'path:砀例甲'
 ```
 
-若显示：
+该命令自行创建临时数据库，完成索引和查询后尝试删除临时目录，不修改默认索引。`--db` 不控制它内部的 benchmark 数据库。它使用 `SearchEngine`、每个查询返回最多 1000 条，仅报告本轮索引与单次查询耗时，没有自动计算 P50/P95。传入目录仍会被扫描，因此只使用合成数据目录。
 
-```text
-名称 Trigram 索引：ready
-```
+## 结果报告
 
-即可：
-
-```bash
-time ./build-macos/everything-lite-cli search pdf --limit 1000
-time ./build-macos/everything-lite-cli search 2026 --limit 1000
-time ./build-macos/everything-lite-cli search 'path:sample' --limit 1000
-```
-
-深一点的结果窗口：
-
-```bash
-time ./build-macos/everything-lite-cli search pdf --limit 1000 --offset 1000
-time ./build-macos/everything-lite-cli search pdf --limit 1000 --offset 10000
-```
-
-## 4. 解释
-
-v0.3 的名称 trigram 主要优化：
-
-```text
-pdf
-2026
-example
-report
-```
-
-`path:` / “匹配路径”和 1~2 Unicode 字符搜索当前仍使用兼容 SQL，后续根据实测再决定是否建立路径 trigram，避免无证据地显著膨胀数据库。
+可复现报告应说明版本、构建类型、依赖版本、合成数据生成方法、查询文本、分页参数、FTS 状态、重复次数及冷/热缓存条件，同时验证匹配集合正确性。应区分索引耗时、数据库查询、CLI 全流程及 GUI 展示成本。日志与路径在公开前检查；历史说明中的个人数据不能作为当前基线。

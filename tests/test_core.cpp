@@ -179,7 +179,7 @@ int main() {
     std::atomic_bool cancelled{true};
     bool cancellation_observed = false;
     try {
-        (void)engine.search("砀", 20, 0, &cancelled);
+        (void)engine.search("匠", 20, 0, &cancelled);
     } catch (const std::exception&) {
         cancellation_observed = true;
     }

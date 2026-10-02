@@ -1,142 +1,51 @@
-# Everything Lite 搜索语法 v0.4.0
+# 搜索语法（0.4.11）
 
-## 默认语义：只匹配名称
+## 名称与路径
 
-```text
-paper
-pdf
-2026
-"Example Collection"
-```
-
-普通关键词默认只匹配当前项目自身的 basename，即“文件名或文件夹名”，不会因为某个父目录包含关键词而把它下面所有后代都返回。
-
-例如：
+普通词默认匹配文件或文件夹自身名称，不自动匹配父目录。示例 `./sample/砀例甲/example.pdf` 中，搜索 `砀例甲` 可命中文件夹，但不会仅因为该父目录名称而命中 `example.pdf`。
 
 ```text
-/Sample/unrelated.bin
+sample
+砀例甲
+示例工匠
+path:砀例甲
+path:"示例工匠"
+matchpath: 砀例甲
 ```
 
-搜索 `sample` 默认只会命中名为 `Sample` 的文件夹，不会命中 `unrelated.bin`。
+`path:` 指定路径子串条件；`matchpath:` 让普通词匹配完整路径，GUI 的 Match Path 开关有对应作用。多个普通词与属性条件组合使用，条件共同限制结果。引号用于把含空格的内容组成一个词，不代表独立的全文短语搜索能力。
 
-## 文件 / 文件夹范围
-
-GUI 顶部可以选择：
-
-```text
-全部
-仅文件
-仅文件夹
-```
-
-语法等价能力：
+## 属性过滤
 
 ```text
 type:file
 type:dir
-```
-
-查询文本中的 `type:` 优先于 GUI 下拉框。
-
-## 匹配完整路径
-
-勾选 GUI 顶部“匹配路径”后，普通词会针对完整路径匹配。这相当于 Everything 的 Match Path 搜索选项。
-
-CLI 可使用：
-
-```text
-matchpath: sample
-```
-
-显式路径过滤仍支持：
-
-```text
-path:sample
-path:"Sample Projects"
-```
-
-## 扩展名
-
-```text
 ext:pdf
-ext:docx report
-```
-
-## 大小
-
-```text
+ext:txt sample
 size:>10m
-size:>=10mb
-size:<1g
 size:<=500k
-```
-
-单位按 1024 进制；支持 B/K/KB/M/MB/G/GB/T/TB。
-
-## 修改时间
-
-```text
 modified:24h
 modified:7d
 modified:4w
+ext:pdf size:>10m modified:7d type:file
 ```
 
-表示修改时间晚于“当前时间 - 指定时长”。
+查询中的 `type:` 优先于 GUI 文件/文件夹范围。大小单位按 1024 进制，支持 B、K/KB/KiB、M/MB/MiB、G/GB/GiB、T/TB/TiB；比较符支持等值、`>`、`>=`、`<`、`<=`。`modified:` 表示修改时间晚于当前时间减指定时长，常用单位为 h、d、w。
 
-## 组合
+语法目前仅提供有限过滤，不支持一般的 AND/OR/NOT 表达式、正则、Match Case、Whole Word 或正文全文检索。无效属性值可能被忽略，不能把解析器当成严格的输入校验器。
 
-```text
-ext:pdf size:>10m modified:30d type:file example
-```
+## 查询执行
 
-默认 example 只匹配文件名。如果需要完整路径也匹配 example，打开“匹配路径”。
+名称索引就绪、未开启 Match Path、存在普通词且所有词至少三个 Unicode 码点时，可使用 FTS5 trigram；短词、完整路径匹配等使用兼容 SQL。`path:` 可与名称条件同时使用，不意味着存在独立路径 trigram 索引。
 
-## 性能说明
+ASCII 大小写折叠保留非 ASCII UTF-8 字节。拆词只识别 ASCII 空白字节，高位 UTF-8 字节不作为分隔符。GUI 还会规范化输入，因此 CLI 与 GUI 对照时应比较实际规范化查询。
 
-普通 basename 查询在 SQLite FTS5 trigram 可用且查询词至少 3 个 Unicode 字符时使用 trigram 索引。1~2 字符、`path:` 和“匹配路径”当前使用兼容 SQL 路径。
-
-
-## v0.4 菜单映射
-
-- Search → Match Path 等价于为普通词启用完整路径匹配。
-- Search → All / Files / Folders 等价于 UI 级类型过滤；查询中显式 `type:file` / `type:dir` 优先。
-- 尚未实现的 Match Case / Whole Word / Regex 不会提前显示为可用开关，计划在 v0.6 实现。
-
-## v0.4.4：正确性优先搜索
-
-v0.4.4 曾使用 LIKE 作为中文可靠路径；v0.4.5 已进一步改为 `instr(search_name, ?)>0` 的直接子串匹配，并引入双路径确认。
-
-CLI 可显式验证可靠路径：
+默认 CLI `search` 与 GUI 共用 `SearchService`。`search-safe` 使用主表直接子串匹配，`search-correct` 对零结果进行双路径确认，它们属于诊断入口，不是 GUI 的当前默认搜索策略。
 
 ```bash
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
+./build/core-debug/everything-lite-cli --db ./sample.db search '砀例甲' --limit 50
+./build/core-debug/everything-lite-cli --db ./sample.db search-safe '示例工匠' --limit 50
+./build/core-debug/everything-lite-cli --db ./sample.db search-correct 'sample' --limit 50
 ```
 
-
-## v0.4.5：零结果双重确认
-
-GUI 使用 `searchCorrect`：
-
-- 中文/非 ASCII：先 INSTR，0 时再 FTS5；
-- ASCII：先快速搜索，0 时再 INSTR；
-- 两条路径都返回 0，才显示无结果。
-
-显式验证：
-
-```bash
-./build-macos/everything-lite-cli search-correct '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-correct '示例工匠' --limit 2000
-```
-
-搜索框文字不变时可直接按 Enter 强制重新执行当前查询。
-
-## v0.4.6：GUI / CLI 共用 SearchService
-
-从 v0.4.6 起，GUI 默认搜索与 CLI `search` 共用同一个 `SearchService`，不再在 GUI 内部选择 `searchCorrect`、INSTR/FTS 顺序或 cancellation。当前阶段以结果一致性为最高优先级。
-
-```bash
-./build-macos/everything-lite-cli search '砀例甲' --limit 1001
-./build-macos/everything-lite-cli search '示例工匠' --limit 1001
-```
-
-GUI 默认“全部 + 不匹配路径”使用与上述命令相同的核心搜索入口。`search-safe` / `search-correct` 暂时保留为诊断命令，不是 GUI 默认执行路径。
+使用前应按 [开发指南](DEVELOPMENT.md) 建立合成数据索引。性能与输出边界见 [性能测量](BENCHMARK.md) 和 [隐私说明](PRIVACY.md)。

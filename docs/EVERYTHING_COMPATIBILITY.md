@@ -1,29 +1,17 @@
-# Everything 兼容性矩阵
+# Everything 兼容性范围
 
-本项目不会复制 Everything 的 Windows 专有底层实现；目标是尽量对齐其用户模型、搜索匠惯和桌面工作流。
+Everything Lite 参考 Everything 的名称优先搜索和桌面操作习惯，但不是其实现的复制，也不承诺语法或结果行为完全兼容。当前状态以本项目 0.4.11 源码及 [搜索语法](SEARCH_SYNTAX.md) 为准。
 
-| 能力 | Everything | Everything Lite v0.4 | 计划 |
-| --- | --- | --- | --- |
-| 名称即时搜索 | 是 | 是 | 持续优化 |
-| Match Path | 是 | 是 | 已实现 |
-| Files / Folders | 是 | 是 | 已实现 |
-| 分批结果窗口 | 是/SDK 支持窗口化结果 | 是 | 已实现 |
-| 结果排序 | 是 | 是（当前已加载窗口） | v0.7 服务端全局排序优化 |
-| Bookmarks | 是 | 基础版 | v0.9 完整管理器 |
-| Filter Bar | 是 | All / Files / Folders | v0.6 类型 Filters |
-| Match Case | 是 | 否 | v0.6 |
-| Match Whole Word | 是 | 否 | v0.6 |
-| Regex | 是 | 否 | v0.6 |
-| Exclude | 是 | 否 | v0.5 |
-| Preview Pane | 是 | Quick Look 外部预览 | v0.8/v0.9 原生化 |
-| Folders Sidebar | Everything 1.5 | 否 | v0.9 |
-| Search History | 是 | 否 | v0.9 |
-| Run History | 是 | 否 | v0.9 |
-| NTFS USN Journal | Windows 核心能力 | 不适用 macOS | Windows 版 v1.0 |
-| macOS FSEvents | 不适用 | 是 | 已实现 |
-| Finder Reveal | 不适用 | 是 | 已实现 |
-| Quick Look | 不适用 | 是 | v0.4 基础版，v0.8 原生化 |
+## 当前范围
 
-## 兼容性原则
+已提供名称搜索、显式 Match Path、文件/文件夹过滤、有限属性过滤、分页加载、书签、多选复制与 CSV 导出。排序及导出针对已加载结果，不能视为所有数据库结果的全局处理。菜单和界面组织接近常见桌面搜索工具，平台行为仍需单独验收。
 
-凡是 UI 中出现的搜索选项都必须真实改变查询行为。尚未实现的 Everything 功能放在 Roadmap 文档中，不提前放入菜单制造“有选项但无效果”的假兼容。
+macOS 文件监听采用 FSEvents，Finder 定位与 Quick Look 使用系统操作。项目不提供 Windows NTFS USN Journal 后端，非 macOS 当前使用 `NullWatcher`。
+
+## 未实现能力
+
+Match Case、Whole Word、Regex、一般布尔表达式、Exclude、完整 Filters 与书签编辑、搜索历史、预览面板、完整后台导出等尚未形成当前能力。全文正文搜索也不属于本版本。候选方向见 [路线图](ROADMAP.md)。
+
+Everything 的完整语法不能直接复制到本项目使用；有限语法之外的输入可能被当作普通词或被忽略，调用方应按当前实现测试。
+
+参考：[Everything — Searching](https://www.voidtools.com/support/everything/searching/) 与 [Everything — Using Everything](https://www.voidtools.com/support/everything/using_everything/)。

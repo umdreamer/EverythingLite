@@ -1,39 +1,17 @@
-# Everything Lite v0.4.9 Release Notes
+# Everything Lite 0.4.9 发布说明
 
-## 目标
+## 变更范围
 
-本版只解决一个交互问题：v0.4.8 为保证搜索正确性仍采用 GUI 主线程同步搜索，而原先 100/240 ms 的防抖过短，用户关键词尚未输入完成就可能启动数据库查询，造成明显卡顿。v0.4.9 改为“输入结束后再搜索”，不修改已经修复稳定的 UTF-8 查询解析和搜索核心。
+800 ms 防抖与输入法保护。
 
-## 修改
+自动搜索延迟统一为最后一次用户编辑后的 800 ms，每次编辑重启单次计时。监听 `textEdited`，减少程序内部恢复文本引起的重复触发。
 
-1. 自动搜索延迟固定为最后一次用户编辑后的 800 ms。每一次新的键盘编辑都会停止并重新启动单次计时器。
-2. 搜索触发信号由 `QLineEdit::textChanged` 改为 `QLineEdit::textEdited`，避免书签恢复等程序内部 `setText()` 导致重复搜索。
-3. 为搜索框安装 `QEvent::InputMethod` 事件过滤器。`QInputMethodEvent::preeditString()` 非空时判定为中文/日文等 IME 正在组词，立即停止搜索计时。
-4. IME composition 结束（候选提交或取消）后重新启动 800 ms 空闲计时；因此不会搜索拼音预编辑文本或尚未选完的中间词。
-5. Enter 仍然是立即搜索动作，但 IME composition 活跃时不会触发搜索，避免 Enter 选择候选词时误查询。
-6. Search Trace 保留；调试模式会新增 `GUI-INPUT` 日志，可看到 `IME preedit active; search postponed` 和 `IME composition finished; idle timer started`。
+输入法预编辑文本非空时暂停计时，候选提交或组词取消后重新等待 800 ms。Enter 用于立即搜索，但组词活跃时避免误把选择候选当成查询。
 
-## 预期行为
+本版本仍是 GUI 同步搜索。上述机制降低输入中途启动查询的机会，不保证慢查询期间窗口响应；后台执行在后续版本引入。UTF-8 拆词与 Trace 保留。
 
-```text
-输入：yanjiusheng...（IME 组词）
-→ 不搜索
+## 验证与使用边界
 
-提交：砀例甲
-→ 开始 800 ms 计时
+本说明保留功能演进，不沿用个人机器数据或历史通过率作为当前验证结果。未复测的行为不得标记为通过。当前构建步骤见 [开发指南](../DEVELOPMENT.md)，验证范围见 [测试说明](../TEST_REPORT.md)，版本来源见 [历史版本](../history/VERSIONS.md)。
 
-800 ms 内继续输入
-→ 重新计时，不搜索
-
-连续 800 ms 无输入
-→ 搜索“砀例甲”
-```
-
-英文和普通键盘输入同样采用最后一次编辑后 800 ms 自动搜索；需要立即执行时按 Enter。
-
-## 与 v0.4.8 的关系
-
-- 完整保留 v0.4.8 `splitQuery()` 的 ASCII whitespace 修复。
-- 完整保留 v0.4.7 Search Trace。
-- 不改变 SearchService、FTS、数据库和结果排序语义。
-- 性能层异步化仍暂缓，当前重点是“搜索正确 + 输入过程中不卡”。
+公开复现使用独立数据库及合成目录；不上传日常索引或原始 Trace。当前运行方式应按 0.4.11 文档执行，旧版本策略仅用于理解演进。

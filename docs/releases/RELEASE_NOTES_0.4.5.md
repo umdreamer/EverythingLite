@@ -1,32 +1,17 @@
-# Everything Lite v0.4.5 Release Notes
+# Everything Lite 0.4.5 发布说明
 
-## 定位
+## 变更范围
 
-本版本只处理搜索正确性，不扩展 v0.5 功能。真实 large项索引反馈显示，“砀例甲”“示例工匠”等词可能在 GUI 中稳定返回 0，而 CLI 快速搜索可以命中。进一步检查确认工程没有零结果缓存；问题属于某个关键词持续进入同一失效搜索路径。
+零结果双路径确认记录。
 
-## 核心修复
+本说明来自后续源码包，缺少独立 0.4.5 源码快照。下述内容是当时发布说明记录的方向，不能据此确认该版本完整源码或发布产物。
 
-1. 可靠搜索从 `LIKE '%term%'` 改为 `instr(search_name, term)>0`，路径匹配对应使用 `instr(search_path, term)>0`。
-2. 新增 `SearchEngine::searchCorrect`：
-   - 非 ASCII 查询：INSTR 优先，0 时 FTS5 复核；
-   - ASCII 查询：快速索引优先，0 时 INSTR 复核；
-   - 只有两条路径都返回 0 才接受零结果。
-3. GUI 统一走 `searchCorrect`，不再由 UI 自己决定中文走哪一种搜索算法。
-4. 搜索框按 Enter 可以强制重试完全相同的查询。
-5. CLI 新增 `search-correct` 用于与 GUI 做一一对照。
+记录称可靠路径由 LIKE 改为 `instr(search_name, term)>0`，路径条件对应 `instr(search_path, term)>0`。引入 `searchCorrect`：非 ASCII 查询先走主表，零结果再走快速路径；ASCII 查询先走快速路径，零结果再走主表。CLI 增加 `search-correct`，GUI 当时据记载采用该入口并允许 Enter 重试。
 
-## 验证命令
+双路径确认只能作为诊断或有限正确性检查，不能排除共同解析错误、错误数据库或非零结果中的遗漏。当前默认搜索行为见 [搜索语法](../SEARCH_SYNTAX.md)。
 
-```bash
-./build-macos/everything-lite-cli search '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-correct '砀例甲' --limit 2000
+## 验证与使用边界
 
-./build-macos/everything-lite-cli search-correct '示例工匠' --limit 2000
-```
+本说明保留功能演进，不沿用个人机器数据或历史通过率作为当前验证结果。未复测的行为不得标记为通过。当前构建步骤见 [开发指南](../DEVELOPMENT.md)，验证范围见 [测试说明](../TEST_REPORT.md)，版本来源见 [历史版本](../history/VERSIONS.md)。
 
-GUI 与 `search-correct` 现在共享同一个正确性决策。
-
-## 性能原则
-
-本版本不追求极致性能。若 INSTR 路径较慢但能正确返回，先接受；v0.7 再以 `searchCorrect` 作为正确性基准优化快速索引。
+公开复现使用独立数据库及合成目录；不上传日常索引或原始 Trace。当前运行方式应按 0.4.11 文档执行，旧版本策略仅用于理解演进。

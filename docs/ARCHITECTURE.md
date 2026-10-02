@@ -1,37 +1,40 @@
-# Everything Lite 当前架构（0.4.11）
+# 架构（0.4.11）
 
-Core 不依赖 Qt，CLI 和 GUI 共用 `SearchService`。文件索引保存在 SQLite；macOS 文件监听由 `FileWatcher` 接口隔离，非 macOS 当前使用 NullWatcher。旧版本架构说明原文保留在 [history/ARCHITECTURE_legacy.md](history/ARCHITECTURE_legacy.md)，其中 100 ms、QtConcurrent 和永久 1000 条上限等描述属于旧实现。
+## 组件职责
+
+Core 使用 C++17 与 SQLite，不依赖 Qt。`FileScanner` 读取文件系统属性，`IndexManager` 管理完整扫描和增量同步，`Database` 保存记录与名称加速索引。`SearchQuery` 解析过滤条件，`SearchEngine` 执行查询，`SearchService` 为 CLI 与 GUI 提供共同的应用级入口。
+
+GUI 使用 Qt Widgets 与 `SearchResultModel`。`MainWindow` 负责输入、菜单、分页和结果显示，`SearchWorker` 负责后台搜索。QSettings 保存索引目录、窗口状态和书签，与 SQLite 索引数据库分工不同。
 
 ## 搜索链路
 
 ```text
-GUI 编辑 / 过滤选项 / Enter
-  → 800 ms 单次计时与 IME 组词保护
+GUI 编辑 / Enter / 过滤条件
+  → 800 ms 单次定时器与 IME 保护
   → MainWindow 提交 request ID、query、options、limit、offset
-  → SearchWorker / 专用 QThread
-  → SearchService（在工作线程首次使用时初始化并复用）
-  → SearchEngine / SearchQuery
-  → Database / SQLite files + 可用时的 FTS5 trigram
-  → 主线程核对 request ID 后更新 SearchResultModel
+  → SearchWorker / QThread
+  → SearchService → SearchEngine → Database
+  → 主线程核对 request ID → SearchResultModel
 
-CLI search
-  → 同一 SearchService
-  → 同一 SearchEngine / Database
+CLI search → SearchService → SearchEngine → Database
 ```
 
-MainWindow 启动时不执行空关键词查询。输入变化使旧 request ID 失效；旧查询完成时，其过期结果不能覆盖新输入。后台一次执行一项查询，正在执行期间最多保留一次“查询最新状态”的 pending 请求。分页与结果模型更新由 UI 协调，每批加载 1000 条；数据库匹配总量与 UI 当前持有数量分开。
+窗口启动时不自动执行空关键词搜索。输入及范围变化使旧 request ID 失效，迟到结果不能覆盖新状态。每个窗口的正常搜索调度仅运行一项查询，期间最多记录一次待搜索标记；当前任务结束后读取最新 UI 状态。后台线程首次使用时构建搜索服务并在后续查询中复用。
 
-普通 terms 默认匹配名称，`path:` 或 Match Path 才匹配完整路径。UTF-8 拆词仅识别 ASCII 空白分隔符，避免中文字符内部字节被 locale 的空白判断拆开。默认共享搜索入口及诊断路径的具体策略以 `src/core/search_service.cpp`、`search_engine.cpp`、`database.cpp` 为准。
+GUI 每批保留 1000 条，额外请求一条用于判断是否还有下一页。排序针对已加载模型，CSV 也仅导出已加载结果。默认共享入口使用快速搜索，`search-safe` 和 `search-correct` 是保留的诊断路径，不能混同为 GUI 默认策略。
 
-## 索引链路
+## 数据库与查询
 
-```text
-配置的 roots → FileScanner → IndexManager → Database
-macOS FSEvents → 事件聚合 → 增量路径更新或 root 重扫
-```
+`files` 保存路径、名称、父目录、扩展名、大小、修改时间、目录标记及扫描 generation。`roots` 保存索引范围；元数据记录名称索引状态。SQLite 支持 FTS5 trigram 时可创建名称索引，并以触发器同步主表更新。
 
-完整扫描使用 generation 标识旧记录；成功完成后清理未在本轮出现的记录。增量更新重新读取存在的路径，删除消失的路径及其子项；FSEvents 要求重扫时回到 root 扫描。索引与前台搜索刷新分开调度，避免文件事件直接抢占输入。未来 Exclude 应发生在扫描与事件索引阶段，现阶段尚未实现。
+普通词默认匹配名称，只有 Match Path 或 `path:` 才对路径施加匹配。名称 FTS 需要索引就绪、未开启 Match Path、存在普通关键词且所有关键词至少三个 Unicode 码点。未满足条件时使用兼容 SQL。UTF-8 拆词只识别 ASCII 空白字节，ASCII 大小写折叠不是通用 Unicode 语言学匹配。
 
-## 开发边界
+## 索引与平台
 
-QSettings 保存 UI 状态与书签，不替代索引数据库。Finder、Quick Look 等 macOS 操作目前位于 UI 边缘；其他系统的文件监听与原生交互仍需单独实现。现有核心测试覆盖查询解析、中文检索、过滤、分页、取消与索引更新，但没有 Qt IME、窗口交互或百万级数据库的自动验收。本次整理保持 `src/`、`tests/` 和 `CMakeLists.txt` 与原始 0.4.11 一致。
+完整扫描通过 generation 标记本轮记录，扫描成功后清理过期记录。增量同步读取仍存在的路径，删除消失路径及其子项；需要重扫的事件回到索引根目录扫描。
+
+macOS 的 `FileWatcher` 后端为 FSEvents。事件聚合与结果刷新分别调度，避免每次文件事件立即重启用户搜索。非 macOS 当前使用 `NullWatcher`。Exclude 尚未实现，不能依赖路线图规则过滤索引。
+
+## 验证边界
+
+当前线程布局不意味着全部 GUI 行为已人工验收。Trace 启用时，结果回调会同步运行独立 CLI 探针，可能等待进程完成；调试模式仍可能出现停顿。核心测试与 GUI 交互的区别见 [测试说明](TEST_REPORT.md)，数据输出边界见 [隐私说明](PRIVACY.md)。

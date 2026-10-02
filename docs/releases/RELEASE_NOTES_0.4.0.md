@@ -1,42 +1,17 @@
-# Everything Lite v0.4.0 Release Notes
+# Everything Lite 0.4.0 发布说明
 
-v0.4.0 是“桌面应用形态”版本。底层继续沿用已经验证的 v0.3 SQLite + FTS5 trigram + FSEvents 架构，主要变化集中在 Everything 风格 UI、菜单和 macOS 常用操作。
+## 变更范围
 
-## 新增
+菜单与桌面操作。
 
-- File / Edit / View / Search / Bookmarks / Tools / Help 七组菜单。
-- macOS 原生 About / Preferences / Quit 菜单角色。
-- Space Quick Look。
-- Finder Reveal。
-- Open With（macOS `open -a`）。
-- 多选结果。
-- 多选复制完整路径 / 名称。
-- 导出当前已加载结果到 CSV。
-- Bookmarks：保存查询、类型范围、Match Path、排序状态，并持久化。
-- View 菜单控制状态栏、索引范围栏和 Filter Bar。
-- Search 菜单控制 Match Path 与 All / Files / Folders。
-- 状态栏右侧显示当前搜索状态。
-- Index Status 信息窗口。
-- New Search Window。
-- Reset Columns。
+增加 File、Edit、View、Search、Bookmarks、Tools、Help 菜单组织，以及多选、复制路径与名称、CSV 导出已加载结果、书签持久化和列布局重置。
 
-## UI 调整
+macOS 操作包含 Finder 定位、Quick Look、按应用名称打开及原生菜单角色。主窗口突出搜索框、范围过滤、结果和状态栏，索引管理移至 Tools。
 
-主窗口不再长期显示“索引目录 / 重建索引”按钮。低频管理操作移动到 Tools，使搜索区域更接近 Everything：搜索框 + Filter + 结果列表 + 状态栏。
+排序和导出仍针对已加载模型。Quick Look 使用外部系统工具；Preferences 当前进入索引目录设置。Exclude、完整设置中心及高级搜索能力尚未交付。
 
-## 保持不变
+## 验证与使用边界
 
-- SQLite 文件索引。
-- 名称 FTS5 trigram。
-- 1000 条分页 / 无限滚动加载。
-- 默认名称匹配；Match Path 显式启用。
-- FSEvents 实时增量更新。
-- `ext:`、`path:`、`type:`、`size:`、`modified:` 等 v0.3 搜索语法。
+本说明保留功能演进，不沿用个人机器数据或历史通过率作为当前验证结果。未复测的行为不得标记为通过。当前构建步骤见 [开发指南](../DEVELOPMENT.md)，验证范围见 [测试说明](../TEST_REPORT.md)，版本来源见 [历史版本](../history/VERSIONS.md)。
 
-## 已知限制
-
-- 排序仍发生在“已加载窗口”中，并非对所有数据库结果做全局排序。
-- Quick Look v0.4 使用 `/usr/bin/qlmanage -p`，v0.8 计划改为更原生的 Quick Look 集成。
-- Open With v0.4 通过应用名称调用 `open -a`，v0.8 计划使用原生系统选择器。
-- Preferences v0.4 暂时进入索引目录设置；v0.5 会升级为 General / Indexes / Excludes / Search / Results / Keyboard 完整配置中心。
-- Exclude 规则尚未进入 v0.4，正式安排在 v0.5。
+公开复现使用独立数据库及合成目录；不上传日常索引或原始 Trace。当前运行方式应按 0.4.11 文档执行，旧版本策略仅用于理解演进。

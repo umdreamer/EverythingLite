@@ -944,7 +944,7 @@ void MainWindow::showIndexStatus() {
         !name_search_available_ ? QStringLiteral("unavailable") :
         !name_search_ready_ ? QStringLiteral("not ready") : QStringLiteral("ready"));
     if (name_search_ready_) {
-        details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（对 large项可能需要一些时间）");
+        details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（大量索引项可能需要一些时间）");
     }
     details << QStringLiteral("监听后端：%1").arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未启动"));
     if (!last_search_query_.isNull()) {
@@ -1265,7 +1265,7 @@ void MainWindow::showSearchSyntax() {
         "Everything Lite v0.4 搜索语法\n\n"
         "report                 名称包含 report\n"
         "ext:pdf                PDF 文件/文件夹名后缀过滤\n"
-        "path:sample          完整路径包含 sample\n"
+        "path:sample            完整路径包含 sample\n"
         "type:file              仅文件\n"
         "type:dir               仅文件夹\n"
         "size:>100m             大于 100 MB\n"

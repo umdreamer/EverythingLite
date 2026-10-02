@@ -51,7 +51,7 @@ Usage:
 
 Search syntax:
   ext:pdf              filter by extension
-  path:sample        path contains "sample"
+  path:sample          path contains "sample"
   size:>10m            file size; supports b/k/m/g/t and > >= < <=
   modified:7d          modified within the last 7 days (h/d/w)
   type:file | type:dir files or directories only

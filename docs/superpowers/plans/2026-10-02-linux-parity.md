@@ -2,7 +2,7 @@
 
 > 执行方式：本会话分阶段实现，独立平台组件由子代理实现并接受规格与代码审查。每阶段先验证再本地提交，不重写既有标签。
 
-**目标：** Ubuntu 24.04 桌面支持与 Mac 共用 0.4.11 的核心及界面行为，编译产物统一名为 EverythingLite，两端同步升级至 0.4.12。
+**目标：** Ubuntu 24.04 桌面支持与 Mac 共用 0.4.11 的核心及界面行为，GUI 展示名为 Everything Lite、GUI 文件为 EverythingLite、CLI 文件为 everything-lite-cli，两端同步升级至 0.4.12。
 
 **架构：** Core、SearchService、SearchWorker 和主窗口继续共用。Linux inotify 与桌面操作独立适配；共享索引器处理增量事件和补偿扫描。系统服务不可用时给出明确反馈与有限回退。
 
@@ -17,7 +17,7 @@
 - [ ] 显式检查 GUI 产物。示例输出名设置如下，内部 target 名称保留：
 
 ```cmake
-set_target_properties(everything-lite-cli PROPERTIES OUTPUT_NAME EverythingLite-cli)
+set_target_properties(everything-lite-cli PROPERTIES OUTPUT_NAME everything-lite-cli)
 set_target_properties(everything-lite PROPERTIES OUTPUT_NAME EverythingLite)
 ```
 
@@ -57,14 +57,14 @@ assert(changed.wait_for(lock, std::chrono::seconds(5), [&] {
 - [ ] 在 Linux 当前主窗口上运行失败测试：菜单必须有“快速查看”，右键文件定位不得标记 Finder，打开方式不得只弹出尚未实现通知。
 - [ ] 样例文件名包含中文、空格和 shell 特殊字符，测试证明以文件 URI/独立参数传递，不作为命令执行。模拟 D-Bus 服务验证 URI、错误与降级；不能只验证 mock 自己的行为。
 - [ ] 预览测试覆盖 UTF-8、空文件、尺寸上限、图片解码预算、不存在/不可读文件及不支持格式；失败反馈必须可见。
-- [ ] 主窗口共享 QKeySequence 标准快捷键；默认根目录通过 QStandardPaths 获取。可执行文件和窗口显示统一 EverythingLite，内部 QSettings 标识不改。
+- [ ] 主窗口共享 QKeySequence 标准快捷键；默认根目录通过 QStandardPaths 获取。GUI 文件名使用 EverythingLite，窗口显示 Everything Lite，CLI 为 everything-lite-cli；内部 QSettings 标识不改。
 - [ ] 无显示 Qt 测试采用隔离 HOME/XDG/QSettings 和独立数据库，不访问日常索引。分别在 Mac 与 Linux运行，随后提交。
 
 ## 4. 构建产物、包与脚本
 
-修改 CMakeLists.txt、Dockerfile、CMakePresets.json、scripts/ 中所有当前启动路径。新增 scripts/build-linux.sh、scripts/run-linux.sh、scripts/run-linux-debug.sh、scripts/package-linux.sh、packaging/linux/org.everythinglite.EverythingLite.desktop 与 assets/everythinglite.svg。
+修改 CMakeLists.txt、Dockerfile、CMakePresets.json、scripts/ 中所有当前启动路径。新增 scripts/build-linux.sh、scripts/run-linux.sh、scripts/run-linux-debug.sh、scripts/package-linux.sh、packaging/linux/org.everythinglite.EverythingLite.desktop 与 assets/everything-lite.svg。
 
-- [ ] Mac 生成 EverythingLite.app/Contents/MacOS/EverythingLite；Linux 生成 EverythingLite 和 EverythingLite-cli。
+- [ ] Mac 生成 EverythingLite.app/Contents/MacOS/EverythingLite；Linux 生成 EverythingLite 和 everything-lite-cli。
 - [ ] 脚本仅增量构建可配置目录，不无条件清理用户路径。Linux 构建须验证 GUI；Release 构建不声称 assert 回归已经验证。
 - [ ] CPack Debian 包包含两种程序、desktop entry 与图标，正确声明 Qt/SQLite 运行时依赖、架构、MIT 及版本。检查 dpkg-deb -I/-c、解包内容与独立安装前缀，不安装到宿主系统目录。
 - [ ] Ubuntu arm64 真实构建与测试，再单独验证 amd64；模拟执行明确记录。缺少实际结果的架构不可标记通过。

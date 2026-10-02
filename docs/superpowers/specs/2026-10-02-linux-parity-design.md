@@ -1,10 +1,10 @@
 # Mac 与 Linux 功能一致性设计
 
-设计状态：按统一名称 EverythingLite 进入实施。本项目采用 Vibe Coding 方式开发；设计、实现、自动测试和人工验收分别记录。
+设计状态：按平台功能一致性与用途区分命名进入实施。本项目采用 Vibe Coding 方式开发；设计、实现、自动测试和人工验收分别记录。
 
 ## 目标与基线
 
-以现有 Everything Lite 0.4.11 的源代码和搜索行为为基线，增加 Ubuntu 24.04 LTS 桌面支持，兼顾 Debian 系构建。一个仓库持续维护 Mac 与 Linux 两个桌面版本，不复制版本目录、不分叉搜索算法和主窗口实现。编译产物统一采用 EverythingLite 名称：Mac 为 EverythingLite.app（内部 GUI 可执行文件 EverythingLite），Linux GUI 为 EverythingLite，CLI 为 EverythingLite-cli。名称不附加平台后缀，平台由文件格式及分发包识别。内部应用与设置标识保持兼容，避免重命名导致既有 Mac 设置或数据库失联。
+以现有 Everything Lite 0.4.11 的源代码和搜索行为为基线，增加 Ubuntu 24.04 LTS 桌面支持，兼顾 Debian 系构建。一个仓库持续维护 Mac 与 Linux 两个桌面版本，不复制版本目录、不分叉搜索算法和主窗口实现。GUI 展示名称使用 Everything Lite（含空格），命令行文件名使用小写 everything-lite-cli。GUI 编译产物采用 EverythingLite 文件名：Mac 为 EverythingLite.app（内部 GUI 可执行文件 EverythingLite），Linux GUI 为 EverythingLite，CLI 为 everything-lite-cli。名称不附加平台后缀，平台由文件格式及分发包识别。内部应用与设置标识保持兼容，避免重命名导致既有 Mac 设置或数据库失联。
 
 本轮实现完成后两端同步使用 0.4.12，以区别新增的平台能力。现有 0.4.11 标签保持不变，当前运行中的 Mac 0.4.11 不自动重启或迁移数据库。CMake、README、CHANGELOG、发布说明、Docker 镜像标签及包版本同步更新。
 

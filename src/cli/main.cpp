@@ -34,7 +34,7 @@ std::string humanSize(std::uint64_t bytes) {
 
 void usage() {
     std::cout <<
-R"(Everything-Lite CLI
+R"(everything-lite-cli
 
 Usage:
   everything-lite-cli [--db PATH] db-path

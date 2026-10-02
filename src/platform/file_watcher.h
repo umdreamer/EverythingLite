@@ -9,6 +9,7 @@ namespace everything_lite {
 struct FileEvent {
     std::string path;
     bool needs_full_rescan = false;
+    std::string error;
 };
 
 class FileWatcher {
@@ -20,6 +21,7 @@ public:
     virtual bool start() = 0;
     virtual void stop() = 0;
     virtual std::string backendName() const = 0;
+    virtual std::string lastError() const { return {}; }
 };
 
 } // namespace everything_lite

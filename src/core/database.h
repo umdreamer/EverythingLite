@@ -42,10 +42,14 @@ public:
     // excluded cached rows for all sources, including offline sources.
     std::uint64_t saveExclusionPolicy(const ExclusionRules& rules) const;
 
+    // Compatibility scans reserve a unique (root,generation) and capture
+    // source/policy guards. Stale or completed generations cannot mutate rows.
     void beginRootScan(const std::string& root, std::int64_t generation) const;
     void completeRootScan(const std::string& root, std::int64_t generation, std::uint64_t file_count) const;
     std::int64_t currentGeneration(const std::string& root) const;
 
+    // Without beginRootScan, one batch uses the current policy but has no
+    // authority to delete stale rows or complete a full scan.
     void upsertBatch(const std::vector<FileRecord>& records,
                      const std::string& root,
                      std::int64_t generation) const;

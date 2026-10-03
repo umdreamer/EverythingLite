@@ -81,9 +81,6 @@ IndexStats FileScanner::scanTree(const std::string& root,
         return true;
     };
     if (isCancelled()) { stats.cancelled = true; return stats; }
-    // Ancestor exclusions apply even to event scopes inside an excluded parent.
-    const auto parent=normalizePath(pathToUtf8(utf8ToPath(root).parent_path()));
-    if(policy && policy->excludes(parent,true)) { stats.completed=true; return stats; }
     const auto root_path = utf8ToPath(root);
     std::error_code ec;
     const auto status = fs::status(root_path, ec);
@@ -91,7 +88,12 @@ IndexStats FileScanner::scanTree(const std::string& root,
         stats.error = ec ? ec.message() : "root does not exist";
         return stats;
     }
-    if(policy && policy->excludes(root,fs::is_directory(status))) { stats.completed=true; return stats; }
+    // Exclusions prune descendants only after the scan scope itself exists.
+    // An excluded ancestor cannot turn a missing source into an online snapshot.
+    const auto parent=normalizePath(pathToUtf8(root_path.parent_path()));
+    if(policy && (policy->excludes(parent,true) || policy->excludes(root,fs::is_directory(status)))) {
+        stats.completed=true; return stats;
+    }
     auto append = [&](const fs::path& path,bool is_directory) {
         if(policy && policy->excludes(pathToUtf8(path),is_directory)) { ++stats.skipped; return true; }
         ++stats.scanned;

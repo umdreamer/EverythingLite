@@ -216,6 +216,23 @@ std::int64_t sourceForRoot(sqlite3* db, const std::string& root, bool create) {
     if(sqlite3_step(insert.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
     return sqlite3_last_insert_rowid(db);
 }
+std::int64_t guardedScanSource(sqlite3* db,const std::string& root,std::int64_t generation,bool required) {
+    auto guard=prepare(db,"SELECT source_id,source_revision,policy_revision,identity,mount_fingerprint,state FROM compatibility_scans WHERE root=? AND generation=?");
+    bindText(guard.get(),1,normalizePath(root)); sqlite3_bind_int64(guard.get(),2,generation);
+    const auto rc=sqlite3_step(guard.get());
+    if(rc==SQLITE_DONE) {
+        if(required) throw std::runtime_error("compatibility scan requires beginRootScan");
+        return 0; // standalone batch: current policy, no deletion authority
+    }
+    if(rc!=SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(db));
+    if(sqlite3_column_int(guard.get(),5)!=0) throw std::runtime_error("compatibility scan is no longer active");
+    const auto current=getSource(db,sqlite3_column_int64(guard.get(),0));
+    if(current.revision!=sqlite3_column_int64(guard.get(),1) || current.policy_revision!=sqlite3_column_int64(guard.get(),2) ||
+       current.identity!=columnText(guard.get(),3) || current.mount_fingerprint!=columnText(guard.get(),4) || current.root!=normalizePath(root))
+        throw std::runtime_error("source or exclusion policy changed during compatibility scan");
+    if(sourceForRoot(db,root,false)!=current.id) throw std::runtime_error("compatibility scan binding changed");
+    return current.id;
+}
 std::string relativeTo(const std::string& path, const std::string& root) {
     const auto normalized=normalizePath(path);
     if(!pathIsWithin(normalized,root)) throw std::invalid_argument("record outside source binding");
@@ -583,6 +600,11 @@ CREATE TABLE IF NOT EXISTS sources (
 );
 CREATE INDEX IF NOT EXISTS idx_sources_root ON sources(root);
 CREATE TABLE IF NOT EXISTS scan_seen(source_id INTEGER NOT NULL,generation INTEGER NOT NULL,relative_path TEXT NOT NULL,PRIMARY KEY(source_id,generation,relative_path));
+CREATE TABLE IF NOT EXISTS compatibility_scans (
+ root TEXT NOT NULL,generation INTEGER NOT NULL,source_id INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+ policy_revision INTEGER NOT NULL,identity TEXT NOT NULL,mount_fingerprint TEXT NOT NULL,
+ state INTEGER NOT NULL DEFAULT 0 CHECK(state IN (0,1,2)),PRIMARY KEY(root,generation)
+);
 CREATE TABLE IF NOT EXISTS roots(root TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,last_scan_time INTEGER NOT NULL DEFAULT 0,file_count INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS exclusion_policy (
  id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0,
@@ -806,6 +828,15 @@ void Database::beginRootScan(const std::string& root, std::int64_t generation) c
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
     try {
         const auto id=sourceForRoot(conn.get(),root,true);
+        const auto source=getSource(conn.get(),id);
+        auto supersede=prepare(conn.get(),"UPDATE compatibility_scans SET state=2 WHERE source_id=? AND state=0");
+        sqlite3_bind_int64(supersede.get(),1,id);
+        if(sqlite3_step(supersede.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        auto guard=prepare(conn.get(),"INSERT INTO compatibility_scans(root,generation,source_id,source_revision,policy_revision,identity,mount_fingerprint) VALUES(?,?,?,?,?,?,?)");
+        bindText(guard.get(),1,source.root); sqlite3_bind_int64(guard.get(),2,generation); sqlite3_bind_int64(guard.get(),3,id);
+        sqlite3_bind_int64(guard.get(),4,source.revision); sqlite3_bind_int64(guard.get(),5,source.policy_revision);
+        bindText(guard.get(),6,source.identity); bindText(guard.get(),7,source.mount_fingerprint);
+        if(sqlite3_step(guard.get())!=SQLITE_DONE) throw std::runtime_error("compatibility scan generation already used");
         auto remove=prepare(conn.get(),"DELETE FROM scan_seen WHERE source_id=?");
         sqlite3_bind_int64(remove.get(),1,id);
         if(sqlite3_step(remove.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
@@ -816,10 +847,17 @@ void Database::beginRootScan(const std::string& root, std::int64_t generation) c
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
 void Database::completeRootScan(const std::string& root, std::int64_t generation, std::uint64_t count) const {
-    SqliteConnection conn(db_path_); sourceForRoot(conn.get(),root,false);
-    auto stmt=prepare(conn.get(),"UPDATE roots SET generation=?,last_scan_time=strftime('%s','now'),file_count=? WHERE root=?");
-    sqlite3_bind_int64(stmt.get(),1,generation); sqlite3_bind_int64(stmt.get(),2,count); bindText(stmt.get(),3,normalizePath(root));
-    if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+    SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
+    try {
+        guardedScanSource(conn.get(),root,generation,true);
+        auto stmt=prepare(conn.get(),"UPDATE roots SET generation=?,last_scan_time=strftime('%s','now'),file_count=? WHERE root=?");
+        sqlite3_bind_int64(stmt.get(),1,generation); sqlite3_bind_int64(stmt.get(),2,count); bindText(stmt.get(),3,normalizePath(root));
+        if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        auto complete=prepare(conn.get(),"UPDATE compatibility_scans SET state=1 WHERE root=? AND generation=?");
+        bindText(complete.get(),1,normalizePath(root)); sqlite3_bind_int64(complete.get(),2,generation);
+        if(sqlite3_step(complete.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        conn.exec("COMMIT;");
+    } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
 std::int64_t Database::currentGeneration(const std::string& root) const {
     SqliteConnection conn(db_path_); sourceForRoot(conn.get(),root,false);
@@ -829,7 +867,8 @@ std::int64_t Database::currentGeneration(const std::string& root) const {
 void Database::upsertBatch(const std::vector<FileRecord>& records,const std::string& root,std::int64_t generation) const {
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
     try {
-        const auto id=sourceForRoot(conn.get(),root,true);
+        const auto guarded=guardedScanSource(conn.get(),root,generation,false);
+        const auto id=guarded ? guarded : sourceForRoot(conn.get(),root,true);
         const auto source=getSource(conn.get(),id);
         const auto policy=getPolicy(conn.get());
         upsertRecords(conn.get(),source,records,generation,policy);
@@ -845,11 +884,15 @@ void Database::upsertBatch(const std::vector<FileRecord>& records,const std::str
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
 std::uint64_t Database::deleteStaleForRoot(const std::string& root,std::int64_t generation) const {
-    SqliteConnection conn(db_path_); const auto id=sourceForRoot(conn.get(),root,false);
-    auto stmt=prepare(conn.get(),"DELETE FROM files WHERE source_id=? AND NOT EXISTS(SELECT 1 FROM scan_seen WHERE scan_seen.source_id=files.source_id AND scan_seen.generation=? AND scan_seen.relative_path=files.relative_path)");
-    sqlite3_bind_int64(stmt.get(),1,id); sqlite3_bind_int64(stmt.get(),2,generation);
-    if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
-    return static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+    SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
+    try {
+        const auto id=guardedScanSource(conn.get(),root,generation,true);
+        auto stmt=prepare(conn.get(),"DELETE FROM files WHERE source_id=? AND NOT EXISTS(SELECT 1 FROM scan_seen WHERE scan_seen.source_id=files.source_id AND scan_seen.generation=? AND scan_seen.relative_path=files.relative_path)");
+        sqlite3_bind_int64(stmt.get(),1,id); sqlite3_bind_int64(stmt.get(),2,generation);
+        if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        const auto removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+        conn.exec("COMMIT;"); return removed;
+    } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
 std::uint64_t Database::deletePathAndDescendants(const std::string& path) const {
     SqliteConnection conn(db_path_); const auto normalized=normalizePath(path);
@@ -869,7 +912,7 @@ std::uint64_t Database::deleteRoot(const std::string& root) const {
     SqliteConnection conn(db_path_); const auto id=sourceForRoot(conn.get(),root,false);
     return id ? forgetSource(id) : 0;
 }
-void Database::clear() const { SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE; DELETE FROM files; DELETE FROM scan_seen; DELETE FROM sources; DELETE FROM roots; COMMIT;"); }
+void Database::clear() const { SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE; DELETE FROM files; DELETE FROM scan_seen; DELETE FROM sources; DELETE FROM roots; UPDATE compatibility_scans SET state=2; COMMIT;"); }
 
 std::vector<SearchResult> Database::search(const SearchQuery& query,
                                            std::size_t limit,

@@ -126,6 +126,78 @@ CREATE TABLE snapshot_files(path TEXT,parent_path TEXT,name TEXT,ext TEXT,root T
     // Rebinding an indexed source cannot bypass the policy via UPDATE.
     auto rebound=db.source(loosened.id); rebound.root=(base/"cache-rebound").string(); db.saveSource(rebound);
     assert(db.totalFileCount()==0);
+    // Excluding an ancestor does not prove a previously indexed source online.
+    auto excluded_root=base/"cache-parent"/"source"; fs::create_directories(excluded_root);
+    std::ofstream(excluded_root/"retained.txt")<<"retained";
+    IndexManager excluded_manager((base/"excluded-offline.db").string()); auto& excluded_db=excluded_manager.database();
+    assert(excluded_manager.rebuildRoot(excluded_root.string()).completed);
+    const auto excluded_id=excluded_db.sources().front().id;
+    const auto last_success=excluded_db.source(excluded_id).last_success;
+    fs::rename(excluded_root,base/"moved-source");
+    assert(!excluded_manager.rebuildSource(excluded_id).completed);
+    assert(excluded_db.source(excluded_id).status==SourceStatus::Offline);
+    ExclusionRules excluded_ancestor; excluded_ancestor.folder_filter="cache*"; excluded_db.saveExclusionPolicy(excluded_ancestor);
+    auto absent_excluded=excluded_manager.rebuildSource(excluded_id);
+    assert(!absent_excluded.completed);
+    assert(excluded_db.source(excluded_id).status==SourceStatus::Offline);
+    assert(excluded_db.source(excluded_id).last_success==last_success);
+    fs::rename(base/"moved-source",excluded_root);
+    auto online_excluded=excluded_manager.rebuildSource(excluded_id);
+    assert(online_excluded.completed && online_excluded.scanned==0 && excluded_db.totalFileCount()==0);
+    assert(excluded_db.source(excluded_id).status==SourceStatus::Accessible);
+    // Compatibility scans capture the same source/policy contract as snapshots.
+    auto legacy_root=base/"legacy-scan"; fs::create_directories(legacy_root);
+    std::ofstream(legacy_root/"hidden.tmp")<<"hidden"; std::ofstream(legacy_root/"kept.txt")<<"kept";
+    IndexManager legacy((base/"legacy.db").string()); auto& legacy_db=legacy.database();
+    assert(legacy.rebuildRoot(legacy_root.string()).completed);
+    ExclusionRules strict_legacy; strict_legacy.file_filter="*.tmp"; legacy_db.saveExclusionPolicy(strict_legacy);
+    legacy_db.beginRootScan(legacy_root.string(),1);
+    std::vector<FileRecord> old_rows;
+    for(const auto& row:legacy_db.search("",100)) old_rows.push_back(row.file);
+    legacy_db.saveExclusionPolicy({}); assert(legacy.rebuildRoot(legacy_root.string()).completed);
+    const auto restored_count=legacy_db.totalFileCount(); assert(legacy_db.search("hidden").size()==1);
+    assert(rejected([&]{legacy_db.upsertBatch(old_rows,legacy_root.string(),1);}));
+    assert(rejected([&]{legacy_db.deleteStaleForRoot(legacy_root.string(),1);}));
+    assert(rejected([&]{legacy_db.completeRootScan(legacy_root.string(),1,old_rows.size());}));
+    assert(legacy_db.totalFileCount()==restored_count && legacy_db.search("hidden").size()==1);
+    // A policy-only change also invalidates a started scan, without source writes.
+    legacy_db.beginRootScan(legacy_root.string(),2); legacy_db.saveExclusionPolicy({});
+    assert(rejected([&]{legacy_db.upsertBatch(old_rows,legacy_root.string(),2);}));
+    assert(rejected([&]{legacy_db.deleteStaleForRoot(legacy_root.string(),2);}));
+    assert(rejected([&]{legacy_db.completeRootScan(legacy_root.string(),2,0);}));
+    // Independent source edits and a newer begin invalidate old generation ownership.
+    legacy_db.beginRootScan(legacy_root.string(),3);
+    auto edited_source=legacy_db.sources().front(); edited_source.label="edited"; legacy_db.saveSource(edited_source);
+    assert(rejected([&]{legacy_db.upsertBatch(old_rows,legacy_root.string(),3);}));
+    assert(rejected([&]{legacy_db.deleteStaleForRoot(legacy_root.string(),3);}));
+    assert(rejected([&]{legacy_db.completeRootScan(legacy_root.string(),3,0);}));
+    legacy_db.beginRootScan(legacy_root.string(),4); legacy_db.beginRootScan(legacy_root.string(),5);
+    assert(rejected([&]{legacy_db.upsertBatch(old_rows,legacy_root.string(),4);}));
+    assert(rejected([&]{legacy_db.deleteStaleForRoot(legacy_root.string(),4);}));
+    std::vector<FileRecord> complete_rows;
+    for(const auto& row:legacy_db.search("",100)) complete_rows.push_back(row.file);
+    legacy_db.upsertBatch(complete_rows,legacy_root.string(),5);
+    assert(legacy_db.deleteStaleForRoot(legacy_root.string(),5)==0);
+    legacy_db.completeRootScan(legacy_root.string(),5,complete_rows.size());
+    // A standalone batch remains usable; it cannot authorize deletion/completion.
+    legacy_db.upsertBatch(complete_rows,legacy_root.string(),6);
+    assert(rejected([&]{legacy_db.deleteStaleForRoot(legacy_root.string(),6);}));
+    assert(rejected([&]{legacy_db.completeRootScan(legacy_root.string(),6,0);}));
+    assert(legacy_db.totalFileCount()==restored_count);
+    // A rebound/forgotten/cleared source must not turn its old begun generation
+    // into an apparently standalone write that silently creates a new source.
+    legacy_db.beginRootScan(legacy_root.string(),7);
+    auto legacy_rebind=legacy_db.sources().front(); legacy_rebind.root=(base/"legacy-rebound").string();
+    legacy_db.saveSource(legacy_rebind);
+    assert(rejected([&]{legacy_db.upsertBatch(old_rows,legacy_root.string(),7);}));
+    assert(legacy_db.sources().size()==1 && legacy_db.totalFileCount()==restored_count);
+    legacy_db.beginRootScan(legacy_rebind.root,8);
+    legacy_db.forgetSource(legacy_rebind.id);
+    assert(rejected([&]{legacy_db.upsertBatch({},legacy_rebind.root,8);}));
+    assert(legacy_db.sources().empty());
+    legacy_db.beginRootScan(legacy_root.string(),9); legacy_db.clear();
+    assert(rejected([&]{legacy_db.upsertBatch(old_rows,legacy_root.string(),9);}));
+    assert(legacy_db.sources().empty() && legacy_db.totalFileCount()==0);
     if(db.nameSearchIndexAvailable()) db.verifyNameSearchIndex();
     fs::remove_all(base);
     std::cout<<"Exclusion policy tests passed\n";

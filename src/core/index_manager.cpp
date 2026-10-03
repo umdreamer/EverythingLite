@@ -30,6 +30,10 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
                                            const std::string& subtree_relative,
                                            const ProgressCallback& progress,
                                            const std::atomic_bool* cancelled) {
+    const auto policy=database_.exclusionPolicy();
+    if(policy.revision!=expected.policy_revision) {
+        IndexStats stats; stats.error="exclusion policy changed before scan"; return stats;
+    }
     std::vector<FileRecord> snapshot;
     std::uint64_t reported = 0;
     auto stats = scanner_.scanTree(scan_path, [&](std::vector<FileRecord>&& batch) {
@@ -38,7 +42,7 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
         snapshot.insert(snapshot.end(), std::make_move_iterator(batch.begin()), std::make_move_iterator(batch.end()));
         if (progress) progress(expected.root, reported);
         return !(cancelled && cancelled->load());
-    }, cancelled);
+    }, cancelled, &policy);
     if (stats.completed && !(cancelled && cancelled->load())) {
         try {
             const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative);

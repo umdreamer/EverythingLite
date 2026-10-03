@@ -53,13 +53,14 @@ bool FileScanner::makeRecord(const fs::path& path, FileRecord& record) {
     return true;
 }
 
-bool FileScanner::readSingle(const std::string& path, FileRecord& record) {
-    return makeRecord(utf8ToPath(path), record);
+bool FileScanner::readSingle(const std::string& path, FileRecord& record, const ExclusionPolicy* policy) {
+    return makeRecord(utf8ToPath(path), record) && (!policy || !policy->excludes(record.path,record.is_directory));
 }
 
 IndexStats FileScanner::scanTree(const std::string& root,
                                  const BatchCallback& callback,
-                                 const std::atomic_bool* cancelled) const {
+                                 const std::atomic_bool* cancelled,
+                                 const ExclusionPolicy* policy) const {
     IndexStats stats;
     std::vector<FileRecord> batch;
     batch.reserve(batch_size_);
@@ -80,6 +81,9 @@ IndexStats FileScanner::scanTree(const std::string& root,
         return true;
     };
     if (isCancelled()) { stats.cancelled = true; return stats; }
+    // Ancestor exclusions apply even to event scopes inside an excluded parent.
+    const auto parent=normalizePath(pathToUtf8(utf8ToPath(root).parent_path()));
+    if(policy && policy->excludes(parent,true)) { stats.completed=true; return stats; }
     const auto root_path = utf8ToPath(root);
     std::error_code ec;
     const auto status = fs::status(root_path, ec);
@@ -87,17 +91,20 @@ IndexStats FileScanner::scanTree(const std::string& root,
         stats.error = ec ? ec.message() : "root does not exist";
         return stats;
     }
-    auto append = [&](const fs::path& path) {
+    if(policy && policy->excludes(root,fs::is_directory(status))) { stats.completed=true; return stats; }
+    auto append = [&](const fs::path& path,bool is_directory) {
+        if(policy && policy->excludes(pathToUtf8(path),is_directory)) { ++stats.skipped; return true; }
         ++stats.scanned;
         FileRecord record;
         if (!makeRecord(path, record)) {
             ++stats.skipped; stats.error = "unable to read file metadata";
             return false;
         }
+        if(policy && policy->excludes(record.path,record.is_directory)) { ++stats.skipped; return true; }
         batch.push_back(std::move(record));
         return batch.size() < batch_size_ || flush();
     };
-    if (!append(root_path)) return stats;
+    if (!append(root_path,fs::is_directory(status))) return stats;
     if (fs::is_directory(status)) {
         // Never skip permission errors: an incomplete enumeration cannot be
         // used to infer deletions from a previously complete snapshot.
@@ -105,7 +112,13 @@ IndexStats FileScanner::scanTree(const std::string& root,
         if (ec) { stats.error = ec.message(); return stats; }
         while (it != end) {
             if (isCancelled()) { stats.cancelled = true; return stats; }
-            if (!append(it->path())) return stats;
+            const auto path=pathToUtf8(it->path());
+            const auto entry_status=it->symlink_status(ec);
+            if(ec) { stats.error=ec.message(); return stats; }
+            const bool is_directory=fs::is_directory(entry_status);
+            if(is_directory && policy && policy->excludes(path,true)) {
+                it.disable_recursion_pending(); ++stats.skipped;
+            } else if (!append(it->path(),is_directory)) return stats;
             it.increment(ec);
             if (ec) { stats.error = ec.message(); return stats; }
         }

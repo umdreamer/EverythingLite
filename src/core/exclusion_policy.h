@@ -1,0 +1,34 @@
+#pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace everything_lite {
+struct ExclusionRules {
+    std::vector<std::string> directories;
+    std::vector<std::string> files;
+    std::string folder_filter;
+    std::string file_filter;
+};
+
+// Shared, validated subset: whole-name/path glob (*, **, Unicode ?) and
+// semicolon-separated filters with quoted terms and doubled quote escaping.
+// No filesystem access is needed to apply a policy to cached records.
+class ExclusionPolicy {
+public:
+    explicit ExclusionPolicy(ExclusionRules rules = {}, std::int64_t revision = 0);
+    bool excludes(const std::string& path, bool is_directory) const;
+    const ExclusionRules& rules() const { return rules_; }
+    const std::int64_t revision;
+private:
+    struct Pattern {
+        std::vector<std::string> units;
+        bool full_path = false;
+    };
+    ExclusionRules rules_;
+    std::vector<Pattern> folder_patterns_;
+    std::vector<Pattern> file_patterns_;
+    static std::vector<Pattern> parseFilters(const std::string& text);
+    static bool matches(const Pattern& pattern, const std::string& path);
+};
+} // namespace everything_lite

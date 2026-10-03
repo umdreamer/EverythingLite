@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/file_record.h"
+#include "core/exclusion_policy.h"
 #include "core/search_query.h"
 
 #include <atomic>
@@ -36,6 +37,10 @@ public:
                                       const std::string& snapshot_database,
                                       const std::string& subtree_relative = {}) const;
     std::string migrationBackupPath() const;
+    ExclusionPolicy exclusionPolicy() const;
+    // Validates first; atomically replaces rules, increments revision and purges
+    // excluded cached rows for all sources, including offline sources.
+    std::uint64_t saveExclusionPolicy(const ExclusionRules& rules) const;
 
     void beginRootScan(const std::string& root, std::int64_t generation) const;
     void completeRootScan(const std::string& root, std::int64_t generation, std::uint64_t file_count) const;

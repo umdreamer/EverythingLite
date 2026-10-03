@@ -148,6 +148,37 @@ END;
 )SQL");
 }
 
+ExclusionPolicy getPolicy(sqlite3* db) {
+    auto state=prepare(db,"SELECT revision,folder_filter,file_filter FROM exclusion_policy WHERE id=1");
+    if(sqlite3_step(state.get())!=SQLITE_ROW) throw std::runtime_error("exclusion policy missing");
+    const auto revision=sqlite3_column_int64(state.get(),0);
+    ExclusionRules rules; rules.folder_filter=columnText(state.get(),1); rules.file_filter=columnText(state.get(),2);
+    auto paths=prepare(db,"SELECT kind,path FROM exclusion_paths ORDER BY kind,position");
+    int rc;
+    while((rc=sqlite3_step(paths.get()))==SQLITE_ROW) {
+        (sqlite3_column_int(paths.get(),0)==0 ? rules.directories : rules.files).push_back(columnText(paths.get(),1));
+    }
+    if(rc!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
+    return ExclusionPolicy(std::move(rules),revision);
+}
+std::uint64_t purgeExcluded(const SqliteConnection& conn,const ExclusionPolicy& policy) {
+    // Build membership without modifying the SELECT input; do not probe paths.
+    conn.exec("CREATE TEMP TABLE IF NOT EXISTS excluded_keys(id INTEGER PRIMARY KEY); DELETE FROM excluded_keys;");
+    auto rows=prepare(conn.get(),"SELECT id,path,is_dir FROM files");
+    auto excluded=prepare(conn.get(),"INSERT INTO excluded_keys VALUES(?)");
+    int rc;
+    while((rc=sqlite3_step(rows.get()))==SQLITE_ROW) {
+        if(!policy.excludes(columnText(rows.get(),1),sqlite3_column_int(rows.get(),2)!=0)) continue;
+        sqlite3_reset(excluded.get()); sqlite3_bind_int64(excluded.get(),1,sqlite3_column_int64(rows.get(),0));
+        if(sqlite3_step(excluded.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+    }
+    if(rc!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+    conn.exec("DELETE FROM files WHERE id IN (SELECT id FROM excluded_keys);");
+    const auto removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+    conn.exec("UPDATE roots SET file_count=(SELECT COUNT(*) FROM files WHERE files.root=roots.root);");
+    return removed;
+}
+
 constexpr const char* sourceColumns = "id,label,type,mode,status,interval_seconds,identity,root,mount_fingerprint,last_check,last_success,revision";
 SourceRecord readSource(sqlite3_stmt* stmt) {
     SourceRecord s;
@@ -164,7 +195,9 @@ SourceRecord getSource(sqlite3* db, std::int64_t id) {
     auto stmt=prepare(db,std::string("SELECT ")+sourceColumns+" FROM sources WHERE id=?");
     sqlite3_bind_int64(stmt.get(),1,id);
     if(sqlite3_step(stmt.get())!=SQLITE_ROW) throw std::runtime_error("source not found");
-    return readSource(stmt.get());
+    auto source=readSource(stmt.get());
+    source.policy_revision=getPolicy(db).revision;
+    return source;
 }
 std::int64_t sourceForRoot(sqlite3* db, const std::string& root, bool create) {
     auto stmt=prepare(db,"SELECT id FROM sources WHERE root=? ORDER BY id");
@@ -195,7 +228,8 @@ std::string accessPath(const std::string& root,const std::string& relative) {
     return normalizePath(pathToUtf8(utf8ToPath(root)/utf8ToPath(relative)));
 }
 void upsertRecords(sqlite3* db, const SourceRecord& source,
-                   const std::vector<FileRecord>& records, std::int64_t generation) {
+                   const std::vector<FileRecord>& records, std::int64_t generation,
+                   const ExclusionPolicy& policy) {
     auto stmt=prepare(db,R"SQL(
 INSERT INTO files(source_id,relative_path,path,parent_path,name,ext,root,size,modified_time,is_dir,search_name,search_path,scan_generation,cloud_copy)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -212,6 +246,7 @@ OR files.cloud_copy<>excluded.cloud_copy;
         if(r.source_id!=0 && r.source_id!=source.id) throw std::invalid_argument("wrong source record");
         const auto relative=relativeTo(r.path,source.root);
         if(!r.relative_path.empty() && r.relative_path!=relative) throw std::invalid_argument("relative path mismatch");
+        if(policy.excludes(r.path,r.is_directory)) continue;
         sqlite3_reset(stmt.get()); sqlite3_clear_bindings(stmt.get());
         sqlite3_bind_int64(stmt.get(),1,source.id); bindText(stmt.get(),2,relative);
         bindText(stmt.get(),3,normalizePath(r.path)); bindText(stmt.get(),4,r.parent_path);
@@ -295,17 +330,24 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         const auto s=getSource(conn.get(),expected.id);
         if(s.revision!=expected.revision || s.identity!=expected.identity || s.root!=expected.root || s.mount_fingerprint!=expected.mount_fingerprint)
             throw std::runtime_error("source binding changed during scan");
+        const auto policy=getPolicy(conn.get());
+        if(policy.revision!=expected.policy_revision) throw std::runtime_error("exclusion policy changed during scan");
         conn.exec("CREATE TEMP TABLE snapshot_keys(relative_path TEXT PRIMARY KEY);");
         auto keys=prepare(conn.get(),"INSERT INTO snapshot_keys VALUES(?)");
         std::vector<FileRecord> records; std::uint64_t count=0;
         while(next(records)) {
+            std::vector<FileRecord> accepted; accepted.reserve(records.size());
             for(const auto& record:records) {
                 const auto relative=relativeTo(record.path,s.root);
+                if(record.source_id!=0 && record.source_id!=s.id) throw std::invalid_argument("wrong source record");
+                if(!record.relative_path.empty() && record.relative_path!=relative) throw std::invalid_argument("relative path mismatch");
                 if(!relativeWithin(relative,scope)) throw std::invalid_argument("record outside snapshot scope");
+                if(policy.excludes(record.path,record.is_directory)) continue;
+                accepted.push_back(record);
                 sqlite3_reset(keys.get()); sqlite3_clear_bindings(keys.get()); bindText(keys.get(),1,relative);
                 if(sqlite3_step(keys.get())!=SQLITE_DONE) throw std::runtime_error("duplicate snapshot path");
             }
-            upsertRecords(conn.get(),s,records,0); count+=records.size(); records.clear();
+            upsertRecords(conn.get(),s,accepted,0,policy); count+=accepted.size(); records.clear();
         }
         const bool full=scope.empty() || scope==".";
         auto remove=prepare(conn.get(),full ?
@@ -542,6 +584,15 @@ CREATE TABLE IF NOT EXISTS sources (
 CREATE INDEX IF NOT EXISTS idx_sources_root ON sources(root);
 CREATE TABLE IF NOT EXISTS scan_seen(source_id INTEGER NOT NULL,generation INTEGER NOT NULL,relative_path TEXT NOT NULL,PRIMARY KEY(source_id,generation,relative_path));
 CREATE TABLE IF NOT EXISTS roots(root TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,last_scan_time INTEGER NOT NULL DEFAULT 0,file_count INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS exclusion_policy (
+ id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0,
+ folder_filter TEXT NOT NULL DEFAULT '', file_filter TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO exclusion_policy(id) VALUES(1);
+CREATE TABLE IF NOT EXISTS exclusion_paths (
+ kind INTEGER NOT NULL CHECK(kind IN (0,1)),position INTEGER NOT NULL,path TEXT NOT NULL,
+ PRIMARY KEY(kind,position)
+);
 CREATE TABLE IF NOT EXISTS app_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 INSERT OR IGNORE INTO app_metadata(key,value) VALUES('name_fts_ready','0');
 )SQL");
@@ -601,20 +652,52 @@ CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
 
+ExclusionPolicy Database::exclusionPolicy() const {
+    SqliteConnection conn(db_path_); conn.exec("BEGIN;"); return getPolicy(conn.get());
+}
+std::uint64_t Database::saveExclusionPolicy(const ExclusionRules& rules) const {
+    const ExclusionPolicy validated(rules); // invalid rules must not touch storage
+    SqliteConnection conn(db_path_); conn.exec("PRAGMA temp_store=FILE; BEGIN IMMEDIATE;");
+    try {
+        auto update=prepare(conn.get(),"UPDATE exclusion_policy SET revision=revision+1,folder_filter=?,file_filter=? WHERE id=1");
+        bindText(update.get(),1,validated.rules().folder_filter); bindText(update.get(),2,validated.rules().file_filter);
+        if(sqlite3_step(update.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        conn.exec("DELETE FROM exclusion_paths;");
+        auto paths=prepare(conn.get(),"INSERT INTO exclusion_paths(kind,position,path) VALUES(?,?,?)");
+        int kind=0;
+        for(const auto* list: {&validated.rules().directories,&validated.rules().files}) {
+            std::int64_t position=0;
+            for(const auto& path:*list) {
+                sqlite3_reset(paths.get()); sqlite3_clear_bindings(paths.get());
+                sqlite3_bind_int(paths.get(),1,kind); sqlite3_bind_int64(paths.get(),2,position++); bindText(paths.get(),3,path);
+                if(sqlite3_step(paths.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+            }
+            ++kind;
+        }
+        const auto removed=purgeExcluded(conn,validated);
+        conn.exec("COMMIT;"); return removed;
+    } catch(...) { conn.exec("ROLLBACK;"); throw; }
+}
+
 std::string Database::migrationBackupPath() const {
     SqliteConnection conn(db_path_);
     auto stmt=prepare(conn.get(),"SELECT value FROM app_metadata WHERE key='source_migration_backup'");
     return sqlite3_step(stmt.get())==SQLITE_ROW ? columnText(stmt.get(),0) : std::string{};
 }
 std::vector<SourceRecord> Database::sources() const {
-    SqliteConnection conn(db_path_);
+    SqliteConnection conn(db_path_); conn.exec("BEGIN;");
+    const auto policy=getPolicy(conn.get());
     auto stmt=prepare(conn.get(),std::string("SELECT ")+sourceColumns+" FROM sources ORDER BY id");
     std::vector<SourceRecord> out; int rc;
-    while((rc=sqlite3_step(stmt.get()))==SQLITE_ROW) out.push_back(readSource(stmt.get()));
+    while((rc=sqlite3_step(stmt.get()))==SQLITE_ROW) {
+        auto source=readSource(stmt.get()); source.policy_revision=policy.revision; out.push_back(std::move(source));
+    }
     if(rc!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
     return out;
 }
-SourceRecord Database::source(std::int64_t id) const { SqliteConnection conn(db_path_); return getSource(conn.get(),id); }
+SourceRecord Database::source(std::int64_t id) const {
+    SqliteConnection conn(db_path_); conn.exec("BEGIN;"); return getSource(conn.get(),id);
+}
 std::int64_t Database::ensureSourceForRoot(const std::string& root) const {
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
     try { const auto id=sourceForRoot(conn.get(),root,true); conn.exec("COMMIT;"); return id; }
@@ -658,6 +741,7 @@ std::int64_t Database::saveSource(const SourceRecord& value) const {
                 if(sqlite3_step(update.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
             }
         }
+        if(!old.root.empty() && old.root!=s.root) purgeExcluded(conn,getPolicy(conn.get()));
         conn.exec("COMMIT;"); return s.id;
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
@@ -747,9 +831,11 @@ void Database::upsertBatch(const std::vector<FileRecord>& records,const std::str
     try {
         const auto id=sourceForRoot(conn.get(),root,true);
         const auto source=getSource(conn.get(),id);
-        upsertRecords(conn.get(),source,records,generation);
+        const auto policy=getPolicy(conn.get());
+        upsertRecords(conn.get(),source,records,generation,policy);
         auto seen=prepare(conn.get(),"INSERT OR IGNORE INTO scan_seen(source_id,generation,relative_path) VALUES(?,?,?)");
         for(const auto& record:records) {
+            if(policy.excludes(record.path,record.is_directory)) continue;
             sqlite3_reset(seen.get()); sqlite3_clear_bindings(seen.get());
             sqlite3_bind_int64(seen.get(),1,id); sqlite3_bind_int64(seen.get(),2,generation);
             bindText(seen.get(),3,relativeTo(record.path,source.root));

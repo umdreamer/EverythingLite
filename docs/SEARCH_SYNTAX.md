@@ -49,3 +49,26 @@ ASCII 大小写折叠保留非 ASCII UTF-8 字节。拆词只识别 ASCII 空白
 ```
 
 使用前应按 [开发指南](DEVELOPMENT.md) 建立合成数据索引。性能与输出边界见 [性能测量](BENCHMARK.md) 和 [隐私说明](PRIVACY.md)。
+
+## 索引排除 CLI
+
+排除策略与搜索条件分开保存。`ext:pdf` 等搜索条件继续用于查询已经保留的索引记录；排除规则决定哪些文件、目录进入索引。GUI 的重建和增量处理与 CLI 使用同一个数据库策略。当前排除规则编辑入口是 CLI，图形设置页的排除编辑在后续阶段实现。项目通过 Vibe Coding 迭代，本阶段的验收范围是共享核心、CLI 和 Qt 自动回归，不能据此认定真实网络挂载或大目录性能已验收。阶段设计见 [来源、排除、NAS 与存储实施计划](superpowers/plans/2026-10-03-index-policy-nas-storage.md)。
+
+`excludes show` 显示规则与版本，`excludes set` 一次替换完整策略，`excludes clear` 将策略置空。`--directory` 和 `--file` 可重复，值必须是绝对路径。目录排除覆盖目录本身及全部后代，并在遍历进入目录前剪枝；文件排除只匹配该文件。目录通配还检查所有祖先目录，因此排除目录内部的单项文件事件也不能将记录重新写入索引。
+
+文件、目录过滤器以分号拆分。每条模式匹配完整名称，含路径分隔符时匹配完整路径：`*` 匹配零个或多个字符但不跨 `/`，`**` 可跨 `/`，`?` 匹配一个有效 Unicode 码点且不跨 `/`。只折叠 ASCII 大小写，其余 UTF-8 字节保留。模式含分号时用双引号包裹；模式中的字面双引号用两个双引号转义。规则要求有效 UTF-8；文件系统暴露的非法 UTF-8 字节仍可被 `*`、`**` 排除，`?` 不匹配非法字节。未关闭或位置错误的引号、`regex:`、`ext:`、属性等未支持的高级前缀会明确报错，退出码非零，旧规则和旧记录保持不变。
+
+下面的示例继续使用 [开发指南](DEVELOPMENT.md) 中的独立合成样例数据库。shell 外层单引号保证过滤器列表作为一个参数传入，内层双引号属于过滤器语法；实际路径由示例变量展开。
+
+```bash
+./build/core-debug/everything-lite-cli --db "$EL_CHECK_DIR/sample.db" excludes show
+./build/core-debug/everything-lite-cli --db "$EL_CHECK_DIR/sample.db" excludes set \
+  --directory "$EL_CHECK_DIR/sample/砀例甲" \
+  --file "$EL_CHECK_DIR/sample/sample.txt" \
+  --folder-filter 'cache*;temporary*' \
+  --file-filter '*.tmp;"a;b.txt";"a""b.txt"'
+./build/core-debug/everything-lite-cli --db "$EL_CHECK_DIR/sample.db" excludes clear
+./build/core-debug/everything-lite-cli --db "$EL_CHECK_DIR/sample.db" index "$EL_CHECK_DIR/sample"
+```
+
+有效策略保存与版本递增、现有缓存清理在同一数据库事务中完成，离线来源也会清理匹配记录，无需访问其文件路径。放宽或清空规则不会凭空恢复记录，下一次成功扫描才能补回。扫描捕获的策略版本在合并时必须仍然一致；过期快照会被拒绝，避免旧严格策略产生的空缺误删已经允许的记录。全量快照、分批 SQLite 快照和兼容批量写入入口均执行同一排除规则。

@@ -43,11 +43,23 @@ Usage:
   everything-lite-cli [--db PATH] search-safe <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] search-correct <query> [--limit N] [--offset N]
   everything-lite-cli [--trace-search] [--db PATH] probe-search <query> [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] excludes show
+  everything-lite-cli [--db PATH] excludes set [--directory PATH] [--file PATH]
+                           [--folder-filter FILTERS] [--file-filter FILTERS]
+  everything-lite-cli [--db PATH] excludes clear
   everything-lite-cli [--db PATH] stats
   everything-lite-cli [--db PATH] clear
   everything-lite-cli [--db PATH] optimize-search
   everything-lite-cli [--db PATH] check-search-index
   everything-lite-cli benchmark <root> [query...]
+
+Exclusion syntax:
+  set replaces the complete shared policy; directory/file paths must be absolute
+  repeat --directory/--file; pass each filter list as a single argument
+  filters: semicolon-separated whole-name globs, or full-path globs containing /
+  * does not cross /; ** crosses /; ? matches one Unicode character except /
+  quote a filter containing ; and escape a literal quote with doubled quotes
+  unsupported advanced prefixes (regex:, ext:, attributes, etc.) are rejected
 
 Search syntax:
   ext:pdf              filter by extension
@@ -131,6 +143,43 @@ int main(int argc, char** argv) {
                       << "，写入 " << stats.indexed
                       << "，跳过 " << stats.skipped
                       << "，清理 " << stats.removed << "\n";
+            return 0;
+        }
+
+        if (command == "excludes") {
+            if(args.size()<2) throw std::invalid_argument("excludes requires show, set or clear");
+            const auto action=args[1];
+            ExclusionRules rules;
+            if(action=="set") {
+                bool folder_seen=false,file_seen=false;
+                for(std::size_t i=2;i<args.size();++i) {
+                    const auto option=args[i];
+                    if(i+1>=args.size()) throw std::invalid_argument("missing value for exclusion option: "+option);
+                    const auto value=args[++i];
+                    if(option=="--directory") rules.directories.push_back(value);
+                    else if(option=="--file") rules.files.push_back(value);
+                    else if(option=="--folder-filter" && !folder_seen) { rules.folder_filter=value; folder_seen=true; }
+                    else if(option=="--file-filter" && !file_seen) { rules.file_filter=value; file_seen=true; }
+                    else throw std::invalid_argument("unknown or repeated exclusion option: "+option);
+                }
+                // Validate before initialize so a malformed command cannot even
+                // create a new index file as a side effect.
+                ExclusionPolicy validated(rules);
+            } else if((action!="show" && action!="clear") || args.size()!=2) {
+                throw std::invalid_argument("invalid excludes command");
+            }
+            Database db(db_path); db.initialize();
+            if(action=="show") {
+                const auto policy=db.exclusionPolicy();
+                std::cout<<"revision="<<policy.revision<<"\n";
+                for(const auto& path:policy.rules().directories) std::cout<<"directory="<<std::quoted(path)<<"\n";
+                for(const auto& path:policy.rules().files) std::cout<<"file="<<std::quoted(path)<<"\n";
+                std::cout<<"folder-filter="<<std::quoted(policy.rules().folder_filter)<<"\n";
+                std::cout<<"file-filter="<<std::quoted(policy.rules().file_filter)<<"\n";
+            } else {
+                const auto removed=db.saveExclusionPolicy(rules);
+                std::cout<<"排除策略已保存，清理 "<<removed<<" 项\n";
+            }
             return 0;
         }
 

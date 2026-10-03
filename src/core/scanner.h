@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/file_record.h"
+#include "core/exclusion_policy.h"
 
 #include <atomic>
 #include <cstddef>
@@ -19,9 +20,11 @@ public:
 
     IndexStats scanTree(const std::string& root,
                         const BatchCallback& callback,
-                        const std::atomic_bool* cancelled = nullptr) const;
+                        const std::atomic_bool* cancelled = nullptr,
+                        const ExclusionPolicy* policy = nullptr) const;
 
-    static bool readSingle(const std::string& path, FileRecord& record);
+    static bool readSingle(const std::string& path, FileRecord& record,
+                           const ExclusionPolicy* policy = nullptr);
 
 private:
     std::size_t batch_size_;

@@ -32,6 +32,7 @@ else()
 endif()
 
 add_library(everything_core
+    src/core/exclusion_policy.cpp
     src/core/app_paths.cpp
     src/core/path_utils.cpp
     src/core/scanner.cpp
@@ -119,9 +120,14 @@ if(BUILD_TESTS)
         set_tests_properties(desktop_actions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
         add_executable(test_ui tests/test_ui.cpp)
         target_link_libraries(test_ui PRIVATE everything_ui Qt6::Test)
+        target_compile_definitions(test_ui PRIVATE EVERYTHING_LITE_CLI_PATH="$<TARGET_FILE:everything-lite-cli>")
+        add_dependencies(test_ui everything-lite-cli)
         add_test(NAME ui COMMAND test_ui)
         set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
     endif()
+    add_executable(test_exclusion_policy tests/test_exclusion_policy.cpp)
+    target_link_libraries(test_exclusion_policy PRIVATE everything_core)
+    add_test(NAME exclusion_policy COMMAND test_exclusion_policy)
     add_executable(test_source_catalog tests/test_source_catalog.cpp)
     target_link_libraries(test_source_catalog PRIVATE everything_core)
     add_test(NAME source_catalog COMMAND test_source_catalog)
@@ -133,6 +139,9 @@ if(BUILD_TESTS)
         add_test(NAME cli_parity COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/tests/check_cli_parity.py $<TARGET_FILE:everything-lite-cli>)
         set_tests_properties(cli_parity PROPERTIES TIMEOUT 60)
+        add_test(NAME cli_excludes COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/tests/check_cli_excludes.py $<TARGET_FILE:everything-lite-cli>)
+        set_tests_properties(cli_excludes PROPERTIES TIMEOUT 60)
     endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(test_linux_watcher tests/test_linux_watcher.cpp)

@@ -21,6 +21,8 @@ struct SourceRecord {
     std::int64_t last_check = 0;
     std::int64_t last_success = 0;
     std::int64_t revision = 0;
+    // Nonpersistent scan guard captured with source()/sources().
+    std::int64_t policy_revision = 0;
 };
 void validateSource(const SourceRecord& source);
 } // namespace everything_lite

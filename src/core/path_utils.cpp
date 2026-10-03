@@ -117,6 +117,7 @@ bool pathIsWithin(const std::string& path, const std::string& root) {
     if (p == r) {
         return true;
     }
+    if (r == "/") return !p.empty() && p.front() == '/';
     if (p.size() <= r.size()) {
         return false;
     }

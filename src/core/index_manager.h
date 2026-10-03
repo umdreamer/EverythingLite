@@ -16,6 +16,10 @@ public:
 
     explicit IndexManager(std::string db_path);
 
+    IndexStats rebuildSource(std::int64_t source_id,
+                             const ProgressCallback& progress = {},
+                             const std::atomic_bool* cancelled = nullptr);
+
     IndexStats rebuildRoot(const std::string& root,
                            const ProgressCallback& progress = {},
                            const std::atomic_bool* cancelled = nullptr);
@@ -32,6 +36,10 @@ public:
 private:
     Database database_;
     FileScanner scanner_;
+    IndexStats rebuildSourceScope(const SourceRecord& expected, const std::string& scan_path,
+                                  const std::string& subtree_relative,
+                                  const ProgressCallback& progress,
+                                  const std::atomic_bool* cancelled);
 
     static std::int64_t newGeneration();
 };

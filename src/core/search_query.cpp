@@ -74,6 +74,24 @@ SearchQuery parseSearchQuery(const std::string& query, std::int64_t now_seconds)
     if (now_seconds <= 0) now_seconds = nowSeconds();
 
     for (auto token : splitQuery(query)) {
+        if (startsWith(token, "source:") && token.size() > 7) {
+            std::size_t consumed = 0;
+            try {
+                const auto id = std::stoll(token.substr(7), &consumed);
+                if (id <= 0 || consumed != token.size() - 7) throw std::invalid_argument("invalid source id");
+                out.source_id = id;
+            } catch (...) { throw std::invalid_argument("invalid source id"); }
+            continue;
+        }
+        if (startsWith(token, "status:") && token.size() > 7) {
+            const auto status = asciiFold(token.substr(7));
+            if (status == "accessible") out.source_status = SourceStatus::Accessible;
+            else if (status == "offline") out.source_status = SourceStatus::Offline;
+            else if (status == "unverified") out.source_status = SourceStatus::Unverified;
+            else if (status == "failed") out.source_status = SourceStatus::Failed;
+            else throw std::invalid_argument("invalid source status");
+            continue;
+        }
         if (startsWith(token, "ext:") && token.size() > 4) {
             auto ext = token.substr(4);
             while (!ext.empty() && ext.front() == '.') ext.erase(ext.begin());

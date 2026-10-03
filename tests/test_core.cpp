@@ -214,7 +214,8 @@ int main() {
 
     manager.rebuildRoots({second.string()});
     auto old_results = engine.search("data.csv", 20);
-    assert(old_results.empty());
+    // Omitting a source from a refresh request does not explicitly forget it.
+    assert(!old_results.empty());
     second_results = engine.search("onlysecondroot", 20);
     assert(!second_results.empty());
 

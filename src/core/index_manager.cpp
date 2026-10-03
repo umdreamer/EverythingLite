@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <unordered_set>
+#include <stdexcept>
+#include <iterator>
 
 namespace everything_lite {
 
@@ -17,116 +19,106 @@ std::int64_t IndexManager::newGeneration() {
     return duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-IndexStats IndexManager::rebuildRoot(const std::string& root,
-                                     const ProgressCallback& progress,
-                                     const std::atomic_bool* cancelled) {
-    const auto normalized_root = normalizePath(root);
-    const auto generation = newGeneration();
-    database_.beginRootScan(normalized_root, generation);
+IndexStats IndexManager::rebuildSource(std::int64_t source_id,
+                                      const ProgressCallback& progress,
+                                      const std::atomic_bool* cancelled) {
+    const auto expected = database_.source(source_id);
+    return rebuildSourceScope(expected, expected.root, {}, progress, cancelled);
+}
 
+IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const std::string& scan_path,
+                                           const std::string& subtree_relative,
+                                           const ProgressCallback& progress,
+                                           const std::atomic_bool* cancelled) {
+    std::vector<FileRecord> snapshot;
     std::uint64_t reported = 0;
-    auto stats = scanner_.scanTree(normalized_root, [&](std::vector<FileRecord>&& batch) {
+    auto stats = scanner_.scanTree(scan_path, [&](std::vector<FileRecord>&& batch) {
         if (cancelled && cancelled->load()) return false;
-        database_.upsertBatch(batch, normalized_root, generation);
         reported += batch.size();
-        if (progress) progress(normalized_root, reported);
-        return true;
+        snapshot.insert(snapshot.end(), std::make_move_iterator(batch.begin()), std::make_move_iterator(batch.end()));
+        if (progress) progress(expected.root, reported);
+        return !(cancelled && cancelled->load());
     }, cancelled);
-
-    if (!(cancelled && cancelled->load())) {
-        stats.removed = database_.deleteStaleForRoot(normalized_root, generation);
-        database_.completeRootScan(normalized_root, generation, stats.indexed);
-        // v0.3 one-time migration: prepare the trigram basename index after a
-        // complete scan. Once ready, database triggers keep it synchronized.
-        if (database_.nameSearchIndexAvailable() && !database_.nameSearchIndexReady()) {
-            database_.rebuildNameSearchIndex();
+    if (stats.completed && !(cancelled && cancelled->load())) {
+        try {
+            const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative);
+            stats.removed = merged.removed;
+        } catch (const std::exception& error) {
+            stats.completed = false; stats.error = error.what(); stats.indexed = 0;
+        }
+    } else {
+        stats.completed = false;
+        stats.indexed = 0;
+        if (cancelled && cancelled->load()) stats.cancelled = true;
+        if (!stats.cancelled) {
+            auto updated = expected;
+            std::error_code ec;
+            const auto status = std::filesystem::status(utf8ToPath(expected.root), ec);
+            updated.status = (!std::filesystem::exists(status) && (!ec || ec == std::errc::no_such_file_or_directory))
+                ? SourceStatus::Offline : SourceStatus::Failed;
+            using namespace std::chrono;
+            updated.last_check = duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+            // A concurrent catalog update owns the new state; never overwrite it.
+            try { database_.saveSource(updated); } catch (const std::exception&) {}
         }
     }
     return stats;
+}
+
+IndexStats IndexManager::rebuildRoot(const std::string& root,
+                                     const ProgressCallback& progress,
+                                     const std::atomic_bool* cancelled) {
+    const auto id = database_.ensureSourceForRoot(normalizePath(root));
+    return rebuildSource(id, progress, cancelled);
 }
 
 IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
                                       const ProgressCallback& progress,
                                       const std::atomic_bool* cancelled) {
-    IndexStats total;
-    std::vector<std::string> candidates;
-    candidates.reserve(roots.size());
-    for (const auto& root : roots) candidates.push_back(normalizePath(root));
-    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
-        if (a.size() != b.size()) return a.size() < b.size();
-        return a < b;
-    });
-    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-
-    std::vector<std::string> normalized;
-    normalized.reserve(candidates.size());
-    for (const auto& r : candidates) {
-        bool covered = false;
-        for (const auto& existing : normalized) {
-            if (pathIsWithin(r, existing)) {
-                covered = true;
-                break;
-            }
-        }
-        if (!covered) normalized.push_back(r);
-    }
-
-    for (const auto& old_root : database_.roots()) {
-        if (std::find(normalized.begin(), normalized.end(), old_root) == normalized.end()) {
-            total.removed += database_.deleteRoot(old_root);
-        }
-    }
-
-    for (const auto& root : normalized) {
-        if (cancelled && cancelled->load()) break;
-        const auto stats = rebuildRoot(root, progress, cancelled);
-        total.scanned += stats.scanned;
-        total.indexed += stats.indexed;
-        total.skipped += stats.skipped;
-        total.removed += stats.removed;
+    IndexStats total; total.completed = true;
+    std::unordered_set<std::string> seen;
+    for (const auto& root : roots) {
+        if (cancelled && cancelled->load()) { total.completed = false; total.cancelled = true; break; }
+        const auto normalized = normalizePath(root);
+        if (!seen.insert(normalized).second) continue;
+        const auto stats = rebuildRoot(normalized, progress, cancelled);
+        total.scanned += stats.scanned; total.indexed += stats.indexed;
+        total.skipped += stats.skipped; total.removed += stats.removed;
+        total.completed = total.completed && stats.completed;
+        total.cancelled = total.cancelled || stats.cancelled;
+        if (!stats.error.empty()) total.error = stats.error;
     }
     return total;
 }
 
 IndexStats IndexManager::applyPathChange(const std::string& root, const std::string& path) {
-    IndexStats stats;
     const auto normalized_root = normalizePath(root);
-    const auto normalized_path = normalizePath(path);
-    if (!pathIsWithin(normalized_path, normalized_root)) return stats;
-
-    std::error_code ec;
-    const auto fs_path = utf8ToPath(normalized_path);
-    if (!std::filesystem::exists(fs_path, ec)) {
-        stats.removed = database_.deletePathAndDescendants(normalized_path);
-        return stats;
-    }
-
-    auto generation = database_.currentGeneration(normalized_root);
-    if (generation == 0) {
-        generation = newGeneration();
-        database_.beginRootScan(normalized_root, generation);
-    }
-
-    if (std::filesystem::is_directory(fs_path, ec)) {
-        stats.removed = database_.deletePathAndDescendants(normalized_path);
-        auto scan_stats = scanner_.scanTree(normalized_path, [&](std::vector<FileRecord>&& batch) {
-            database_.upsertBatch(batch, normalized_root, generation);
-            return true;
-        });
-        stats.scanned += scan_stats.scanned;
-        stats.indexed += scan_stats.indexed;
-        stats.skipped += scan_stats.skipped;
-    } else {
-        FileRecord record;
-        ++stats.scanned;
-        if (FileScanner::readSingle(normalized_path, record)) {
-            database_.upsertBatch({record}, normalized_root, generation);
-            ++stats.indexed;
-        } else {
-            ++stats.skipped;
+    auto scan_path = normalizePath(path);
+    if (!pathIsWithin(scan_path, normalized_root)) return {};
+    SourceRecord expected;
+    for (const auto& source : database_.sources()) {
+        if (source.root == normalized_root) {
+            if (expected.id) throw std::runtime_error("ambiguous source binding; use source id");
+            expected = source;
         }
     }
-    return stats;
+    if (!expected.id) return rebuildRoot(normalized_root);
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(utf8ToPath(scan_path), ec);
+    if (ec) { IndexStats stats; stats.error = ec.message(); return stats; }
+    if (!exists) {
+        // A missing child alone cannot prove deletion: enumerate its nearest
+        // existing parent completely before applying a bounded diff.
+        while (scan_path != normalized_root) {
+            scan_path = normalizePath(pathToUtf8(utf8ToPath(scan_path).parent_path()));
+            const bool parent_exists = std::filesystem::exists(utf8ToPath(scan_path), ec);
+            if (ec) { IndexStats stats; stats.error = ec.message(); return stats; }
+            if (parent_exists) break;
+        }
+    }
+    const auto relative = scan_path == normalized_root ? std::string{} :
+        scan_path.substr(normalized_root.size() + (normalized_root.back() == '/' ? 0 : 1));
+    return rebuildSourceScope(expected, scan_path, relative, {}, nullptr);
 }
 
 } // namespace everything_lite

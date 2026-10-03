@@ -18,6 +18,24 @@ public:
 
     const std::string& path() const { return db_path_; }
     void initialize() const;
+    std::vector<SourceRecord> sources() const;
+    SourceRecord source(std::int64_t id) const;
+    std::int64_t ensureSourceForRoot(const std::string& root) const;
+    std::int64_t saveSource(const SourceRecord& source) const;
+    std::uint64_t forgetSource(std::int64_t id) const;
+    // Full snapshots are merged only when the captured revision, identity,
+    // binding and mount fingerprint still agree. Failure never deletes files.
+    IndexStats mergeSourceSnapshot(const SourceRecord& expected,
+                                  const std::vector<FileRecord>& records,
+                                  const std::string& subtree_relative = {}) const;
+    // Read-only staging SQLite: snapshot_metadata(complete=1), snapshot_files
+    // columns follow FileRecord (path,parent_path,name,ext,root,size,
+    // modified_time,is_dir,scan_generation,source_id,relative_path,cloud_copy).
+    // Staging writers must close/stop writing before handing the file over.
+    IndexStats mergeSourceSnapshotFile(const SourceRecord& expected,
+                                      const std::string& snapshot_database,
+                                      const std::string& subtree_relative = {}) const;
+    std::string migrationBackupPath() const;
 
     void beginRootScan(const std::string& root, std::int64_t generation) const;
     void completeRootScan(const std::string& root, std::int64_t generation, std::uint64_t file_count) const;

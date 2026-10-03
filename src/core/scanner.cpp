@@ -40,15 +40,16 @@ bool FileScanner::makeRecord(const fs::path& path, FileRecord& record) {
     record.size = 0;
     if (fs::is_regular_file(status)) {
         const auto size = fs::file_size(path, ec);
-        if (!ec) {
-            record.size = static_cast<std::uint64_t>(size);
-        }
-        ec.clear();
+        if (ec) return false;
+        record.size = static_cast<std::uint64_t>(size);
     }
     const auto modified = fs::last_write_time(path, ec);
-    if (!ec) {
-        record.modified_time = toUnixSeconds(modified);
-    }
+    if (ec) {
+        // A symlink may intentionally have no target; its own metadata remains
+        // enumerable, while other metadata failures invalidate the snapshot.
+        if (!fs::is_symlink(status)) return false;
+        record.modified_time = 0;
+    } else record.modified_time = toUnixSeconds(modified);
     return true;
 }
 
@@ -62,62 +63,56 @@ IndexStats FileScanner::scanTree(const std::string& root,
     IndexStats stats;
     std::vector<FileRecord> batch;
     batch.reserve(batch_size_);
-
+    auto isCancelled = [&]() { return cancelled && cancelled->load(); };
     auto flush = [&]() -> bool {
-        if (batch.empty()) {
-            return true;
-        }
-        auto size = static_cast<std::uint64_t>(batch.size());
-        if (!callback(std::move(batch))) {
-            return false;
+        if (isCancelled()) { stats.cancelled = true; return false; }
+        if (batch.empty()) return true;
+        const auto size = batch.size();
+        try {
+            if (!callback(std::move(batch))) { stats.cancelled = true; return false; }
+        } catch (const std::exception& error) {
+            stats.error = error.what(); return false;
+        } catch (...) {
+            stats.error = "scan callback failed"; return false;
         }
         stats.indexed += size;
-        batch.clear();
-        batch.reserve(batch_size_);
+        batch.clear(); batch.reserve(batch_size_);
         return true;
     };
-
+    if (isCancelled()) { stats.cancelled = true; return stats; }
     const auto root_path = utf8ToPath(root);
     std::error_code ec;
-    if (!fs::exists(root_path, ec)) {
+    const auto status = fs::status(root_path, ec);
+    if (ec || !fs::exists(status)) {
+        stats.error = ec ? ec.message() : "root does not exist";
         return stats;
     }
-
-    FileRecord root_record;
-    ++stats.scanned;
-    if (makeRecord(root_path, root_record)) {
-        batch.push_back(std::move(root_record));
-    } else {
-        ++stats.skipped;
-    }
-
-    const auto options = fs::directory_options::skip_permission_denied;
-    fs::recursive_directory_iterator it(root_path, options, ec), end;
-    while (it != end) {
-        if (cancelled && cancelled->load()) {
-            break;
-        }
-        if (ec) {
-            ++stats.skipped;
-            ec.clear();
-            it.increment(ec);
-            continue;
-        }
-
+    auto append = [&](const fs::path& path) {
         ++stats.scanned;
         FileRecord record;
-        if (makeRecord(it->path(), record)) {
-            batch.push_back(std::move(record));
-            if (batch.size() >= batch_size_ && !flush()) {
-                break;
-            }
-        } else {
-            ++stats.skipped;
+        if (!makeRecord(path, record)) {
+            ++stats.skipped; stats.error = "unable to read file metadata";
+            return false;
         }
-        it.increment(ec);
+        batch.push_back(std::move(record));
+        return batch.size() < batch_size_ || flush();
+    };
+    if (!append(root_path)) return stats;
+    if (fs::is_directory(status)) {
+        // Never skip permission errors: an incomplete enumeration cannot be
+        // used to infer deletions from a previously complete snapshot.
+        fs::recursive_directory_iterator it(root_path, fs::directory_options::none, ec), end;
+        if (ec) { stats.error = ec.message(); return stats; }
+        while (it != end) {
+            if (isCancelled()) { stats.cancelled = true; return stats; }
+            if (!append(it->path())) return stats;
+            it.increment(ec);
+            if (ec) { stats.error = ec.message(); return stats; }
+        }
     }
-
-    flush();
+    if (!flush()) return stats;
+    if (isCancelled()) { stats.cancelled = true; return stats; }
+    stats.completed = true;
     return stats;
 }
 

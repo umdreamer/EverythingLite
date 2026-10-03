@@ -36,6 +36,7 @@ add_library(everything_core
     src/core/path_utils.cpp
     src/core/scanner.cpp
     src/core/database.cpp
+    src/core/source_catalog.cpp
     src/core/search_engine.cpp
     src/core/search_service.cpp
     src/core/search_trace.cpp
@@ -121,6 +122,9 @@ if(BUILD_TESTS)
         add_test(NAME ui COMMAND test_ui)
         set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
     endif()
+    add_executable(test_source_catalog tests/test_source_catalog.cpp)
+    target_link_libraries(test_source_catalog PRIVATE everything_core)
+    add_test(NAME source_catalog COMMAND test_source_catalog)
     add_executable(test_core tests/test_core.cpp)
     target_link_libraries(test_core PRIVATE everything_core)
     add_test(NAME core COMMAND test_core)

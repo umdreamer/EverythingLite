@@ -1,11 +1,15 @@
 #pragma once
 
+#include "core/source_catalog.h"
 #include <cstdint>
 #include <string>
 
 namespace everything_lite {
 
 struct FileRecord {
+    std::int64_t source_id = 0;
+    std::string relative_path;
+    CloudCopy cloud_copy = CloudCopy::Unknown;
     std::string path;
     std::string parent_path;
     std::string name;
@@ -20,9 +24,17 @@ struct FileRecord {
 struct SearchResult {
     FileRecord file;
     int rank = 0;
+    std::string source_label;
+    SourceType source_type = SourceType::Unknown;
+    SourceStatus source_status = SourceStatus::Unverified;
+    std::int64_t source_last_check = 0;
+    std::int64_t source_last_success = 0;
 };
 
 struct IndexStats {
+    bool completed = false;
+    bool cancelled = false;
+    std::string error;
     std::uint64_t scanned = 0;
     std::uint64_t indexed = 0;
     std::uint64_t skipped = 0;

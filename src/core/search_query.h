@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/source_catalog.h"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -8,6 +9,8 @@
 namespace everything_lite {
 
 struct SearchQuery {
+    std::optional<std::int64_t> source_id;
+    std::optional<SourceStatus> source_status;
     std::vector<std::string> terms;
     std::optional<std::string> extension;
     std::optional<std::string> path_term;

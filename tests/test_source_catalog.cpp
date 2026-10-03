@@ -26,6 +26,61 @@ static std::int64_t scalar(const fs::path& db, const char* text) {
     sqlite3_finalize(stmt); sqlite3_close(handle); return result;
 }
 static bool rejected(const std::function<void()>& work) { try { work(); } catch (const std::exception&) { return true; } return false; }
+// The external writer keeps a WAL write lock while both migration callers
+// enter. Old implementations publish two backups before obtaining that lock;
+// corrected implementations cannot publish a backup until it is released.
+static void concurrentLegacyMigration(const fs::path& directory, bool with_file) {
+    fs::create_directories(directory);
+    const auto path=directory/"legacy.db";
+    sql(path,R"SQL(PRAGMA journal_mode=WAL;
+CREATE TABLE files(id INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE,parent_path TEXT NOT NULL,name TEXT NOT NULL,ext TEXT NOT NULL DEFAULT '',root TEXT NOT NULL,size INTEGER NOT NULL DEFAULT 0,modified_time INTEGER NOT NULL DEFAULT 0,is_dir INTEGER NOT NULL DEFAULT 0,search_name TEXT NOT NULL,search_path TEXT NOT NULL,scan_generation INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE roots(root TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,last_scan_time INTEGER NOT NULL DEFAULT 0,file_count INTEGER NOT NULL DEFAULT 0);
+INSERT INTO roots VALUES('/synthetic/concurrent',1,1,0);
+)SQL");
+    if(with_file) sql(path,"INSERT INTO files VALUES(1,'/synthetic/concurrent/legacy.txt','/synthetic/concurrent','legacy.txt','txt','/synthetic/concurrent',7,1,0,'legacy.txt','/synthetic/concurrent/legacy.txt',1)");
+    sqlite3* blocker=nullptr;
+    assert(sqlite3_open(path.string().c_str(),&blocker)==SQLITE_OK);
+    assert(sqlite3_exec(blocker,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr)==SQLITE_OK);
+    std::atomic_int ready{0}; std::atomic_bool go{false};
+    std::exception_ptr failures[2]; std::thread callers[2];
+    for(int i=0;i<2;++i) callers[i]=std::thread([&,i] {
+        ++ready;
+        while(!go.load()) std::this_thread::yield();
+        try { Database(path.string()).initialize(); } catch(...) { failures[i]=std::current_exception(); }
+    });
+    while(ready.load()!=2) std::this_thread::yield();
+    go=true;
+    auto backupCount=[&] {
+        int count=0;
+        for(const auto& file:fs::directory_iterator(directory))
+            if(file.path().extension()==".sqlite" && file.path().filename().string().find(".backup.sqlite")!=std::string::npos) ++count;
+        return count;
+    };
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(600);
+    while(backupCount()<2 && std::chrono::steady_clock::now()<deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    // A same-row-count metadata commit must be part of the migration backup.
+    assert(sqlite3_exec(blocker,"UPDATE roots SET last_scan_time=91; UPDATE files SET modified_time=91; COMMIT",nullptr,nullptr,nullptr)==SQLITE_OK);
+    sqlite3_close(blocker);
+    for(auto& caller:callers) caller.join();
+    for(const auto& failure:failures) {
+        if(failure) {
+            try { std::rethrow_exception(failure); }
+            catch(const std::exception& error) { std::cerr<<"concurrent migration failed: "<<error.what()<<'\n'; }
+        }
+        assert(!failure && "both concurrent legacy migrations must succeed");
+    }
+    Database migrated(path.string());
+    assert(migrated.sources().size()==1 && "concurrent initialization must not duplicate implicit sources");
+    assert(migrated.totalFileCount()==(with_file ? 1 : 0));
+    assert(backupCount()==1 && "only the initializer performing migration publishes a backup");
+    const auto backup=migrated.migrationBackupPath();
+    assert(scalar(backup,"SELECT last_scan_time FROM roots")==91);
+    if(with_file) {
+        assert(scalar(backup,"SELECT modified_time FROM files")==91);
+        assert(scalar(path,"SELECT modified_time FROM files")==91);
+    }
+}
 int main() {
     assert(pathIsWithin("/synthetic/file.txt","/"));
     const auto nonce=std::chrono::steady_clock::now().time_since_epoch().count();
@@ -196,6 +251,8 @@ int main() {
     start=true; for(auto& worker:workers) worker.join();
     assert(concurrent.sources().size()==1);
     for(const auto id:ids) assert(id==ids.front());
+    concurrentLegacyMigration(base/"concurrent-legacy-rows",true);
+    concurrentLegacyMigration(base/"concurrent-legacy-empty",false);
     fs::remove_all(base);
     std::cout << "source catalog tests passed\n";
 }

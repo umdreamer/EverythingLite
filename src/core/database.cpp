@@ -233,7 +233,19 @@ bool columnExists(sqlite3* db,const char* table,const char* column) {
     while(sqlite3_step(stmt.get())==SQLITE_ROW) if(columnText(stmt.get(),1)==column) return true;
     return false;
 }
-std::string backupDatabase(sqlite3* source,const std::string& path) {
+std::string backupDatabase(sqlite3* writer,const std::string& path) {
+    // The caller holds BEGIN IMMEDIATE on writer. A separate read-only handle
+    // sees the same committed snapshot while every other writer is excluded;
+    // backing up the connection with an active write transaction can be BUSY.
+    sqlite3* source_raw=nullptr;
+    if(sqlite3_open_v2(path.c_str(),&source_raw,SQLITE_OPEN_READONLY|SQLITE_OPEN_FULLMUTEX,nullptr)!=SQLITE_OK) {
+        if(source_raw) sqlite3_close(source_raw);
+        throw std::runtime_error("unable to open migration backup source");
+    }
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> source(source_raw,sqlite3_close);
+    sqlite3_busy_timeout(source_raw,5000);
+    if(sqlite3_exec(source_raw,"BEGIN",nullptr,nullptr,nullptr)!=SQLITE_OK)
+        throw std::runtime_error("unable to establish migration backup snapshot");
     const auto ticks=std::chrono::system_clock::now().time_since_epoch().count();
     auto backup_path=path+".pre-source-catalog-"+std::to_string(ticks)+".backup.sqlite";
     if(std::filesystem::exists(utf8ToPath(backup_path))) throw std::runtime_error("migration backup already exists");
@@ -243,12 +255,21 @@ std::string backupDatabase(sqlite3* source,const std::string& path) {
         throw std::runtime_error("unable to create migration backup");
     }
     std::unique_ptr<sqlite3,decltype(&sqlite3_close)> target(raw,sqlite3_close);
-    sqlite3_backup* backup=sqlite3_backup_init(raw,"main",source,"main");
+    sqlite3_backup* backup=sqlite3_backup_init(raw,"main",source_raw,"main");
     if(!backup) throw std::runtime_error("unable to initialize migration backup");
     const auto rc=sqlite3_backup_step(backup,-1);
     const auto finish=sqlite3_backup_finish(backup);
     if(rc!=SQLITE_DONE || finish!=SQLITE_OK) throw std::runtime_error("migration backup failed");
-    if(countRows(raw,"files")!=countRows(source,"files")) throw std::runtime_error("migration backup count mismatch");
+    // Publish a self-contained backup file even when the live index uses WAL.
+    if(sqlite3_exec(raw,"PRAGMA journal_mode=DELETE",nullptr,nullptr,nullptr)!=SQLITE_OK)
+        throw std::runtime_error("unable to finalize migration backup journal");
+    if(countRows(raw,"files")!=countRows(writer,"files") ||
+       countRows(raw,"sqlite_master")!=countRows(writer,"sqlite_master") ||
+       (tableExists(writer,"roots") && countRows(raw,"roots")!=countRows(writer,"roots")))
+        throw std::runtime_error("migration backup schema or row count mismatch");
+    auto integrity=prepare(raw,"PRAGMA integrity_check");
+    if(sqlite3_step(integrity.get())!=SQLITE_ROW || columnText(integrity.get(),0)!="ok")
+        throw std::runtime_error("migration backup integrity check failed");
     return backup_path;
 }
 
@@ -504,11 +525,13 @@ Database::Database(std::string db_path) : db_path_(std::move(db_path)) {}
 
 void Database::initialize() const {
     SqliteConnection conn(db_path_);
-    const bool legacy=tableExists(conn.get(),"files") && !columnExists(conn.get(),"files","source_id");
-    const auto backup=legacy ? backupDatabase(conn.get(),db_path_) : std::string{};
-    const auto old_count=legacy ? countRows(conn.get(),"files") : 0;
     conn.exec("BEGIN IMMEDIATE;");
     try {
+        // Recheck only after taking the writer lock: another initializer may
+        // already have migrated the schema while this connection was waiting.
+        const bool legacy=tableExists(conn.get(),"files") && !columnExists(conn.get(),"files","source_id");
+        const auto old_count=legacy ? countRows(conn.get(),"files") : 0;
+        const auto backup=legacy ? backupDatabase(conn.get(),db_path_) : std::string{};
         conn.exec(R"SQL(
 CREATE TABLE IF NOT EXISTS sources (
  id INTEGER PRIMARY KEY AUTOINCREMENT,label TEXT NOT NULL DEFAULT '',type INTEGER NOT NULL DEFAULT 5,

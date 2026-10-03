@@ -2,7 +2,7 @@
 
 ## 状态与范围
 
-本文件为 0.4.13 的待确认设计，尚未实施。当前应用版本仍为 0.4.12。项目通过 Vibe Coding 方式迭代，Mac 与 Linux 维护同一套索引、搜索和 Qt 界面代码。CLI 为 everything-lite-cli，GUI 名称为 Everything Lite，GUI 文件为 EverythingLite。
+本文件为 0.4.13 的设计，已于 2026-10-03 获得实施确认。当前应用版本仍为 0.4.12，实施与验收进度记录在对应计划中。项目通过 Vibe Coding 方式迭代，Mac 与 Linux 维护同一套索引、搜索和 Qt 界面代码。CLI 为 everything-lite-cli，GUI 名称为 Everything Lite，GUI 文件为 EverythingLite。
 
 网络入口采用系统已经挂载的 SMB/NFS/NAS 目录。挂载、认证和网络协议连接由操作系统管理，应用保存目录路径与刷新策略，不保存 NAS 凭据。原有本地目录使用平台监听，周期索引为单独的目录模式，适用于网络目录及事件通知不可靠的其他文件系统。
 

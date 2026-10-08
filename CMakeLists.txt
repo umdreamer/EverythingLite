@@ -67,6 +67,8 @@ if(BUILD_GUI)
         set(CMAKE_AUTOMOC ON)
         add_library(everything_ui STATIC
             src/ui/main_window.cpp
+            src/ui/main_window_sync.cpp
+            src/ui/result_presentation.h
             src/ui/main_window.h
             src/ui/desktop_actions.cpp
             src/ui/desktop_actions.h

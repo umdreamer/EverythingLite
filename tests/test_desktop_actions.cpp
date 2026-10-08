@@ -57,6 +57,16 @@ class UrlSink : public QObject {
 class DesktopTest : public QObject {
     Q_OBJECT
   private slots:
+    void openPreservesLiteralLocalUrl() {
+        QTemporaryDir dir;
+        const auto path=dir.filePath(QStringLiteral("中文 空格#?%\"\\\n.txt"));
+        QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        UrlSink sink; QDesktopServices::setUrlHandler("file",&sink,"accept");
+        struct Unset { ~Unset(){QDesktopServices::unsetUrlHandler("file");} } unset;
+        DesktopActions actions; actions.open(path);
+        QCOMPARE(sink.urls.size(),1); QCOMPARE(sink.urls[0].toLocalFile(),path);
+        QCOMPARE(sink.urls[0],QUrl::fromLocalFile(path));
+    }
     void previewLimits() {
         QTemporaryDir dir;
         auto write = [&](const QString& name, const QByteArray& data) {

@@ -5,6 +5,7 @@
 
 #include <QMainWindow>
 #include <QSet>
+#include <QHash>
 #include <QString>
 #include <QStringList>
 
@@ -74,6 +75,17 @@ private:
     QLabel* status_label_ = nullptr;
     QLabel* watcher_error_label_ = nullptr;
     QString watcher_error_;
+    QLabel* sync_error_label_ = nullptr;
+    struct SyncFailureScope {
+        QString root;
+        QString path;
+        bool rescan = false;
+    };
+    QHash<QString, SyncFailureScope> sync_failure_scopes_;
+    QHash<QString, int> sync_attempts_;
+    QHash<QString, QString> sync_errors_;
+    QSet<QString> dormant_paths_;
+    QSet<QString> dormant_rescan_roots_;
     std::uint64_t watcher_generation_ = 0;
     DesktopActions* desktop_actions_ = nullptr;
     QLabel* search_state_label_ = nullptr;
@@ -104,6 +116,10 @@ private:
     bool search_ime_composing_ = false;
     bool search_in_flight_ = false;
     bool search_pending_ = false;
+    bool filesystem_results_dirty_ = false;
+    bool closing_ = false;
+    bool events_due_while_busy_ = false;
+    std::shared_ptr<std::atomic_bool> active_search_cancellation_;
     bool name_search_available_ = false;
     bool name_search_ready_ = false;
     std::atomic_bool indexing_{false};
@@ -128,6 +144,7 @@ private:
     void updateScopeLabel();
     void updateSearchStateLabel();
     void refreshStats();
+    void updateCachedStatus();
     void runSearch();
     void launchSearch(const QString& query, std::size_t offset = 0, bool append = false);
     void cancelActiveSearch();
@@ -149,6 +166,7 @@ private:
     void receiveWatcherEvent(std::uint64_t generation, const FileEvent& event);
     void scheduleFileEvent(const FileEvent& event);
     void processPendingEvents();
+    void reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error);
     QString rootForPath(const QString& path) const;
     void setBusy(bool busy, const QString& message = {});
     void startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish = true);
@@ -161,6 +179,8 @@ private:
     void showSearchSyntax();
     void showAbout();
     QStringList selectedPaths() const;
+    QStringList actionableSelectedPaths();
+    bool allowCachedAction(int row);
     QStringList selectedNames() const;
     void setScopeFromMenu(int scope_index);
     void syncSearchControlsFromMenus();

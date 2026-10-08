@@ -3,6 +3,7 @@
 #include "core/file_record.h"
 #include "core/search_engine.h"
 
+#include <atomic>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -30,7 +31,8 @@ public:
     std::vector<SearchResult> search(const std::string& query,
                                      std::size_t limit = 500,
                                      std::size_t offset = 0,
-                                     const SearchOptions& options = {}) const;
+                                     const SearchOptions& options = {},
+                                     const std::atomic_bool* cancellation = nullptr) const;
 
 private:
     std::string db_path_;

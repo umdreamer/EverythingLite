@@ -12,7 +12,8 @@ SearchService::SearchService(std::string db_path) : db_path_(db_path), engine_(s
 std::vector<SearchResult> SearchService::search(const std::string& query,
                                                  std::size_t limit,
                                                  std::size_t offset,
-                                                 const SearchOptions& options) const {
+                                                 const SearchOptions& options,
+                                                 const std::atomic_bool* cancellation) const {
     {
         std::ostringstream trace;
         trace << "db=\"" << db_path_ << "\""
@@ -29,7 +30,7 @@ std::vector<SearchResult> SearchService::search(const std::string& query,
     // string overload used by the CLI historically. This is the reference
     // behavior for GUI/CLI consistency.
     if (options.scope == SearchItemScope::All && !options.match_path) {
-        auto results = engine_.search(query, limit, offset, nullptr);
+        auto results = engine_.search(query, limit, offset, cancellation);
         searchTrace("SearchService", "default branch result_count=" + std::to_string(results.size()));
         return results;
     }
@@ -43,7 +44,7 @@ std::vector<SearchResult> SearchService::search(const std::string& query,
     }
     if (options.match_path) parsed.match_path = true;
 
-    auto results = engine_.search(parsed, limit, offset, nullptr);
+    auto results = engine_.search(parsed, limit, offset, cancellation);
     searchTrace("SearchService", "filtered branch result_count=" + std::to_string(results.size()));
     return results;
 }

@@ -216,8 +216,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // explicit search. Every keystroke restarts the timer.
     connect(search_edit_, &QLineEdit::textEdited, this, [this](const QString&) {
         // Invalidate any result already being computed as soon as the user
-        // changes the text. The running query is allowed to finish off-thread,
-        // but its stale result will never replace the current view.
+        // changes the text. SQLite receives cancellation immediately; stale
+        // results never replace the current view.
+        cancelActiveSearch();
+        search_pending_ = false;
         ++search_request_id_;
         results_have_more_ = false;
         search_timer_->stop();
@@ -241,12 +243,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             else if (index == 1) scope_files_action_->setChecked(true);
             else if (index == 2) scope_folders_action_->setChecked(true);
         }
+        cancelActiveSearch();
+        search_pending_ = false;
         ++search_request_id_;
         updateSearchStateLabel();
         search_timer_->start(kSearchIdleDelayMs);
     });
     connect(match_path_check_, &QCheckBox::toggled, this, [this](bool checked) {
         if (match_path_action_ && match_path_action_->isChecked() != checked) match_path_action_->setChecked(checked);
+        cancelActiveSearch();
+        search_pending_ = false;
         ++search_request_id_;
         updateSearchStateLabel();
         search_timer_->start(kSearchIdleDelayMs);
@@ -260,20 +266,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // v0.4.2: filesystem churn must never pre-empt a user search. FSEvents can
     // fire continuously under ~/Library; v0.4.1 restarted the foreground query
     // after every sync batch, so slower queries could be cancelled forever.
-    // We refresh the visible result set only after the filesystem has been quiet
-    // for a while, and never cancel a query that is already running.
+    // The first change fixes a bounded refresh deadline; later changes cannot
+    // postpone it indefinitely. Active user queries and edits retain priority.
     filesystem_refresh_timer_ = new QTimer(this);
     filesystem_refresh_timer_->setSingleShot(true);
     filesystem_refresh_timer_->setInterval(1800);
     connect(filesystem_refresh_timer_, &QTimer::timeout, this, [this] {
-        // v0.4.10: filesystem refresh must never compete with typing. Do not
-        // issue an expensive empty query and do not refresh while the user's
-        // debounce timer or IME composition is active.
-        if (search_ime_composing_ || (search_timer_ && search_timer_->isActive())) {
+        if (!filesystem_results_dirty_ || closing_) return;
+        // A filesystem refresh never supersedes an active user query or the
+        // latest UI state waiting for its input debounce / IME commit.
+        if (search_in_flight_ || search_pending_ || search_ime_composing_
+            || search_timer_->isActive()) {
             filesystem_refresh_timer_->start(1800);
             return;
         }
-        if (normalizeGuiQuery(search_edit_->text()).isEmpty()) return;
+        if (normalizeGuiQuery(search_edit_->text()).isEmpty()) {
+            filesystem_results_dirty_ = false;
+            return;
+        }
+        filesystem_results_dirty_ = false;
         runSearch();
     });
 
@@ -313,6 +324,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
+    closing_ = true;
+    cancelActiveSearch();
     if (watcher_) watcher_->stop();
     if (search_thread_) {
         search_thread_->quit();
@@ -329,6 +342,11 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    closing_ = true;
+    cancelActiveSearch();
+    search_timer_->stop();
+    filesystem_refresh_timer_->stop();
+    event_timer_->stop();
     saveSettings();
     saveBookmarks();
     QMainWindow::closeEvent(event);
@@ -340,6 +358,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         const bool composing_now = !input_event->preeditString().isEmpty();
 
         if (composing_now) {
+            cancelActiveSearch();
+            search_pending_ = false;
             ++search_request_id_;
             search_ime_composing_ = true;
             if (search_timer_) search_timer_->stop();
@@ -425,6 +445,10 @@ void MainWindow::buildUi() {
     table_->setColumnWidth(0, 310);
     table_->setColumnWidth(2, 92);
     table_->setColumnWidth(3, 155);
+    table_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Interactive);
+    table_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Interactive);
+    table_->setColumnWidth(4, 150);
+    table_->setColumnWidth(5, 170);
     layout->addWidget(table_, 1);
 
     setCentralWidget(central);
@@ -439,6 +463,12 @@ void MainWindow::buildUi() {
     watcher_error_label_->setStyleSheet(QStringLiteral("color: #b33"));
     watcher_error_label_->hide();
     statusBar()->addPermanentWidget(watcher_error_label_);
+    sync_error_label_ = new QLabel(this);
+    sync_error_label_->setTextFormat(Qt::PlainText);
+    sync_error_label_->setWordWrap(true);
+    sync_error_label_->setStyleSheet(QStringLiteral("color: #b33"));
+    sync_error_label_->hide();
+    statusBar()->addPermanentWidget(sync_error_label_);
     statusBar()->addPermanentWidget(search_state_label_);
     statusBar()->setSizeGripEnabled(false);
 }
@@ -605,10 +635,10 @@ void MainWindow::loadSettings() {
     const auto geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
     if (!geometry.isEmpty()) restoreGeometry(geometry);
     const auto header_state = settings.value(QStringLiteral("table/header")).toByteArray();
-    if (!header_state.isEmpty()) table_->horizontalHeader()->restoreState(header_state);
+    if (!header_state.isEmpty() && !table_->horizontalHeader()->restoreState(header_state)) resetColumns();
     const int sort_column = settings.value(QStringLiteral("table/sortColumn"), 0).toInt();
     const auto sort_order = static_cast<Qt::SortOrder>(settings.value(QStringLiteral("table/sortOrder"), static_cast<int>(Qt::AscendingOrder)).toInt());
-    table_->sortByColumn(sort_column, sort_order);
+    table_->sortByColumn(std::clamp(sort_column, 0, model_->columnCount() - 1), sort_order);
     syncSearchControlsFromMenus();
 }
 
@@ -710,16 +740,23 @@ void MainWindow::refreshStats() {
         searchTrace("GUI", "refreshStats indexed_count=" + std::to_string(indexed_count_)
             + " fts_available=" + std::to_string(name_search_available_ ? 1 : 0)
             + " fts_ready=" + std::to_string(name_search_ready_ ? 1 : 0));
-        QString acceleration;
-        if (!name_search_available_) acceleration = QStringLiteral("    ·    当前 SQLite 未提供 FTS5 trigram，使用兼容搜索");
-        else if (!name_search_ready_) acceleration = QStringLiteral("    ·    名称加速索引未就绪");
-        status_label_->setText(QStringLiteral("%1 个对象    ·    %2%3")
-            .arg(indexed_count_)
-            .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("等待启动"))
-            .arg(acceleration));
+        updateCachedStatus();
     } catch (const std::exception& e) {
         status_label_->setText(QStringLiteral("数据库错误：%1").arg(QString::fromUtf8(e.what())));
     }
+}
+
+void MainWindow::updateCachedStatus() {
+    if (closing_ || search_in_flight_ || search_pending_ || search_ime_composing_ || search_timer_->isActive()) return;
+    QString acceleration;
+    if (!name_search_available_) acceleration = QStringLiteral("    ·    当前 SQLite 未提供 FTS5 trigram，使用兼容搜索");
+    else if (!name_search_ready_) acceleration = QStringLiteral("    ·    名称加速索引未就绪");
+    const auto state = normalizeGuiQuery(search_edit_->text()).isEmpty()
+        ? QStringLiteral("输入关键词开始搜索")
+        : QStringLiteral("已加载 %1%2").arg(model_->rowCount()).arg(results_have_more_ ? QStringLiteral("+") : QString{});
+    status_label_->setText(QStringLiteral("%1 个对象    ·    %2    ·    %3%4")
+        .arg(indexed_count_).arg(state)
+        .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("等待启动")).arg(acceleration));
 }
 
 QString MainWindow::currentSearchSignature() const {
@@ -730,7 +767,9 @@ QString MainWindow::currentSearchSignature() const {
 }
 
 void MainWindow::runSearch() {
-    if (indexing_.load() && indexed_count_ == 0) return;
+    if (closing_ || search_ime_composing_ || (indexing_.load() && indexed_count_ == 0)) return;
+    search_timer_->stop();
+    cancelActiveSearch();
     pending_search_query_ = normalizeGuiQuery(search_edit_->text());
     results_have_more_ = false;
     ++search_request_id_;
@@ -738,7 +777,8 @@ void MainWindow::runSearch() {
 }
 
 void MainWindow::loadMoreResults() {
-    if (!results_have_more_ || search_in_flight_) return;
+    if (closing_ || !results_have_more_ || search_in_flight_ || search_pending_
+        || search_ime_composing_ || search_timer_->isActive()) return;
     ++search_request_id_;
     launchSearch(normalizeGuiQuery(search_edit_->text()), static_cast<std::size_t>(model_->rowCount()), true);
 }
@@ -775,7 +815,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     // Keep exactly one SQLite query active. If a newer debounce fires while a
     // previous query is still running, remember only that a newer search is
     // needed; when the worker finishes, run the latest contents of the box.
-    // This avoids both query pile-ups and cancellation-related correctness bugs.
+    // Cancellation stops obsolete SQL; the next query starts only on completion.
     if (search_in_flight_) {
         search_pending_ = true;
         status_label_->setText(QStringLiteral("上一查询仍在后台运行，最新关键词已排队… 可继续输入"));
@@ -795,6 +835,8 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     else options.scope = SearchItemScope::All;
     options.match_path = match_path;
 
+    active_search_cancellation_ = std::make_shared<std::atomic_bool>(false);
+    const auto cancellation = active_search_cancellation_;
     search_in_flight_ = true;
     search_pending_ = false;
     status_label_->setText(QStringLiteral("正在后台搜索“%1”… 可继续输入")
@@ -806,9 +848,9 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     QPointer<MainWindow> window(this);
 
     QMetaObject::invokeMethod(worker, [window, worker, query_utf8, effective_limit, offset, options,
-                                       request_id, append, normalized_query, db_path] {
+                                       request_id, append, normalized_query, db_path, cancellation] {
         auto outcome = std::make_shared<BackgroundSearchResult>(
-            worker->search(query_utf8, effective_limit, offset, options));
+            worker->search(query_utf8, effective_limit, offset, options, cancellation.get()));
         if (!window) return;
 
         QMetaObject::invokeMethod(window.data(), [window, outcome, request_id, append,
@@ -816,10 +858,12 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             if (!window) return;
             auto* self = window.data();
             self->search_in_flight_ = false;
+            self->active_search_cancellation_.reset();
+            if (self->closing_) return;
 
             // textEdited/scope changes invalidate request_id immediately. Old
             // queries may finish, but are never allowed to flash stale results.
-            const bool still_current = request_id == self->search_request_id_;
+            const bool still_current = request_id == self->search_request_id_ && !outcome->cancelled;
             if (!still_current) {
                 searchTrace("GUI-SEARCH", "discarded stale background result request_id="
                     + std::to_string(request_id)
@@ -866,65 +910,110 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             // If the 800 ms timer fired while the worker was busy, do one new
             // query using the latest UI state. Multiple edits collapse to this
             // single latest search instead of building a backlog.
-            if (self->search_pending_) {
+            if (self->search_pending_ && !self->search_ime_composing_ && !self->search_timer_->isActive()) {
                 self->search_pending_ = false;
-                QTimer::singleShot(0, self, [self] { self->runSearch(); });
+                QTimer::singleShot(0, self, [self] {
+                    if (!self->closing_ && !self->search_ime_composing_ && !self->search_timer_->isActive()) self->runSearch();
+                });
             }
         }, Qt::QueuedConnection);
     }, Qt::QueuedConnection);
 }
 
 void MainWindow::cancelActiveSearch() {
-    // Kept as a no-op for source compatibility with older 0.4.x code paths.
-    // v0.4.6 does not cancel foreground searches.
+    if (active_search_cancellation_) active_search_cancellation_->store(true, std::memory_order_relaxed);
 }
 
 void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish) {
-    if (worker_thread_) return;
+    if (worker_thread_ || closing_) return;
     setBusy(true, start_message);
-    worker_thread_ = QThread::create([job = std::move(job)] { job(); });
-    connect(worker_thread_, &QThread::finished, this, [this, refresh_search_on_finish] {
+    struct Stats {
+        std::uint64_t count = 0;
+        bool available = false;
+        bool ready = false;
+        bool valid = false;
+        QString error;
+    };
+    auto stats = std::make_shared<Stats>();
+    const auto db_path = db_path_;
+    worker_thread_ = QThread::create([job = std::move(job), stats, db_path] {
+        try {
+            job();
+        } catch (const std::exception& e) {
+            stats->error = QString::fromUtf8(e.what());
+        } catch (...) {
+            stats->error = QStringLiteral("未知同步错误");
+        }
+        // Counting the full index belongs on this worker, never the GUI callback.
+        try {
+            Database db(toUtf8(db_path));
+            db.initialize();
+            stats->count = db.totalFileCount();
+            stats->available = db.nameSearchIndexAvailable();
+            stats->ready = db.nameSearchIndexReady();
+            stats->valid = true;
+        } catch (const std::exception& e) {
+            if (stats->error.isEmpty()) stats->error = QString::fromUtf8(e.what());
+        }
+    });
+    connect(worker_thread_, &QThread::finished, this, [this, refresh_search_on_finish, stats] {
         worker_thread_->deleteLater();
         worker_thread_ = nullptr;
         setBusy(false);
-        refreshStats();
-        if (refresh_search_on_finish) {
-            runSearch();
-        } else {
-            scheduleFilesystemResultRefresh();
+        if (closing_) return;
+        if (stats->valid) {
+            indexed_count_ = stats->count;
+            name_search_available_ = stats->available;
+            name_search_ready_ = stats->ready;
         }
-        if (!pending_paths_.isEmpty() || !pending_rescan_roots_.isEmpty()) event_timer_->start();
+        if (!stats->error.isEmpty()) {
+            sync_error_label_->setText(QStringLiteral("同步失败（保留缓存）：%1").arg(stats->error));
+            sync_error_label_->show();
+        }
+        updateCachedStatus();
+        Q_UNUSED(refresh_search_on_finish)
+        // Manual rebuilds and event batches share the same user-query protection.
+        scheduleFilesystemResultRefresh();
+        if (!pending_paths_.isEmpty() || !pending_rescan_roots_.isEmpty()) {
+            if (events_due_while_busy_ || !event_timer_->isActive()) event_timer_->start(0);
+        }
+        events_due_while_busy_ = false;
     });
     worker_thread_->start();
 }
 
 void MainWindow::scheduleFilesystemResultRefresh() {
-    if (!filesystem_refresh_timer_) return;
-    filesystem_refresh_timer_->start();
+    if (!filesystem_refresh_timer_ || closing_) return;
+    filesystem_results_dirty_ = true;
+    if (!filesystem_refresh_timer_->isActive()) filesystem_refresh_timer_->start(1800);
 }
 
 void MainWindow::rebuildIndex() {
+    if (worker_thread_ || closing_) return;
     if (roots_.isEmpty()) {
         editRoots();
         if (roots_.isEmpty()) return;
     }
+    for (auto it = sync_failure_scopes_.begin(); it != sync_failure_scopes_.end(); ++it) {
+        if (roots_.contains(it.value().root)) sync_attempts_[it.key()] = 0;
+    }
     const auto roots = roots_;
     const auto db_path = db_path_;
     startWorker([this, roots, db_path] {
-        try {
-            IndexManager manager(toUtf8(db_path));
-            std::vector<std::string> native_roots;
-            for (const auto& root : roots) native_roots.push_back(toUtf8(root));
-            manager.rebuildRoots(native_roots, [this](const std::string& root, std::uint64_t count) {
-                QMetaObject::invokeMethod(this, [this, root, count] {
-                    status_label_->setText(QStringLiteral("正在索引：%1    %2 项").arg(fromUtf8(root)).arg(count));
-                }, Qt::QueuedConnection);
-            });
-        } catch (const std::exception& e) {
-            const auto message = QString::fromUtf8(e.what());
-            QMetaObject::invokeMethod(this, [this, message] {
-                QMessageBox::critical(this, QStringLiteral("索引失败"), message);
-            }, Qt::QueuedConnection);
+        for (const auto& root : roots) {
+            QString error;
+            try {
+                IndexManager manager(toUtf8(db_path));
+                const auto stats = manager.rebuildRoot(toUtf8(root), [this](const std::string& root, std::uint64_t count) {
+                    QMetaObject::invokeMethod(this, [this, root, count] {
+                        if (!closing_) status_label_->setText(QStringLiteral("正在索引：%1    %2 项").arg(fromUtf8(root)).arg(count));
+                    }, Qt::QueuedConnection);
+                });
+                if (!stats.completed) error = stats.cancelled ? QStringLiteral("同步已取消")
+                    : stats.error.empty() ? QStringLiteral("扫描未完整完成") : fromUtf8(stats.error);
+            } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); }
+            catch (...) { error = QStringLiteral("未知同步错误"); }
+            QMetaObject::invokeMethod(this, [this, root, error] { if (!closing_) reportSyncOutcome(root, root, true, error); }, Qt::QueuedConnection);
         }
     }, name_search_ready_ ? QStringLiteral("正在准备索引…")
                           : QStringLiteral("正在准备索引；完成后将一次性建立名称加速索引…"));
@@ -1020,15 +1109,31 @@ QStringList MainWindow::selectedNames() const {
     return names;
 }
 
+bool MainWindow::allowCachedAction(int row) {
+    const auto reason = model_->actionBlockAt(row);
+    if (reason.isEmpty()) return true;
+    statusBar()->showMessage(reason, 10000);
+    return false;
+}
+
+QStringList MainWindow::actionableSelectedPaths() {
+    QStringList paths;
+    if (!table_->selectionModel()) return paths;
+    auto rows = table_->selectionModel()->selectedRows(0);
+    std::sort(rows.begin(), rows.end(), [](const QModelIndex& a, const QModelIndex& b) { return a.row() < b.row(); });
+    for (const auto& row : rows) if (allowCachedAction(row.row())) paths << model_->pathAt(row.row());
+    return paths;
+}
+
 void MainWindow::openCurrent() {
-    const auto paths = selectedPaths();
+    const auto paths = actionableSelectedPaths();
     if (paths.isEmpty()) return;
     for (const auto& path : paths.mid(0, 20)) desktop_actions_->open(path);
     if (paths.size() > 20) statusBar()->showMessage(QStringLiteral("一次最多打开前 20 个所选项目。"), 4000);
 }
 
 void MainWindow::openWithCurrent() {
-    const auto paths = selectedPaths();
+    const auto paths = actionableSelectedPaths();
     if (paths.isEmpty()) return;
 #ifdef Q_OS_MACOS
     bool ok = false;
@@ -1048,7 +1153,7 @@ void MainWindow::openWithCurrent() {
 
 void MainWindow::revealCurrent() {
     const auto current = table_->currentIndex();
-    if (!current.isValid()) return;
+    if (!current.isValid() || !allowCachedAction(current.row())) return;
     const auto path = model_->pathAt(current.row());
     if (path.isEmpty()) return;
     desktop_actions_->reveal(path);
@@ -1056,7 +1161,7 @@ void MainWindow::revealCurrent() {
 
 void MainWindow::quickLookCurrent() {
     const auto current = table_->currentIndex();
-    if (!current.isValid()) return;
+    if (!current.isValid() || !allowCachedAction(current.row())) return;
     const auto path = model_->pathAt(current.row());
     if (path.isEmpty()) return;
     desktop_actions_->preview(path);
@@ -1084,12 +1189,14 @@ void MainWindow::exportLoadedResults() {
     }
     QTextStream out(&file);
     out.setEncoding(QStringConverter::Utf8);
-    out << "Name,Path,Size,Modified\n";
+    out << "Name,Path,Size,Modified,Source,Status\n";
     for (int row = 0; row < model_->rowCount(); ++row) {
         out << csvQuote(model_->data(model_->index(row, 0), Qt::DisplayRole).toString()) << ','
             << csvQuote(model_->pathAt(row)) << ','
             << csvQuote(model_->data(model_->index(row, 2), Qt::DisplayRole).toString()) << ','
-            << csvQuote(model_->data(model_->index(row, 3), Qt::DisplayRole).toString()) << '\n';
+            << csvQuote(model_->data(model_->index(row, 3), Qt::DisplayRole).toString()) << ','
+            << csvQuote(model_->data(model_->index(row, 4), Qt::DisplayRole).toString()) << ','
+            << csvQuote(model_->data(model_->index(row, 5), Qt::DisplayRole).toString()) << '\n';
     }
     statusBar()->showMessage(QStringLiteral("已导出 %1 条已加载结果：%2").arg(model_->rowCount()).arg(file_name), 5000);
 }
@@ -1154,77 +1261,6 @@ void MainWindow::receiveWatcherEvent(std::uint64_t generation, const FileEvent& 
     scheduleFileEvent(event);
 }
 
-void MainWindow::scheduleFileEvent(const FileEvent& event) {
-    const auto error = !event.error.empty() ? fromUtf8(event.error)
-                                          : watcher_ ? fromUtf8(watcher_->lastError()) : QString{};
-    if (!error.isEmpty()) {
-        watcher_error_ = error;
-        watcher_error_label_->setText(error);
-        watcher_error_label_->show();
-    }
-    if (event.path.empty()) return;
-    const auto path = fromUtf8(event.path);
-    const auto root = rootForPath(path);
-    if (root.isEmpty()) return;
-    if (event.needs_full_rescan && error.isEmpty()) {
-        // A current coverage rebuild with empty lastError means the watcher
-        // recovered. Statistics and ordinary path events never erase errors.
-        watcher_error_.clear();
-        watcher_error_label_->clear();
-        watcher_error_label_->hide();
-    }
-    if (event.needs_full_rescan) {
-        pending_rescan_roots_.insert(root);
-    } else {
-        pending_paths_.insert(path);
-        if (pending_paths_.size() > 400) {
-            pending_rescan_roots_.insert(root);
-            pending_paths_.clear();
-        }
-    }
-    event_timer_->start();
-}
-
-void MainWindow::processPendingEvents() {
-    if (worker_thread_) {
-        event_timer_->start();
-        return;
-    }
-    const auto paths = pending_paths_;
-    const auto rescans = pending_rescan_roots_;
-    pending_paths_.clear();
-    pending_rescan_roots_.clear();
-    if (paths.isEmpty() && rescans.isEmpty()) return;
-
-    const auto db_path = db_path_;
-    const auto roots = roots_;
-    startWorker([this, db_path, paths, rescans, roots] {
-        try {
-            IndexManager manager(toUtf8(db_path));
-            for (const auto& root : rescans) manager.rebuildRoot(toUtf8(root));
-            for (const auto& path : paths) {
-                QString best;
-                const auto native_path = toUtf8(path);
-                for (const auto& root : roots) {
-                    if (pathIsWithin(native_path, toUtf8(root)) && root.size() > best.size()) best = root;
-                }
-                if (!best.isEmpty() && !rescans.contains(best)) manager.applyPathChange(toUtf8(best), native_path);
-            }
-        } catch (...) {
-            // A later FSEvents event or manual rebuild will reconcile the index.
-        }
-    }, QStringLiteral("正在同步文件变化…"), false);
-}
-
-QString MainWindow::rootForPath(const QString& path) const {
-    QString best;
-    const auto native_path = toUtf8(path);
-    for (const auto& root : roots_) {
-        if (pathIsWithin(native_path, toUtf8(root)) && root.size() > best.size()) best = root;
-    }
-    return best;
-}
-
 void MainWindow::setBusy(bool busy, const QString& message) {
     indexing_ = busy;
     if (!message.isEmpty()) status_label_->setText(message);
@@ -1247,6 +1283,10 @@ void MainWindow::resetColumns() {
     table_->setColumnWidth(0, 310);
     table_->setColumnWidth(2, 92);
     table_->setColumnWidth(3, 155);
+    table_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Interactive);
+    table_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Interactive);
+    table_->setColumnWidth(4, 150);
+    table_->setColumnWidth(5, 170);
     table_->sortByColumn(0, Qt::AscendingOrder);
 }
 
@@ -1291,7 +1331,8 @@ void MainWindow::applyBookmark(const SearchBookmark& bookmark) {
     search_edit_->setText(bookmark.query);
     scope_combo_->setCurrentIndex(std::clamp(bookmark.scope, 0, 2));
     match_path_check_->setChecked(bookmark.match_path);
-    table_->sortByColumn(bookmark.sort_column, bookmark.sort_order);
+    table_->sortByColumn(std::clamp(bookmark.sort_column, 0, model_->columnCount() - 1), bookmark.sort_order);
+    search_timer_->stop();
     updateSearchStateLabel();
     runSearch();
 }

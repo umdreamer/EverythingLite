@@ -25,6 +25,7 @@ public:
     QString pathAt(int row) const;
     QString nameAt(int row) const;
     bool isDirectoryAt(int row) const;
+    QString actionBlockAt(int row) const;
 
 private:
     std::vector<SearchResult> results_;

@@ -1,4 +1,5 @@
 #include "ui/search_result_model.h"
+#include "ui/result_presentation.h"
 
 #include <QDateTime>
 #include <QString>
@@ -15,12 +16,13 @@ int SearchResultModel::rowCount(const QModelIndex& parent) const {
 }
 
 int SearchResultModel::columnCount(const QModelIndex& parent) const {
-    return parent.isValid() ? 0 : 4;
+    return parent.isValid() ? 0 : 6;
 }
 
 QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
     if (!index.isValid() || index.row() < 0 || index.row() >= static_cast<int>(results_.size())) return {};
-    const auto& file = results_[static_cast<std::size_t>(index.row())].file;
+    const auto& row = results_[static_cast<std::size_t>(index.row())];
+    const auto& file = row.file;
 
     if (role == Qt::DisplayRole) {
         switch (index.column()) {
@@ -30,19 +32,23 @@ QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
             case 3: return file.modified_time > 0
                 ? QDateTime::fromSecsSinceEpoch(file.modified_time).toString(QStringLiteral("yyyy-MM-dd HH:mm"))
                 : QString{};
+            case 4: return sourceText(row);
+            case 5: return statusText(row);
             default: return {};
         }
     }
     if (role == Qt::TextAlignmentRole && (index.column() == 2 || index.column() == 3)) {
         return static_cast<int>(Qt::AlignVCenter | Qt::AlignRight);
     }
-    if (role == Qt::ToolTipRole) return QString::fromUtf8(file.path.c_str());
+    if (role == Qt::ToolTipRole) return resultTooltip(row);
     if (role == Qt::UserRole) {
         switch (index.column()) {
             case 0: return QString::fromUtf8(file.name.c_str()).toCaseFolded();
             case 1: return QString::fromUtf8(file.parent_path.c_str()).toCaseFolded();
             case 2: return QVariant::fromValue<qulonglong>(file.size);
             case 3: return QVariant::fromValue<qlonglong>(file.modified_time);
+            case 4: return sourceText(row);
+            case 5: return statusText(row);
             default: return {};
         }
     }
@@ -56,12 +62,14 @@ QVariant SearchResultModel::headerData(int section, Qt::Orientation orientation,
         case 1: return QStringLiteral("所在位置");
         case 2: return QStringLiteral("大小");
         case 3: return QStringLiteral("修改时间");
+        case 4: return QStringLiteral("来源");
+        case 5: return QStringLiteral("状态");
         default: return {};
     }
 }
 
 void SearchResultModel::sort(int column, Qt::SortOrder order) {
-    if (column < 0 || column >= 4) return;
+    if (column < 0 || column >= 6) return;
     sort_column_ = column;
     sort_order_ = order;
     emit layoutAboutToBeChanged();
@@ -110,6 +118,11 @@ bool SearchResultModel::isDirectoryAt(int row) const {
     return results_[static_cast<std::size_t>(row)].file.is_directory;
 }
 
+QString SearchResultModel::actionBlockAt(int row) const {
+    if (row < 0 || row >= static_cast<int>(results_.size())) return {};
+    return cachedActionBlock(results_[static_cast<std::size_t>(row)]);
+}
+
 void SearchResultModel::applySort() {
     if (sort_column_ < 0) return;
     const auto column = sort_column_;
@@ -121,6 +134,8 @@ void SearchResultModel::applySort() {
             case 1: cmp = QString::fromUtf8(a.file.parent_path.c_str()).compare(QString::fromUtf8(b.file.parent_path.c_str()), Qt::CaseInsensitive); break;
             case 2: cmp = a.file.size < b.file.size ? -1 : (a.file.size > b.file.size ? 1 : 0); break;
             case 3: cmp = a.file.modified_time < b.file.modified_time ? -1 : (a.file.modified_time > b.file.modified_time ? 1 : 0); break;
+            case 4: cmp = sourceText(a).compare(sourceText(b), Qt::CaseInsensitive); break;
+            case 5: cmp = statusText(a).compare(statusText(b), Qt::CaseInsensitive); break;
             default: break;
         }
         if (cmp == 0) cmp = a.file.path.compare(b.file.path);

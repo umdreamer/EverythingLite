@@ -7,7 +7,16 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QStatusBar>
+#include <QClipboard>
+#include <QHeaderView>
+#include <QStandardItemModel>
+#include <algorithm>
+#include <atomic>
 #include <QFile>
+#include <QFileDialog>
 #include <QInputMethodEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -20,6 +29,32 @@
 #include <QTimer>
 #include <QtTest>
 namespace everything_lite {
+class UiUrlSink : public QObject {
+    Q_OBJECT
+public:
+    QList<QUrl> urls;
+public slots:
+    void accept(const QUrl& url) { urls << url; }
+};
+template<class Service>
+auto cancellableSearch(Service& service, const SearchOptions& options, const std::atomic_bool* token, int)
+    -> decltype(service.search("item", 1000, 0, options, token)) {
+    return service.search("item", 1000, 0, options, token);
+}
+template<class Service>
+auto cancellableSearch(Service& service, const SearchOptions& options, const std::atomic_bool*, long)
+    -> decltype(service.search("item", 1000, 0, options)) {
+    return service.search("item", 1000, 0, options);
+}
+struct WorkerGate {
+    std::shared_ptr<QSemaphore> started=std::make_shared<QSemaphore>();
+    std::shared_ptr<QSemaphore> release=std::make_shared<QSemaphore>();
+    bool block(SearchWorker* worker) {
+        QMetaObject::invokeMethod(worker,[s=started,r=release] {s->release();r->acquire();},Qt::QueuedConnection);
+        return started->tryAcquire(1,3000);
+    }
+    ~WorkerGate() {release->release();}
+};
 class UiTest : public QObject {
     Q_OBJECT
   public:
@@ -30,6 +65,355 @@ class UiTest : public QObject {
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
+    }
+    void cachedSourceColumns() {
+        SearchResultModel model;
+        SearchResult unknown; unknown.file.name="cache.txt"; unknown.file.path="/unreachable/cache.txt";
+        model.setResults({unknown});
+        QCOMPARE(model.columnCount(), 6);
+        QVERIFY(model.data(model.index(0,4)).toString().contains(QStringLiteral("未分类")));
+        QVERIFY(model.data(model.index(0,5)).toString().contains(QStringLiteral("未核验")));
+        auto offline=unknown; offline.source_label="NAS"; offline.source_type=SourceType::NAS;
+        offline.source_status=SourceStatus::Offline; offline.source_last_success=1700000000;
+        model.setResults({offline});
+        QVERIFY(model.data(model.index(0,5)).toString().contains(QStringLiteral("离线缓存")));
+        QVERIFY(model.data(model.index(0,5),Qt::ToolTipRole).toString().contains(QStringLiteral("上次可用")));
+    }
+    void cancellationReachesServiceAndWorker() {
+        MainWindow window; window.watcher_->stop();
+        std::atomic_bool cancelled{true};
+        SearchService service(window.db_path_.toStdString());
+        for (auto scope : {SearchItemScope::All, SearchItemScope::Files}) {
+            SearchOptions options; options.scope=scope;
+            bool threw=false;
+            try { cancellableSearch(service,options,&cancelled,0); }
+            catch(const std::exception& e) { threw=std::string(e.what()).find("cancel")!=std::string::npos; }
+            QVERIFY2(threw,"The default and filtered service branches must pass the cancellation token to SQLite");
+        }
+        SearchWorker worker(window.db_path_.toStdString());
+        const auto outcome=cancellableSearch(worker,SearchOptions{},&cancelled,0);
+        QVERIFY(!outcome.error.empty());
+    }
+    void continuousEventsSynchronizeBeforeQuiet() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.path();
+        MainWindow window; window.watcher_->stop(); window.roots_={root};
+        QFile file(root+"/continuous.txt"); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("a"); file.close();
+        QTimer events; events.setInterval(100);
+        connect(&events,&QTimer::timeout,&window,[&] { window.scheduleFileEvent({file.fileName().toStdString(),false,{}}); });
+        window.scheduleFileEvent({file.fileName().toStdString(),false,{}}); events.start();
+        Database db(window.db_path_.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("continuous.txt").empty(),1600);
+        QVERIFY(events.isActive()); events.stop();
+        QTRY_VERIFY(!window.worker_thread_);
+    }
+    void overflowKeepsEveryRoot() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto first=dir.filePath("a"), second=dir.filePath("b");
+        QVERIFY(QDir().mkpath(first)); QVERIFY(QDir().mkpath(second));
+        MainWindow window; window.watcher_->stop(); window.roots_={first,second};
+        window.pending_paths_.clear(); window.pending_rescan_roots_.clear();
+        window.scheduleFileEvent({(first+"/first.txt").toStdString(),false,{}});
+        for(int i=0;i<401;++i) window.scheduleFileEvent({(second+QString("/file%1").arg(i)).toStdString(),false,{}});
+        QVERIFY(window.pending_rescan_roots_.contains(first));
+        QVERIFY(window.pending_rescan_roots_.contains(second));
+    }
+    void filesystemRefreshDoesNotInvalidateUserSearch() {
+        MainWindow window; window.watcher_->stop();
+        QSemaphore started,release;
+        QMetaObject::invokeMethod(window.search_worker_,[&] { started.release(); release.acquire(); },Qt::QueuedConnection);
+        QVERIFY(started.tryAcquire(1,3000));
+        struct Release { QSemaphore& semaphore; ~Release() { semaphore.release(); } } guard{release};
+        window.search_edit_->setText("alpha"); window.runSearch();
+        const auto id=window.search_request_id_;
+        window.scheduleFilesystemResultRefresh();
+        QTest::qWait(1900);
+        QCOMPARE(window.search_request_id_,id);
+        QVERIFY(window.search_in_flight_);
+        release.release(); QTRY_COMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
+    }
+    void continuousResultChangesRefreshBeforeQuiet() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("alpha"); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
+        const auto id=window.search_request_id_;
+        QTimer changes; changes.setInterval(100);
+        connect(&changes,&QTimer::timeout,&window,[&]{window.scheduleFilesystemResultRefresh();});
+        changes.start(); window.scheduleFilesystemResultRefresh();
+        QTRY_VERIFY_WITH_TIMEOUT(window.search_request_id_>id,2400);
+        QVERIFY(changes.isActive()); changes.stop();
+        QTRY_VERIFY(!window.search_in_flight_);
+    }
+    void failedRootDoesNotLoseOtherJobsAndRecovers() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto offline=dir.filePath("offline"), good=dir.filePath("good");
+        QVERIFY(QDir().mkpath(good));
+        QFile file(good+"/good_sync.txt"); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={offline,good};
+        window.scheduleFileEvent({offline.toStdString(),true,{}});
+        window.scheduleFileEvent({good.toStdString(),true,{}});
+        window.processPendingEvents();
+        Database db(window.db_path_.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("good_sync.txt").empty(),4000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("同步")),"Incomplete snapshots must expose a synchronization error");
+        QVERIFY(QDir().mkpath(offline));
+        QFile restored(offline+"/restored_sync.txt"); QVERIFY(restored.open(QIODevice::WriteOnly)); restored.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("restored_sync.txt").empty(),5000);
+        QTRY_VERIFY(!window.worker_thread_);
+    }
+    void renameDeleteAndOpenUseActualCurrentPath() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.path(), old=root+"/Old", fresh=root+"/New";
+        QVERIFY(QDir().mkpath(old));
+        const auto filename=QStringLiteral("中文 空格#?%\"\\\n.txt");
+        QFile file(old+"/"+filename); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("sample"); file.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={root};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        const auto offlineRoot=dir.filePath("offline_cache"); QVERIFY(QDir().mkpath(offlineRoot));
+        QFile cached(offlineRoot+"/offline_survivor.txt"); QVERIFY(cached.open(QIODevice::WriteOnly)); cached.close();
+        QVERIFY(manager.rebuildRoot(offlineRoot.toStdString()).completed);
+        QVERIFY(QDir(offlineRoot).removeRecursively());
+        QVERIFY(!manager.rebuildRoot(offlineRoot.toStdString()).completed);
+        window.search_edit_->setText(QStringLiteral("中文 空格")); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
+        QVERIFY(QDir().rename(old,fresh));
+        window.scheduleFileEvent({old.toStdString(),false,{}}); window.scheduleFileEvent({fresh.toStdString(),false,{}});
+        QTimer events; events.setInterval(100); connect(&events,&QTimer::timeout,&window,[&] {window.scheduleFileEvent({root.toStdString(),false,{}});}); events.start();
+        Database db(window.db_path_.toStdString());
+        const auto oldScope = std::string("path:\"") + old.toStdString() + "\"";
+        QTRY_VERIFY_WITH_TIMEOUT(db.search(oldScope).empty(),1800);
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->pathAt(0),fresh+"/"+filename,4000);
+        UiUrlSink sink; QDesktopServices::setUrlHandler("file",&sink,"accept");
+        struct Unset { ~Unset(){QDesktopServices::unsetUrlHandler("file");} } unset;
+        window.table_->selectRow(0); window.openCurrent();
+        QCOMPARE(sink.urls.size(),1); QCOMPARE(sink.urls[0].toLocalFile(),fresh+"/"+filename);
+        QVERIFY(QFile::remove(fresh+"/"+filename)); window.scheduleFileEvent({(fresh+"/"+filename).toStdString(),false,{}});
+        QTRY_VERIFY_WITH_TIMEOUT(db.search("中文 空格").empty(),1800);
+        QVERIFY(QDir(fresh).removeRecursively());
+        window.scheduleFileEvent({fresh.toStdString(),false,{}});
+        const auto newScope = std::string("path:\"") + fresh.toStdString() + "\"";
+        QTRY_VERIFY_WITH_TIMEOUT(db.search(newScope).empty(),1800);
+        events.stop(); QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(!db.search("offline_survivor.txt").empty());
+    }
+    void nestedRootsKeepIndependentEventCoverage() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.path(), nested=dir.filePath("nested"); QVERIFY(QDir().mkpath(nested));
+        MainWindow window; window.watcher_->stop(); window.roots_={root,nested};
+        window.pending_paths_.clear(); window.pending_rescan_roots_.clear();
+        window.scheduleFileEvent({(root+"/a/file").toStdString(),false,{}});
+        window.scheduleFileEvent({(root+"/a").toStdString(),false,{}});
+        window.scheduleFileEvent({nested.toStdString(),false,{}});
+        window.scheduleFileEvent({root.toStdString(),false,{}});
+        QCOMPARE(window.pending_paths_.size(),2);
+        QVERIFY(window.pending_paths_.contains(root)); QVERIFY(window.pending_paths_.contains(nested));
+    }
+    void editsCancelAndCompletionHonorsDebounce() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("alpha"); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
+        WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
+        window.runSearch(); const auto token=window.active_search_cancellation_; QVERIFY(token);
+        window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"beta");
+        QVERIFY(token->load()); QTest::qWait(850); QVERIFY(window.search_pending_);
+        const auto dispatchedBeforeEditing=window.last_search_request_id_;
+        window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"alpha");
+        const auto id=window.search_request_id_;
+        gate.release->release(); QTRY_VERIFY_WITH_TIMEOUT(!window.search_in_flight_,400);
+        QVERIFY(window.search_timer_->isActive());
+        QCOMPARE(window.last_search_request_id_,dispatchedBeforeEditing);
+        QTest::qWait(200); QVERIFY(!window.search_in_flight_);
+        QTRY_VERIFY_WITH_TIMEOUT(window.last_search_request_id_>id,2000);
+        QTRY_COMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
+    }
+    void imeCancelsWithoutPrematureQueuedSearch() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("alpha"); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
+        WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
+        window.runSearch(); const auto token=window.active_search_cancellation_;
+        window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"beta"); QTest::qWait(850);
+        QVERIFY(window.search_pending_);
+        QInputMethodEvent preedit(QStringLiteral("zhong"),{}); QApplication::sendEvent(window.search_edit_,&preedit);
+        QVERIFY(token->load()); const auto id=window.last_search_request_id_;
+        gate.release->release(); QTRY_VERIFY_WITH_TIMEOUT(!window.search_in_flight_,500);
+        QTest::qWait(900); QCOMPARE(window.last_search_request_id_,id);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
+        QInputMethodEvent commit; commit.setCommitString(QStringLiteral("中文"),-4,4);
+        QApplication::sendEvent(window.search_edit_,&commit); QVERIFY(window.search_timer_->isActive());
+        QTest::qWait(300); QCOMPARE(window.last_search_request_id_,id);
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->nameAt(0),QStringLiteral("中文.txt"),3000);
+    }
+    void scopesAndCloseCancelActiveToken() {
+        MainWindow window; window.watcher_->stop(); WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
+        window.search_edit_->setText("alpha"); window.runSearch(); auto token=window.active_search_cancellation_;
+        window.scope_combo_->setCurrentIndex(1); QVERIFY(token->load());
+        gate.release->release(); QTRY_VERIFY(!window.search_in_flight_);
+        window.search_timer_->stop();
+        WorkerGate second; QVERIFY(second.block(window.search_worker_)); window.runSearch(); token=window.active_search_cancellation_;
+        window.match_path_check_->setChecked(true); QVERIFY(token->load());
+        second.release->release(); QTRY_VERIFY(!window.search_in_flight_); window.search_timer_->stop();
+        WorkerGate last; QVERIFY(last.block(window.search_worker_)); window.runSearch(); token=window.active_search_cancellation_;
+        window.close(); QVERIFY(token->load()); last.release->release(); QTRY_VERIFY(!window.search_in_flight_);
+    }
+    void exhaustedOfflineRetriesStayQuietUntilNewEvent() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.filePath("absent");
+        MainWindow window; window.watcher_->stop(); window.roots_={root};
+        window.scheduleFileEvent({root.toStdString(),true,{}}); window.processPendingEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_rescan_roots_.contains(root),6500);
+        QTRY_VERIFY(!window.worker_thread_);
+        const auto attempts=window.sync_attempts_; QTest::qWait(1200);
+        QVERIFY(!window.worker_thread_); QVERIFY(!window.event_timer_->isActive()); QCOMPARE(window.sync_attempts_,attempts);
+        QVERIFY(QDir().mkpath(root)); QFile file(root+"/after_new_event.txt"); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        window.scheduleFileEvent({root.toStdString(),true,{}});
+        Database db(window.db_path_.toStdString()); QTRY_VERIFY_WITH_TIMEOUT(!db.search("after_new_event.txt").empty(),2000);
+        QTRY_VERIFY(!window.worker_thread_); QVERIFY(window.sync_errors_.isEmpty());
+    }
+    void manualRebuildReportsIncompleteSnapshot() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        MainWindow window; window.watcher_->stop(); window.roots_={dir.filePath("absent")};
+        window.rebuildIndex(); QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(!window.sync_errors_.isEmpty()); QVERIFY(!window.sync_error_label_->isHidden());
+        QVERIFY(window.sync_error_label_->text().contains(QStringLiteral("保留缓存")));
+    }
+    void cachedActionsBlockOnlyKnownUnavailableAndCopyStillWorks() {
+        MainWindow window; window.watcher_->stop();
+        SearchResult row; row.file.path="/unverified/cache.txt"; row.file.name="cache.txt";
+        UiUrlSink sink; QDesktopServices::setUrlHandler("file",&sink,"accept");
+        struct Unset {~Unset(){QDesktopServices::unsetUrlHandler("file");}} unset;
+        for (const auto status : {SourceStatus::Unverified,SourceStatus::Failed,SourceStatus::Offline}) {
+            row.source_status=status; window.model_->setResults({row}); window.table_->selectRow(0);
+            window.table_->setCurrentIndex(window.model_->index(0,0));
+            const auto before=sink.urls.size(); window.openCurrent();
+            QCOMPARE(sink.urls.size(),before+(status==SourceStatus::Offline ? 0 : 1));
+            window.copyCurrentPath(); QCOMPARE(QApplication::clipboard()->text(),QStringLiteral("/unverified/cache.txt"));
+            if (status==SourceStatus::Offline) {window.revealCurrent();window.quickLookCurrent();QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("离线缓存")));}
+        }
+        row.source_status=SourceStatus::Accessible; row.file.cloud_copy=CloudCopy::RemoteOnly;
+        window.model_->setResults({row}); window.table_->selectRow(0); const auto before=sink.urls.size();
+        window.openCurrent(); QCOMPARE(sink.urls.size(),before);
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("云端")));
+    }
+    void sixColumnSortAndSettingsMigration() {
+        QStandardItemModel old(0,4); QTableView oldTable; oldTable.setModel(&old);
+        oldTable.setColumnWidth(0,222);
+        QSettings settings("CICHI","EverythingLite"); settings.setValue("table/header",oldTable.horizontalHeader()->saveState());
+        settings.setValue("table/sortColumn",99);
+        MainWindow window; window.watcher_->stop(); QCOMPARE(window.model_->columnCount(),6);
+        QCOMPARE(window.table_->horizontalHeader()->count(),6);
+        QVERIFY(window.table_->columnWidth(4)>0); QVERIFY(window.table_->columnWidth(5)>0);
+        SearchResult a,b; a.source_label="Z"; b.source_label="A"; a.file.path="/z"; b.file.path="/a";
+        a.source_status=SourceStatus::Offline; b.source_status=SourceStatus::Accessible;
+        window.model_->setResults({a,b}); window.model_->sort(4); QCOMPARE(window.model_->pathAt(0),QStringLiteral("/a"));
+        SearchBookmark bookmark; bookmark.sort_column=5; window.applyBookmark(bookmark);
+        QCOMPARE(window.table_->horizontalHeader()->sortIndicatorSection(),5);
+        window.resetColumns(); QVERIFY(window.table_->columnWidth(4)>0);
+        settings.remove("table/header"); settings.remove("table/sortColumn");
+    }
+    void busyWorkerContinuesDueEventsPromptly() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.path();
+        QFile file(root+"/queued_due.txt"); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={root};
+        auto release=std::make_shared<QSemaphore>();
+        struct Release {std::shared_ptr<QSemaphore> sem;~Release(){sem->release();}} guard{release};
+        window.startWorker([release]{release->acquire();},QStringLiteral("blocked test worker"),false);
+        window.scheduleFileEvent({file.fileName().toStdString(),false,{}});
+        QTest::qWait(850); QVERIFY(window.worker_thread_); release->release();
+        Database db(window.db_path_.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("queued_due.txt").empty(),200);
+        QTRY_VERIFY(!window.worker_thread_);
+    }
+    void emptyQueryWorkerFinishesWithReadyStatus() {
+        MainWindow window; window.watcher_->stop();
+        window.rebuildIndex(); QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,5000);
+        QVERIFY2(!window.status_label_->text().contains(QStringLiteral("正在")),"Completed index work must not leave a stale busy status at empty query");
+        QVERIFY(window.status_label_->text().contains(QStringLiteral("个对象")));
+        QCOMPARE(window.last_search_request_id_,std::uint64_t(0));
+    }
+    void thrownJobDoesNotDiscardOtherSource() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto first = dir.filePath("first"), second = dir.filePath("second");
+        QVERIFY(QDir().mkpath(first));
+        QVERIFY(QDir().mkpath(second));
+        MainWindow window;
+        window.watcher_->stop();
+        window.roots_ = {first, second};
+        window.scheduleFileEvent({first.toStdString(), true, {}});
+        window.scheduleFileEvent({second.toStdString(), true, {}});
+        // Make the actual first job throw, so a batch-level catch would lose
+        // the other root regardless of QSet's randomized iteration order.
+        const auto bad = *window.pending_rescan_roots_.begin();
+        const auto good = bad == first ? second : first;
+        QFile file(good + "/exception_survivor.txt");
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        Database db(window.db_path_.toStdString());
+        db.ensureSourceForRoot(bad.toStdString());
+        SourceRecord duplicate;
+        duplicate.root = bad.toStdString();
+        duplicate.label = "ambiguous";
+        duplicate.identity = "second-source";
+        db.saveSource(duplicate);
+        window.processPendingEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("exception_survivor.txt").empty(), 3000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(!window.sync_errors_.isEmpty());
+    }
+    void csvAppendsQuotedCachedSourceAndStatus() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto output=dir.filePath("results.csv");
+        MainWindow window; window.watcher_->stop();
+        SearchResult row; row.file.name="a\"b.txt"; row.file.path="/cache/a\"b.txt";
+        row.source_label="Cloud,\"A\"\nB"; row.source_type=SourceType::Cloud; row.source_status=SourceStatus::Offline;
+        window.model_->setResults({row});
+        bool accepted=false;
+        QTimer chooser; chooser.setInterval(20);
+        connect(&chooser,&QTimer::timeout,&window,[&] {
+            for(auto* widget:QApplication::topLevelWidgets()) if(auto* dialog=qobject_cast<QFileDialog*>(widget)) {
+                dialog->selectFile(output); QMetaObject::invokeMethod(dialog,"accept",Qt::DirectConnection); accepted=true; chooser.stop(); return;
+            }
+        });
+        QTimer::singleShot(2000,&window,[&]{if(!accepted) for(auto* widget:QApplication::topLevelWidgets()) if(auto* dialog=qobject_cast<QFileDialog*>(widget)) dialog->reject();});
+        chooser.start(); window.exportLoadedResults(); QVERIFY(accepted);
+        QFile file(output); QVERIFY(file.open(QIODevice::ReadOnly)); const auto csv=file.readAll();
+        QVERIFY(csv.startsWith("Name,Path,Size,Modified,Source,Status\n"));
+        QVERIFY(csv.contains("\"a\"\"b.txt\""));
+        QVERIFY(csv.contains(QStringLiteral("\"Cloud,\"\"A\"\"\nB（网盘）\"").toUtf8()));
+        QVERIFY(csv.contains(QStringLiteral("\"离线缓存 · 副本未核验\"").toUtf8()));
+    }
+    void paginationWaitsForPendingUserQueryAndIme() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("item"); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1000);
+        QVERIFY(window.results_have_more_); QTRY_VERIFY(!window.search_in_flight_);
+        window.scope_combo_->setCurrentIndex(1);
+        // The old result window must not issue pagination under the new scope
+        // until the user's idle timer has fired.
+        const auto id=window.search_request_id_;
+        window.loadMoreResults(); QCOMPARE(window.search_request_id_,id);
+        QInputMethodEvent preedit(QStringLiteral("zhong"),{}); QApplication::sendEvent(window.search_edit_,&preedit);
+        const auto imeId=window.search_request_id_;
+        window.loadMoreResults(); QCOMPARE(window.search_request_id_,imeId);
+        QVERIFY(!window.search_in_flight_);
+    }
+    void unrelatedSourceChurnDoesNotResetFailedPathRetries() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.path(),blocked=dir.filePath("blocked");
+        QVERIFY(QDir().mkpath(blocked));
+        QFile old(blocked+"/blocked_original.txt"); QVERIFY(old.open(QIODevice::WriteOnly)); old.close();
+        QFile unrelated(root+"/unrelated.txt"); QVERIFY(unrelated.open(QIODevice::WriteOnly)); unrelated.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={root};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        const auto originalPermissions=QFile::permissions(blocked);
+        struct RestorePermissions {QString path;QFile::Permissions permissions;~RestorePermissions(){QFile::setPermissions(path,permissions);}} restore{blocked,originalPermissions};
+        QVERIFY(QFile::setPermissions(blocked,{}));
+        QVERIFY2(!manager.applyPathChange(root.toStdString(),blocked.toStdString()).completed,"This fixture must really produce a failed incomplete subtree snapshot");
+        window.scheduleFileEvent({blocked.toStdString(),false,{}}); window.processPendingEvents();
+        QTimer churn; churn.setInterval(100); connect(&churn,&QTimer::timeout,&window,[&]{window.scheduleFileEvent({unrelated.fileName().toStdString(),false,{}});}); churn.start();
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_paths_.contains(blocked),6500);
+        const auto attempts=window.sync_attempts_; QTest::qWait(900);
+        QVERIFY(window.dormant_paths_.contains(blocked)); QCOMPARE(window.sync_attempts_,attempts);
+        QVERIFY(!window.sync_errors_.isEmpty());
+        QVERIFY(QFile::setPermissions(blocked,originalPermissions));
+        QFile restored(blocked+"/restored_related.txt"); QVERIFY(restored.open(QIODevice::WriteOnly)); restored.close();
+        window.scheduleFileEvent({blocked.toStdString(),false,{}});
+        Database db(window.db_path_.toStdString()); QTRY_VERIFY_WITH_TIMEOUT(!db.search("restored_related.txt").empty(),2500);
+        churn.stop(); QTRY_VERIFY(!window.worker_thread_); QVERIFY(window.sync_errors_.isEmpty());
     }
     void menuHasPreview() {
         MainWindow window;
@@ -307,6 +691,7 @@ int main(int argc, char** argv) {
         QDir().mkpath(sandbox.path() + "/" + name);
 #endif
     QApplication app(argc, argv);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, sandbox.path() + "/settings");
     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, sandbox.path() + "/system");

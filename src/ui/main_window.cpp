@@ -202,6 +202,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     search_timer_ = new QTimer(this);
     search_timer_->setSingleShot(true);
+    search_timer_->setTimerType(Qt::PreciseTimer);
     search_timer_->setInterval(kSearchIdleDelayMs);
     connect(search_timer_, &QTimer::timeout, this, [this] {
         // v0.4.9: never start a search while an IME composition is active.

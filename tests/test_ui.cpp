@@ -29,6 +29,7 @@
 #include <QTableView>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QtTest>
 namespace everything_lite {
 class UiUrlSink : public QObject {
@@ -60,8 +61,11 @@ protected:
 struct WorkerGate {
     std::shared_ptr<QSemaphore> started=std::make_shared<QSemaphore>();
     std::shared_ptr<QSemaphore> release=std::make_shared<QSemaphore>();
-    bool block(SearchWorker* worker) {
+    void queue(SearchWorker* worker) {
         QMetaObject::invokeMethod(worker,[s=started,r=release] {s->release();r->acquire();},Qt::QueuedConnection);
+    }
+    bool block(SearchWorker* worker) {
+        queue(worker);
         return started->tryAcquire(1,3000);
     }
     ~WorkerGate() {release->release();}
@@ -218,21 +222,56 @@ class UiTest : public QObject {
         QCOMPARE(window.pending_paths_.size(),2);
         QVERIFY(window.pending_paths_.contains(root)); QVERIFY(window.pending_paths_.contains(nested));
     }
+    void userDebounceRespects800msAndLateDelivery() {
+        MainWindow window; window.watcher_->stop(); WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
+        window.search_edit_->setText("alpha"); window.runSearch(); QVERIFY(window.search_in_flight_);
+        QElapsedTimer elapsed; qint64 deliveredNs=0;
+        QSignalSpy deadlines(window.search_timer_,&QTimer::timeout);
+        connect(window.search_timer_,&QTimer::timeout,&window,[&] {deliveredNs=elapsed.nsecsElapsed();});
+        // Reproduce delayed delivery with a busy GUI event handler. Sleeping
+        // 850 ms alone is not evidence that the real 800 ms timeout was sent.
+        QTimer busy; busy.setSingleShot(true); busy.setTimerType(Qt::PreciseTimer);
+        connect(&busy,&QTimer::timeout,&window,[] {QThread::msleep(170);});
+        elapsed.start(); QTest::keyClicks(window.search_edit_,"b"); busy.start(700);
+        QTest::qWait(850);
+        qInfo("after 850 ms wait: elapsed=%lld ms, timeout_count=%lld, pending=%d, remaining=%d",
+              static_cast<long long>(elapsed.elapsed()),static_cast<long long>(deadlines.size()),window.search_pending_,window.search_timer_->remainingTime());
+        QTRY_COMPARE_WITH_TIMEOUT(deadlines.size(),1,2000);
+        QVERIFY(deliveredNs>=870000000); QVERIFY(window.search_pending_); QVERIFY(window.search_in_flight_);
+        for(int i=0;i<6;++i) {
+            QTest::qWait(31); elapsed.restart(); QTest::keyClicks(window.search_edit_,"b");
+            QVERIFY(window.search_timer_->isActive()); QVERIFY(!window.search_pending_);
+            QTRY_COMPARE_WITH_TIMEOUT(deadlines.size(),i+2,2000);
+            QVERIFY2(deliveredNs>=800000000,qPrintable(QStringLiteral("800 ms debounce delivered early at %1 ms").arg(deliveredNs/1000000.0)));
+            QVERIFY(window.search_pending_); QVERIFY(window.search_in_flight_);
+        }
+    }
     void editsCancelAndCompletionHonorsDebounce() {
         MainWindow window; window.watcher_->stop();
         window.search_edit_->setText("alpha"); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
         WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
         window.runSearch(); const auto token=window.active_search_cancellation_; QVERIFY(token);
         window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"beta");
-        QVERIFY(token->load()); QTest::qWait(850); QVERIFY(window.search_pending_);
+        QVERIFY(token->load());
+        // Deliver the real timer signal at a controlled deadline. Real elapsed
+        // 800 ms behavior is checked separately, including late delivery.
+        window.search_timer_->stop();
+        QVERIFY(QMetaObject::invokeMethod(window.search_timer_,"timeout",Qt::DirectConnection));
+        QVERIFY(window.search_pending_);
         const auto dispatchedBeforeEditing=window.last_search_request_id_;
         window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"alpha");
         const auto id=window.search_request_id_;
-        gate.release->release(); QTRY_VERIFY_WITH_TIMEOUT(!window.search_in_flight_,400);
-        QVERIFY(window.search_timer_->isActive());
+        // A second worker gate proves the cancelled request has completed. Send
+        // its actual posted GUI callback before delivering any new timer event.
+        WorkerGate completed; completed.queue(window.search_worker_);
+        gate.release->release(); QVERIFY(completed.started->tryAcquire(1,3000));
+        QCoreApplication::sendPostedEvents(&window,QEvent::MetaCall);
+        QVERIFY(!window.search_in_flight_); QVERIFY(window.search_timer_->isActive());
         QCOMPARE(window.last_search_request_id_,dispatchedBeforeEditing);
-        QTest::qWait(200); QVERIFY(!window.search_in_flight_);
-        QTRY_VERIFY_WITH_TIMEOUT(window.last_search_request_id_>id,2000);
+        completed.release->release(); window.search_timer_->stop();
+        QVERIFY(QMetaObject::invokeMethod(window.search_timer_,"timeout",Qt::DirectConnection));
+        QVERIFY(window.last_search_request_id_>id);
+        QTRY_VERIFY(!window.search_in_flight_);
         QTRY_COMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
     }
     void imeCancelsWithoutPrematureQueuedSearch() {
@@ -240,7 +279,9 @@ class UiTest : public QObject {
         window.search_edit_->setText("alpha"); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
         WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
         window.runSearch(); const auto token=window.active_search_cancellation_;
-        window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"beta"); QTest::qWait(850);
+        window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"beta");
+        window.search_timer_->stop();
+        QVERIFY(QMetaObject::invokeMethod(window.search_timer_,"timeout",Qt::DirectConnection));
         QVERIFY(window.search_pending_);
         QInputMethodEvent preedit(QStringLiteral("zhong"),{}); QApplication::sendEvent(window.search_edit_,&preedit);
         QVERIFY(token->load()); const auto id=window.last_search_request_id_;
@@ -516,6 +557,45 @@ class UiTest : public QObject {
         QVERIFY(window.dormant_paths_.contains(unrelated)); QVERIFY(window.dormant_rescan_roots_.contains(offline));
         for(const auto& scope:window.sync_failure_scopes_) QVERIFY(scope.path!=child);
         QVERIFY(!db.search("ancestor_offline_cache.txt").empty());
+    }
+    void relatedChildEventRetainsBackingOffParentScope() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), blocked=root+"/blocked", offline=dir.filePath("offline");
+        QVERIFY(QDir().mkpath(blocked)); QVERIFY(QDir().mkpath(offline));
+        const auto stale=blocked+"/backoff_old.txt";
+        for(const auto& path:{stale,offline+"/backoff_offline_cache.txt"}) {
+            QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        }
+        MainWindow window; window.watcher_->stop(); window.roots_={root,offline};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoots({root.toStdString(),offline.toStdString()}).completed);
+        QVERIFY(QDir(offline).removeRecursively());
+        window.scheduleFileEvent({offline.toStdString(),true,{}}); window.processPendingEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_rescan_roots_.contains(offline),6500);
+        QTRY_VERIFY(!window.worker_thread_); const auto offlineAttempts=window.sync_attempts_;
+        const auto permissions=QFile::permissions(blocked);
+        struct Restore {QString path;QFile::Permissions permissions;~Restore(){QFile::setPermissions(path,permissions);}} restore{blocked,permissions};
+        QVERIFY(QFile::setPermissions(blocked,{}));
+        if (manager.applyPathChange(root.toStdString(),blocked.toStdString()).completed)
+            QSKIP("The current user can traverse this directory despite removed permissions; no real failure fixture is available.");
+        window.scheduleFileEvent({blocked.toStdString(),false,{}}); window.processPendingEvents();
+        QTRY_VERIFY(!window.worker_thread_);
+        QString parentKey;
+        for(auto it=window.sync_failure_scopes_.cbegin();it!=window.sync_failure_scopes_.cend();++it)
+            if(it.value().root==root && it.value().path==blocked) parentKey=it.key();
+        QVERIFY(!parentKey.isEmpty()); QCOMPARE(window.sync_attempts_.value(parentKey),1);
+        QVERIFY(window.retry_deadlines_.contains(parentKey)); QVERIFY(!window.dormant_paths_.contains(blocked));
+        QVERIFY(QFile::setPermissions(blocked,permissions)); QVERIFY(QFile::remove(stale));
+        const auto child=blocked+"/backoff_trigger.txt", sibling=blocked+"/backoff_sibling.txt";
+        for(const auto& path:{child,sibling}) {QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();}
+        window.scheduleFileEvent({child.toStdString(),false,{}});
+        Database db(window.db_path_.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("backoff_sibling.txt").empty(),2500);
+        QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(db.search("backoff_old.txt").empty()); QVERIFY(!db.search("backoff_trigger.txt").empty());
+        QVERIFY(!window.sync_failure_scopes_.contains(parentKey)); QVERIFY(!window.sync_errors_.contains(parentKey));
+        QVERIFY(!window.retry_deadlines_.contains(parentKey)); QVERIFY(!window.ready_sync_retries_.contains(parentKey));
+        for(auto it=offlineAttempts.cbegin();it!=offlineAttempts.cend();++it) QCOMPARE(window.sync_attempts_.value(it.key()),it.value());
+        QVERIFY(window.dormant_rescan_roots_.contains(offline)); QVERIFY(!db.search("backoff_offline_cache.txt").empty());
     }
     void syncStartAndFinishKeepInputState() {
         MainWindow window; window.watcher_->stop();

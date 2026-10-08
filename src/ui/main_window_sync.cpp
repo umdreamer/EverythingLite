@@ -43,6 +43,18 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
         watcher_error_label_->hide();
     }
 
+    const auto queuePath = [this, &root](const QString& candidate) {
+        if (pending_rescan_roots_.contains(root)) return;
+        for (auto it = pending_paths_.begin(); it != pending_paths_.end();) {
+            // Ancestors cover only jobs belonging to the same nested source.
+            if (rootForPath(*it) != root) { ++it; continue; }
+            if (pathIsWithin(native(candidate), native(*it))) return;
+            if (pathIsWithin(native(*it), native(candidate))) it = pending_paths_.erase(it);
+            else ++it;
+        }
+        pending_paths_.insert(candidate);
+    };
+
     // Only a related subtree event renews its failed job's retry budget.
     // A full-source failure needs an explicit full/root event (or manual retry),
     // so unrelated continuous changes cannot wake an offline source forever.
@@ -58,9 +70,13 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
         retry_deadlines_.remove(it.key());
         ready_sync_retries_.remove(it.key());
         if (scope.rescan) {
-            if (dormant_rescan_roots_.remove(scope.root)) pending_rescan_roots_.insert(scope.root);
-        } else if (dormant_paths_.remove(scope.path)) {
-            pending_paths_.insert(scope.path);
+            dormant_rescan_roots_.remove(scope.root);
+            pending_rescan_roots_.insert(scope.root);
+        } else {
+            dormant_paths_.remove(scope.path);
+            // Cancelling a backoff deadline must retain its complete scope,
+            // even when the new event covers only one descendant file.
+            queuePath(scope.path);
         }
     }
     armRetryTimer();
@@ -71,21 +87,7 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     if (event.needs_full_rescan) {
         pending_rescan_roots_.insert(root);
     } else if (!pending_rescan_roots_.contains(root)) {
-        bool covered = false;
-        for (auto it = pending_paths_.begin(); it != pending_paths_.end();) {
-            // Never let an ancestor from another nested source absorb its jobs.
-            if (rootForPath(*it) != root) {
-                ++it;
-                continue;
-            }
-            if (pathIsWithin(native(path), native(*it))) {
-                covered = true;
-                break;
-            }
-            if (pathIsWithin(native(*it), native(path))) it = pending_paths_.erase(it);
-            else ++it;
-        }
-        if (!covered) pending_paths_.insert(path);
+        queuePath(path);
         if (pending_paths_.size() > 400) {
             for (const auto& pending : pending_paths_) {
                 const auto affected_root = rootForPath(pending);

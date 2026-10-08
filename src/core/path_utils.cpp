@@ -30,7 +30,9 @@ std::string normalizePath(const std::string& path) {
     }
     auto normalized = absolute.lexically_normal();
     auto out = pathToUtf8(normalized);
+#if defined(_WIN32)
     std::replace(out.begin(), out.end(), '\\', '/');
+#endif
     while (out.size() > 1 && out.back() == '/') {
         out.pop_back();
     }

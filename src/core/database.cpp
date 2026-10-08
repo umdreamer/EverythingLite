@@ -285,6 +285,36 @@ bool columnExists(sqlite3* db,const char* table,const char* column) {
     while(sqlite3_step(stmt.get())==SQLITE_ROW) if(columnText(stmt.get(),1)==column) return true;
     return false;
 }
+bool ftsTriggersPresent(sqlite3* db) {
+    auto stmt=prepare(db,"SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('files_name_fts_ai','files_name_fts_ad','files_name_fts_au')");
+    return sqlite3_step(stmt.get())==SQLITE_ROW && sqlite3_column_int(stmt.get(),0)==3;
+}
+bool schemaReady(sqlite3* db) {
+    if(!tableExists(db,"app_metadata") || !columnExists(db,"app_metadata","key") || !columnExists(db,"app_metadata","value")) return false;
+    if(!metadataFlag(db,"schema_413_ready_v1")) return false;
+    auto version=prepare(db,"PRAGMA user_version");
+    if(sqlite3_step(version.get())!=SQLITE_ROW || sqlite3_column_int(version.get(),0)!=413) return false;
+    auto objects=prepare(db,R"SQL(SELECT COUNT(*) FROM sqlite_master WHERE
+(type='table' AND name IN ('files','sources','roots','scan_seen','compatibility_scans','exclusion_policy','exclusion_paths')) OR
+(type='index' AND name IN ('idx_sources_root','idx_files_search_name','idx_files_ext','idx_files_size','idx_files_root_generation','idx_files_modified','idx_files_path')))SQL");
+    if(sqlite3_step(objects.get())!=SQLITE_ROW || sqlite3_column_int(objects.get(),0)!=14) return false;
+    // Preparing LIMIT 0 checks the columns used by current callers, without
+    // reading files or counting index contents. A stamp alone is insufficient.
+    try {
+        prepare(db,"SELECT id,source_id,relative_path,path,parent_path,name,ext,root,size,modified_time,is_dir,search_name,search_path,scan_generation,cloud_copy FROM files LIMIT 0");
+        prepare(db,"SELECT id,label,type,mode,status,interval_seconds,identity,root,mount_fingerprint,last_check,last_success,revision FROM sources LIMIT 0");
+        prepare(db,"SELECT source_id,generation,relative_path FROM scan_seen LIMIT 0");
+        prepare(db,"SELECT root,generation,source_id,source_revision,policy_revision,identity,mount_fingerprint,state FROM compatibility_scans LIMIT 0");
+        prepare(db,"SELECT root,generation,last_scan_time,file_count FROM roots LIMIT 0");
+        prepare(db,"SELECT kind,position,path FROM exclusion_paths LIMIT 0");
+        auto policy=prepare(db,"SELECT revision,folder_filter,file_filter FROM exclusion_policy WHERE id=1");
+        if(sqlite3_step(policy.get())!=SQLITE_ROW) return false;
+    } catch(const std::runtime_error&) { return false; }
+    const bool available=tableExists(db,"files_name_fts");
+    if(available!=metadataFlag(db,"schema_413_fts_available")) return false;
+    if(!available) return !metadataFlag(db,"name_fts_ready");
+    return !metadataFlag(db,"name_fts_ready") || ftsTriggersPresent(db);
+}
 std::string backupDatabase(sqlite3* writer,const std::string& path) {
     // The caller holds BEGIN IMMEDIATE on writer. A separate read-only handle
     // sees the same committed snapshot while every other writer is excluded;
@@ -367,13 +397,27 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             upsertRecords(conn.get(),s,accepted,0,policy); count+=accepted.size(); records.clear();
         }
         const bool full=scope.empty() || scope==".";
-        auto remove=prepare(conn.get(),full ?
-            "DELETE FROM files WHERE source_id=? AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.relative_path=files.relative_path)" :
-            "DELETE FROM files WHERE source_id=? AND (relative_path=? OR substr(relative_path,1,length(?)+1)=?||'/') AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.relative_path=files.relative_path)");
-        sqlite3_bind_int64(remove.get(),1,s.id);
-        if(!full) { bindText(remove.get(),2,scope); bindText(remove.get(),3,scope); bindText(remove.get(),4,scope); }
-        if(sqlite3_step(remove.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
-        IndexStats stats; stats.removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get())); stats.indexed=count; stats.completed=true;
+        IndexStats stats; stats.indexed=count; stats.completed=true;
+        const auto removeMissing=[&](const std::string& sql,const std::vector<std::string>& bounds) {
+            auto remove=prepare(conn.get(),sql);
+            sqlite3_bind_int64(remove.get(),1,s.id);
+            for(std::size_t i=0;i<bounds.size();++i) bindText(remove.get(),static_cast<int>(i)+2,bounds[i]);
+            if(sqlite3_step(remove.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+            stats.removed+=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+            if(searchTraceEnabled()) searchTrace("Database", "merge_delete vm_steps="+std::to_string(sqlite3_stmt_status(remove.get(),SQLITE_STMTSTATUS_VM_STEP,0)));
+        };
+        const std::string missing=" AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.relative_path=files.relative_path)";
+        if(full) {
+            removeMissing("DELETE FROM files WHERE source_id=?"+missing,{});
+        } else {
+            // Under BINARY collation, '/' (0x2f) immediately precedes '0'
+            // (0x30). These bounds include only scope descendants regardless
+            // of UTF-8 bytes, quotes or SQL wildcard characters in the scope.
+            // Separate equality/range probes reuse UNIQUE(source_id,relative_path)
+            // and avoid visiting unrelated entries in the same source.
+            removeMissing("DELETE FROM files WHERE source_id=? AND relative_path=?"+missing,{scope});
+            removeMissing("DELETE FROM files WHERE source_id=? AND relative_path>=? AND relative_path<?"+missing,{scope+"/",scope+"0"});
+        }
         auto update=prepare(conn.get(),full ?
             "UPDATE sources SET status=0,last_check=strftime('%s','now'),last_success=strftime('%s','now'),revision=revision+1 WHERE id=?" :
             "UPDATE sources SET last_check=strftime('%s','now'),revision=revision+1 WHERE id=?");
@@ -512,8 +556,10 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         }
     }
 
-    // Match Everything's default presentation more closely: Name, then Path.
-    sql << " ORDER BY files.name COLLATE NOCASE ASC, files.parent_path COLLATE NOCASE ASC LIMIT ? OFFSET ?";
+    // search_name is ASCII-folded name; its BINARY order equals name NOCASE.
+    // Reuse the existing name index for direct/short queries and sort only
+    // equal-name parent groups. FTS retains its selective query plan.
+    sql << " ORDER BY files.search_name ASC, files.parent_path COLLATE NOCASE ASC LIMIT ? OFFSET ?";
 
     searchTrace("Database", "SQL=" + sql.str());
     if (use_fts) searchTrace("Database", "bind[1] FTS=\"" + makeFtsExpression(query) + "\"");
@@ -569,7 +615,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     if (searchTraceEnabled()) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - trace_started).count();
-        searchTrace("Database", "sqlite_step_done result_count=" + std::to_string(results.size()) + " elapsed_ms=" + std::to_string(elapsed));
+        searchTrace("Database", "sqlite_step_done result_count=" + std::to_string(results.size()) + " elapsed_ms=" + std::to_string(elapsed) + " vm_steps=" + std::to_string(sqlite3_stmt_status(stmt.get(),SQLITE_STMTSTATUS_VM_STEP,0)));
         const std::size_t preview = std::min<std::size_t>(results.size(), 5);
         for (std::size_t i = 0; i < preview; ++i) {
             searchTrace("Database", "result[" + std::to_string(i) + "]=\"" + results[i].file.path + "\"");
@@ -584,8 +630,17 @@ Database::Database(std::string db_path) : db_path_(std::move(db_path)) {}
 
 void Database::initialize() const {
     SqliteConnection conn(db_path_);
+    // Use one committed read snapshot for the stamp and shape checks. Repeated
+    // batch/statistics initializers must not compete for the WAL writer lock.
+    conn.exec("BEGIN;");
+    try {
+        const bool ready=schemaReady(conn.get());
+        conn.exec("COMMIT;");
+        if(ready) return;
+    } catch (...) { conn.exec("ROLLBACK;"); throw; }
     conn.exec("BEGIN IMMEDIATE;");
     try {
+        if(schemaReady(conn.get())) { conn.exec("COMMIT;"); return; }
         // Recheck only after taking the writer lock: another initializer may
         // already have migrated the schema while this connection was waiting.
         const bool legacy=tableExists(conn.get(),"files") && !columnExists(conn.get(),"files","source_id");
@@ -663,13 +718,29 @@ CREATE INDEX IF NOT EXISTS idx_files_root_generation ON files(source_id,scan_gen
 CREATE INDEX IF NOT EXISTS idx_files_modified ON files(modified_time DESC);
 CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 )SQL");
+        const bool had_fts=tableExists(conn.get(),"files_name_fts");
         const bool fts_ok=conn.tryExec(R"SQL(CREATE VIRTUAL TABLE IF NOT EXISTS files_name_fts USING fts5(search_name,content='files',content_rowid='id',tokenize='trigram');)SQL");
+        if(!had_fts) setMetadataFlag(conn.get(),"name_fts_ready",false);
         if(fts_ok && legacy) {
             conn.exec("INSERT INTO files_name_fts(files_name_fts) VALUES('rebuild');");
             conn.exec("INSERT INTO files_name_fts(files_name_fts,rank) VALUES('integrity-check',1);");
             setMetadataFlag(conn.get(),"name_fts_ready",true);
         }
-        if(fts_ok && metadataFlag(conn.get(),"name_fts_ready")) installFtsTriggers(conn);
+        if(fts_ok && metadataFlag(conn.get(),"name_fts_ready")) {
+            if(!legacy && !ftsTriggersPresent(conn.get())) {
+                // An absent maintenance trigger may have missed earlier writes.
+                // Keep canonical searches until a complete rebuild restores FTS.
+                setMetadataFlag(conn.get(),"name_fts_ready",false);
+            } else installFtsTriggers(conn);
+        }
+        if(!fts_ok) setMetadataFlag(conn.get(),"name_fts_ready",false);
+        if(!metadataFlag(conn.get(),"name_fts_ready")) {
+            // Do not apply delete/update commands to an incomplete external-
+            // content index. The next complete snapshot rebuilds it atomically.
+            conn.exec("DROP TRIGGER IF EXISTS files_name_fts_ai; DROP TRIGGER IF EXISTS files_name_fts_ad; DROP TRIGGER IF EXISTS files_name_fts_au;");
+        }
+        setMetadataFlag(conn.get(),"schema_413_fts_available",fts_ok);
+        setMetadataFlag(conn.get(),"schema_413_ready_v1",true);
         conn.exec("PRAGMA user_version=413; COMMIT;");
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }

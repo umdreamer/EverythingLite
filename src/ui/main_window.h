@@ -6,6 +6,7 @@
 #include <QMainWindow>
 #include <QSet>
 #include <QHash>
+#include <QDeadlineTimer>
 #include <QString>
 #include <QStringList>
 
@@ -83,6 +84,8 @@ private:
     };
     QHash<QString, SyncFailureScope> sync_failure_scopes_;
     QHash<QString, int> sync_attempts_;
+    QHash<QString, QDeadlineTimer> retry_deadlines_;
+    QSet<QString> ready_sync_retries_;
     QHash<QString, QString> sync_errors_;
     QSet<QString> dormant_paths_;
     QSet<QString> dormant_rescan_roots_;
@@ -93,6 +96,7 @@ private:
     SearchResultModel* model_ = nullptr;
     QTimer* search_timer_ = nullptr;
     QTimer* event_timer_ = nullptr;
+    QTimer* retry_timer_ = nullptr;
     QTimer* filesystem_refresh_timer_ = nullptr;
     QThread* worker_thread_ = nullptr;
 
@@ -118,7 +122,7 @@ private:
     bool search_pending_ = false;
     bool filesystem_results_dirty_ = false;
     bool closing_ = false;
-    bool events_due_while_busy_ = false;
+    bool normal_events_due_ = false;
     std::shared_ptr<std::atomic_bool> active_search_cancellation_;
     bool name_search_available_ = false;
     bool name_search_ready_ = false;
@@ -145,6 +149,7 @@ private:
     void updateSearchStateLabel();
     void refreshStats();
     void updateCachedStatus();
+    bool userSearchOwnsStatus() const;
     void runSearch();
     void launchSearch(const QString& query, std::size_t offset = 0, bool append = false);
     void cancelActiveSearch();
@@ -166,6 +171,9 @@ private:
     void receiveWatcherEvent(std::uint64_t generation, const FileEvent& event);
     void scheduleFileEvent(const FileEvent& event);
     void processPendingEvents();
+    void dispatchSyncJobs();
+    void processDueRetries();
+    void armRetryTimer();
     void reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error);
     QString rootForPath(const QString& path) const;
     void setBusy(bool busy, const QString& message = {});

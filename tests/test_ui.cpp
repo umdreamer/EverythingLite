@@ -13,6 +13,8 @@
 #include <QClipboard>
 #include <QHeaderView>
 #include <QStandardItemModel>
+#include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
 #include <algorithm>
 #include <atomic>
 #include <QFile>
@@ -46,6 +48,15 @@ auto cancellableSearch(Service& service, const SearchOptions& options, const std
     -> decltype(service.search("item", 1000, 0, options)) {
     return service.search("item", 1000, 0, options);
 }
+class TooltipProbeDocument final : public QTextDocument {
+public:
+    QList<QUrl> resource_requests;
+protected:
+    QVariant loadResource(int, const QUrl& url) override {
+        resource_requests << url;
+        return {};
+    }
+};
 struct WorkerGate {
     std::shared_ptr<QSemaphore> started=std::make_shared<QSemaphore>();
     std::shared_ptr<QSemaphore> release=std::make_shared<QSemaphore>();
@@ -273,6 +284,25 @@ class UiTest : public QObject {
         QVERIFY(!window.sync_errors_.isEmpty()); QVERIFY(!window.sync_error_label_->isHidden());
         QVERIFY(window.sync_error_label_->text().contains(QStringLiteral("保留缓存")));
     }
+    void manualRetryRenewsExhaustedSourceBudget() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.filePath("paused");
+        QVERIFY(QDir().mkpath(root));
+        QFile file(root+"/manual_offline_cache.txt"); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={root};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QVERIFY(QDir(root).removeRecursively());
+        window.scheduleFileEvent({root.toStdString(),true,{}}); window.processPendingEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_rescan_roots_.contains(root),6500);
+        QTRY_VERIFY(!window.worker_thread_);
+        window.rebuildIndex(); QTRY_VERIFY(!window.worker_thread_);
+        auto atSecondAttempt=[&] {return window.sync_attempts_.size()==1 && window.sync_attempts_.cbegin().value()==2;};
+        QTRY_VERIFY_WITH_TIMEOUT(atSecondAttempt(),3500);
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_rescan_roots_.contains(root),3500);
+        QTRY_VERIFY(!window.worker_thread_);
+        const auto attempts=window.sync_attempts_; QTest::qWait(1100);
+        QCOMPARE(window.sync_attempts_,attempts); QVERIFY(!window.retry_timer_->isActive());
+        Database db(window.db_path_.toStdString()); QVERIFY(!db.search("manual_offline_cache.txt").empty());
+    }
     void cachedActionsBlockOnlyKnownUnavailableAndCopyStillWorks() {
         MainWindow window; window.watcher_->stop();
         SearchResult row; row.file.path="/unverified/cache.txt"; row.file.name="cache.txt";
@@ -402,7 +432,8 @@ class UiTest : public QObject {
         const auto originalPermissions=QFile::permissions(blocked);
         struct RestorePermissions {QString path;QFile::Permissions permissions;~RestorePermissions(){QFile::setPermissions(path,permissions);}} restore{blocked,originalPermissions};
         QVERIFY(QFile::setPermissions(blocked,{}));
-        QVERIFY2(!manager.applyPathChange(root.toStdString(),blocked.toStdString()).completed,"This fixture must really produce a failed incomplete subtree snapshot");
+        if (manager.applyPathChange(root.toStdString(),blocked.toStdString()).completed)
+            QSKIP("The current user can traverse this directory despite removed permissions; no real failure fixture is available.");
         window.scheduleFileEvent({blocked.toStdString(),false,{}}); window.processPendingEvents();
         QTimer churn; churn.setInterval(100); connect(&churn,&QTimer::timeout,&window,[&]{window.scheduleFileEvent({unrelated.fileName().toStdString(),false,{}});}); churn.start();
         QTRY_VERIFY_WITH_TIMEOUT(window.dormant_paths_.contains(blocked),6500);
@@ -414,6 +445,122 @@ class UiTest : public QObject {
         window.scheduleFileEvent({blocked.toStdString(),false,{}});
         Database db(window.db_path_.toStdString()); QTRY_VERIFY_WITH_TIMEOUT(!db.search("restored_related.txt").empty(),2500);
         churn.stop(); QTRY_VERIFY(!window.worker_thread_); QVERIFY(window.sync_errors_.isEmpty());
+    }
+    void overflowDoesNotWakeExhaustedSource() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto paused=dir.filePath("paused"), good=dir.filePath("good");
+        QVERIFY(QDir().mkpath(paused)); QVERIFY(QDir().mkpath(good));
+        QFile cache(paused+"/overflow_offline_cache.txt"); QVERIFY(cache.open(QIODevice::WriteOnly)); cache.close();
+        QFile newFile(good+"/overflow_live.txt"); QVERIFY(newFile.open(QIODevice::WriteOnly)); newFile.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={paused,good};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(paused.toStdString()).completed);
+        QVERIFY(QDir(paused).removeRecursively());
+        window.scheduleFileEvent({paused.toStdString(),true,{}}); window.processPendingEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_rescan_roots_.contains(paused),6500);
+        QTRY_VERIFY(!window.worker_thread_);
+        const auto attempts=window.sync_attempts_;
+        for(int i=0;i<402;++i) window.scheduleFileEvent({(paused+QString("/missing%1").arg(i)).toStdString(),false,{}});
+        for(int i=0;i<402;++i) window.scheduleFileEvent({(good+QString("/sibling%1").arg(i)).toStdString(),false,{}});
+        QVERIFY(window.pending_rescan_roots_.contains(good));
+        QVERIFY2(!window.pending_rescan_roots_.contains(paused),"Overflow must retain the exhausted root as dormant instead of launching another full rescan");
+        window.processPendingEvents();
+        Database db(window.db_path_.toStdString()); QTRY_VERIFY_WITH_TIMEOUT(!db.search("overflow_live.txt").empty(),2000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QCOMPARE(window.sync_attempts_,attempts);
+        QVERIFY(window.dormant_rescan_roots_.contains(paused));
+        QVERIFY(!db.search("overflow_offline_cache.txt").empty());
+    }
+    void normalEventsKeep700msDeadlineDuringRetryBackoff() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto paused=dir.filePath("paused"), good=dir.filePath("good"); QVERIFY(QDir().mkpath(good));
+        MainWindow window; window.watcher_->stop(); window.roots_={paused,good};
+        window.scheduleFileEvent({paused.toStdString(),true,{}}); window.processPendingEvents();
+        auto atSecondAttempt=[&] {return window.sync_attempts_.size()==1 && window.sync_attempts_.cbegin().value()==2;};
+        QTRY_VERIFY_WITH_TIMEOUT(atSecondAttempt(),3500); QTRY_VERIFY(!window.worker_thread_);
+        QFile file(good+"/deadline_live.txt"); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        window.scheduleFileEvent({file.fileName().toStdString(),false,{}});
+        QTest::qWait(1100);
+        Database db(window.db_path_.toStdString());
+        QVERIFY2(!db.search("deadline_live.txt").empty(),"A normal source event must sync after its own 700 ms deadline, without waiting for another source's 3000 ms retry");
+        QVERIFY2(atSecondAttempt(),"Processing a normal event must not pull an unrelated retry forward");
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_rescan_roots_.contains(paused),3500);
+        QTRY_VERIFY(!window.worker_thread_);
+    }
+    void successfulAncestorClearsOnlyCoveredFailures() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), ancestor=root+"/branch", child=ancestor+"/blocked";
+        const auto unrelated=root+"/unrelated", offline=dir.filePath("offline");
+        for(const auto& path:{child,unrelated,offline}) QVERIFY(QDir().mkpath(path));
+        for(const auto& path:{child+"/child.txt",unrelated+"/sibling.txt",offline+"/ancestor_offline_cache.txt"}) {
+            QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        }
+        MainWindow window; window.watcher_->stop(); window.roots_={root,offline};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoots({root.toStdString(),offline.toStdString()}).completed);
+        const auto childPermissions=QFile::permissions(child), unrelatedPermissions=QFile::permissions(unrelated);
+        struct Restore {QString path;QFile::Permissions permissions;~Restore(){QFile::setPermissions(path,permissions);}} first{child,childPermissions}, second{unrelated,unrelatedPermissions};
+        QVERIFY(QFile::setPermissions(child,{})); QVERIFY(QFile::setPermissions(unrelated,{}));
+        if (manager.applyPathChange(root.toStdString(),child.toStdString()).completed
+            || manager.applyPathChange(root.toStdString(),unrelated.toStdString()).completed)
+            QSKIP("The current user can traverse directories despite removed permissions; no real failure fixture is available.");
+        QVERIFY(QDir(offline).removeRecursively());
+        window.scheduleFileEvent({child.toStdString(),false,{}}); window.scheduleFileEvent({unrelated.toStdString(),false,{}}); window.scheduleFileEvent({offline.toStdString(),true,{}});
+        window.processPendingEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_paths_.contains(child) && window.dormant_paths_.contains(unrelated) && window.dormant_rescan_roots_.contains(offline),6500);
+        QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(QFile::setPermissions(child,childPermissions));
+        QFile file(child+"/ancestor_recovered.txt"); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        window.scheduleFileEvent({ancestor.toStdString(),false,{}});
+        Database db(window.db_path_.toStdString()); QTRY_VERIFY_WITH_TIMEOUT(!db.search("ancestor_recovered.txt").empty(),2000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QCOMPARE(window.sync_errors_.size(),2);
+        QVERIFY(window.dormant_paths_.contains(unrelated)); QVERIFY(window.dormant_rescan_roots_.contains(offline));
+        for(const auto& scope:window.sync_failure_scopes_) QVERIFY(scope.path!=child);
+        QVERIFY(!db.search("ancestor_offline_cache.txt").empty());
+    }
+    void syncStartAndFinishKeepInputState() {
+        MainWindow window; window.watcher_->stop();
+        QTest::keyClicks(window.search_edit_,"alpha"); QVERIFY(window.search_timer_->isActive());
+        const auto typing=window.status_label_->text(); QVERIFY(typing.contains(QStringLiteral("输入中")));
+        window.scheduleFileEvent({(fixture_root+"/alpha.txt").toStdString(),false,{}}); window.processPendingEvents();
+        QCOMPARE(window.status_label_->text(),typing);
+        // Real IME composition protects the input state while allowing a slow
+        // CI filesystem worker to finish without changing the 800 ms product delay.
+        QInputMethodEvent preedit(QStringLiteral("zhong"),{});
+        QApplication::sendEvent(window.search_edit_,&preedit);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QVERIFY(window.search_ime_composing_); QCOMPARE(window.status_label_->text(),typing);
+    }
+    void manualProgressKeepsRunningUserQueryState() {
+        MainWindow window; window.watcher_->stop(); WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
+        window.search_edit_->setText("alpha"); window.runSearch(); QVERIFY(window.search_in_flight_);
+        const auto searching=window.status_label_->text(); QVERIFY(searching.contains(QStringLiteral("后台搜索")));
+        window.rebuildIndex();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QVERIFY(window.search_in_flight_);
+        QCOMPARE(window.status_label_->text(),searching);
+        gate.release->release(); QTRY_COMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
+    }
+    void tooltipShowsCachedMarkupLiterallyWithoutResourceRequests() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto path=dir.filePath(QStringLiteral("literal<b>&.txt"));
+        QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        const auto image=QUrl::fromLocalFile(dir.filePath("tooltip_image.png")).toString(QUrl::FullyEncoded);
+        const auto source=QStringLiteral("<b>NAS</b> <img src=\"%1\">").arg(image);
+        SearchResult row; row.file.path=path.toStdString(); row.file.name="literal<b>&.txt";
+        row.source_label=source.toStdString(); row.source_type=SourceType::NAS;
+        SearchResultModel model; model.setResults({row});
+        const auto tooltip=model.data(model.index(0,0),Qt::ToolTipRole).toString();
+        TooltipProbeDocument document;
+        // This is the real Qt AutoText choice used by labels/tooltips, with
+        // resource loading observed rather than allowing a file-image read.
+        if (Qt::mightBeRichText(tooltip)) document.setHtml(tooltip);
+        else document.setPlainText(tooltip);
+        document.documentLayout()->documentSize();
+        QVERIFY2(document.resource_requests.isEmpty(),"Cached names/source labels must not become tooltip image-resource requests");
+        QVERIFY(document.toPlainText().contains(path));
+        QVERIFY(document.toPlainText().contains(source));
+        QCOMPARE(model.pathAt(0),path);
+        QVERIFY(model.data(model.index(0,4)).toString().contains(source));
     }
     void menuHasPreview() {
         MainWindow window;

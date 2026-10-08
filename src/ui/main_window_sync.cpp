@@ -7,6 +7,8 @@
 #include <QStatusBar>
 #include <QTimer>
 #include <exception>
+#include <algorithm>
+#include <limits>
 
 namespace everything_lite {
 namespace {
@@ -53,12 +55,19 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
             : pathIsWithin(native(path), native(scope.path)) || pathIsWithin(native(scope.path), native(path)));
         if (!related) continue;
         sync_attempts_[it.key()] = 0;
+        retry_deadlines_.remove(it.key());
+        ready_sync_retries_.remove(it.key());
         if (scope.rescan) {
             if (dormant_rescan_roots_.remove(scope.root)) pending_rescan_roots_.insert(scope.root);
         } else if (dormant_paths_.remove(scope.path)) {
             pending_paths_.insert(scope.path);
         }
     }
+    armRetryTimer();
+    // Exhausted full-source work already retains every descendant change.
+    // Only an explicit related root/full event above reactivates it; unrelated
+    // sibling churn and overflow cannot create a fresh full-source job.
+    if (dormant_rescan_roots_.contains(root)) return;
     if (event.needs_full_rescan) {
         pending_rescan_roots_.insert(root);
     } else if (!pending_rescan_roots_.contains(root)) {
@@ -78,7 +87,14 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
         }
         if (!covered) pending_paths_.insert(path);
         if (pending_paths_.size() > 400) {
-            for (const auto& pending : pending_paths_) pending_rescan_roots_.insert(rootForPath(pending));
+            for (const auto& pending : pending_paths_) {
+                const auto affected_root = rootForPath(pending);
+                const bool failed_full_source = std::any_of(sync_failure_scopes_.cbegin(), sync_failure_scopes_.cend(),
+                    [&](const SyncFailureScope& scope) { return scope.root == affected_root && scope.rescan; });
+                // Its scheduled retry or dormant full-source scope already
+                // retains coverage. Overflow must not bypass that backoff.
+                if (!failed_full_source) pending_rescan_roots_.insert(affected_root);
+            }
             pending_paths_.clear();
         }
     }
@@ -88,18 +104,59 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
 
 void MainWindow::processPendingEvents() {
     if (closing_) return;
-    if (worker_thread_) {
-        events_due_while_busy_ = true;
+    event_timer_->stop();
+    normal_events_due_ = true;
+    dispatchSyncJobs();
+}
+
+void MainWindow::armRetryTimer() {
+    if (!retry_timer_ || closing_) return;
+    if (retry_deadlines_.isEmpty()) {
+        retry_timer_->stop();
         return;
     }
-    const auto paths = pending_paths_;
-    const auto rescans = pending_rescan_roots_;
-    pending_paths_.clear();
-    pending_rescan_roots_.clear();
-    if (paths.isEmpty() && rescans.isEmpty()) return;
+    qint64 remaining = std::numeric_limits<int>::max();
+    for (const auto& deadline : retry_deadlines_) remaining = std::min(remaining, deadline.remainingTime());
+    retry_timer_->start(static_cast<int>(std::max<qint64>(0, remaining)));
+}
+
+void MainWindow::processDueRetries() {
+    if (closing_) return;
+    for (auto it = retry_deadlines_.begin(); it != retry_deadlines_.end();) {
+        if (!it.value().hasExpired()) { ++it; continue; }
+        ready_sync_retries_.insert(it.key());
+        it = retry_deadlines_.erase(it);
+    }
+    armRetryTimer();
+    dispatchSyncJobs();
+}
+
+void MainWindow::dispatchSyncJobs() {
+    if (closing_ || worker_thread_) return;
+    QSet<QString> paths, rescans;
+    if (normal_events_due_) {
+        paths = pending_paths_;
+        rescans = pending_rescan_roots_;
+        pending_paths_.clear();
+        pending_rescan_roots_.clear();
+        normal_events_due_ = false;
+    }
+    std::vector<SyncFailureScope> retries;
+    for (const auto& key : ready_sync_retries_) {
+        if (!sync_failure_scopes_.contains(key) || sync_attempts_.value(key) >= 3) continue;
+        const auto scope = sync_failure_scopes_.value(key);
+        if (!roots_.contains(scope.root)) continue;
+        if (dormant_rescan_roots_.contains(scope.root)) {
+            if (!scope.rescan) dormant_paths_.insert(scope.path);
+            continue;
+        }
+        retries.push_back(scope);
+    }
+    ready_sync_retries_.clear();
+    if (paths.isEmpty() && rescans.isEmpty() && retries.empty()) return;
     const auto db_path = db_path_;
     const auto roots = roots_;
-    startWorker([this, db_path, paths, rescans, roots] {
+    startWorker([this, db_path, paths, rescans, roots, retries] {
         auto process = [&](const QString& root, const QString& path, bool rescan) {
             QString error;
             try {
@@ -127,43 +184,51 @@ void MainWindow::processPendingEvents() {
             }
             if (!best.isEmpty() && !rescans.contains(best)) process(best, path, false);
         }
+        for (const auto& retry : retries) {
+            if (!rescans.contains(retry.root)) process(retry.root, retry.path, retry.rescan);
+        }
     }, QStringLiteral("正在同步文件变化…"), false);
 }
 
 void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error) {
     const auto key = failureKey(root, path, rescan);
     if (error.isEmpty()) {
+        // A completed ancestor snapshot proves recovery for every failed scope
+        // it covers in the same source. Unrelated and other-source failures stay.
+        const auto completed_path = rescan ? root : path;
+        for (auto it = sync_failure_scopes_.begin(); it != sync_failure_scopes_.end();) {
+            const auto& failed = it.value();
+            const auto failed_path = failed.rescan ? failed.root : failed.path;
+            if (failed.root != root || !pathIsWithin(native(failed_path), native(completed_path))) {
+                ++it;
+                continue;
+            }
+            sync_attempts_.remove(it.key());
+            sync_errors_.remove(it.key());
+            retry_deadlines_.remove(it.key());
+            ready_sync_retries_.remove(it.key());
+            if (failed.rescan) dormant_rescan_roots_.remove(failed.root);
+            else dormant_paths_.remove(failed.path);
+            it = sync_failure_scopes_.erase(it);
+        }
         sync_attempts_.remove(key);
         sync_errors_.remove(key);
-        sync_failure_scopes_.remove(key);
-        if (rescan) {
-            // A complete source snapshot also resolves failed subtree jobs.
-            for (auto it = sync_errors_.begin(); it != sync_errors_.end();) {
-                if (sync_failure_scopes_.value(it.key()).root == root) {
-                    sync_attempts_.remove(it.key());
-                    sync_failure_scopes_.remove(it.key());
-                    it = sync_errors_.erase(it);
-                } else ++it;
-            }
-            dormant_rescan_roots_.remove(root);
-            for (auto it = dormant_paths_.begin(); it != dormant_paths_.end();) {
-                if (rootForPath(*it) == root) it = dormant_paths_.erase(it);
-                else ++it;
-            }
-        }
+        retry_deadlines_.remove(key);
+        ready_sync_retries_.remove(key);
     } else {
         sync_errors_[key] = QStringLiteral("%1：%2").arg(path, error);
         sync_failure_scopes_[key] = {root, path, rescan};
         const auto attempts = ++sync_attempts_[key];
         if (attempts < 3) {
-            if (rescan) pending_rescan_roots_.insert(root);
-            else pending_paths_.insert(path);
-            if (!event_timer_->isActive()) event_timer_->start(1500 * attempts);
+            retry_deadlines_.insert(key, QDeadlineTimer(1500 * attempts, Qt::PreciseTimer));
         } else {
+            retry_deadlines_.remove(key);
+            ready_sync_retries_.remove(key);
             if (rescan) dormant_rescan_roots_.insert(root);
             else dormant_paths_.insert(path);
         }
     }
+    armRetryTimer();
     const auto message = sync_errors_.isEmpty() ? QString{}
         : QStringLiteral("同步失败（保留缓存；最多自动重试两次，新事件可重试）：%1")
             .arg(sync_errors_.values().join(QStringLiteral("；")));

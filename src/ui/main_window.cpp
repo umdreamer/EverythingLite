@@ -261,7 +261,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     event_timer_ = new QTimer(this);
     event_timer_->setSingleShot(true);
     event_timer_->setInterval(700);
+    event_timer_->setTimerType(Qt::PreciseTimer);
     connect(event_timer_, &QTimer::timeout, this, &MainWindow::processPendingEvents);
+    retry_timer_ = new QTimer(this);
+    retry_timer_->setSingleShot(true);
+    retry_timer_->setTimerType(Qt::PreciseTimer);
+    connect(retry_timer_, &QTimer::timeout, this, &MainWindow::processDueRetries);
 
     // v0.4.2: filesystem churn must never pre-empt a user search. FSEvents can
     // fire continuously under ~/Library; v0.4.1 restarted the foreground query
@@ -347,6 +352,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     search_timer_->stop();
     filesystem_refresh_timer_->stop();
     event_timer_->stop();
+    retry_timer_->stop();
     saveSettings();
     saveBookmarks();
     QMainWindow::closeEvent(event);
@@ -746,8 +752,13 @@ void MainWindow::refreshStats() {
     }
 }
 
+bool MainWindow::userSearchOwnsStatus() const {
+    return search_in_flight_ || search_pending_ || search_ime_composing_
+        || (search_timer_ && search_timer_->isActive());
+}
+
 void MainWindow::updateCachedStatus() {
-    if (closing_ || search_in_flight_ || search_pending_ || search_ime_composing_ || search_timer_->isActive()) return;
+    if (closing_ || userSearchOwnsStatus()) return;
     QString acceleration;
     if (!name_search_available_) acceleration = QStringLiteral("    ·    当前 SQLite 未提供 FTS5 trigram，使用兼容搜索");
     else if (!name_search_ready_) acceleration = QStringLiteral("    ·    名称加速索引未就绪");
@@ -974,10 +985,11 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
         Q_UNUSED(refresh_search_on_finish)
         // Manual rebuilds and event batches share the same user-query protection.
         scheduleFilesystemResultRefresh();
-        if (!pending_paths_.isEmpty() || !pending_rescan_roots_.isEmpty()) {
-            if (events_due_while_busy_ || !event_timer_->isActive()) event_timer_->start(0);
+        // Continue only queues whose own deadlines have already elapsed.
+        // A completed worker never advances a fresh normal event or retry.
+        if (normal_events_due_ || !ready_sync_retries_.isEmpty()) {
+            QTimer::singleShot(0, this, &MainWindow::dispatchSyncJobs);
         }
-        events_due_while_busy_ = false;
     });
     worker_thread_->start();
 }
@@ -995,8 +1007,17 @@ void MainWindow::rebuildIndex() {
         if (roots_.isEmpty()) return;
     }
     for (auto it = sync_failure_scopes_.begin(); it != sync_failure_scopes_.end(); ++it) {
-        if (roots_.contains(it.value().root)) sync_attempts_[it.key()] = 0;
+        if (roots_.contains(it.value().root)) {
+            sync_attempts_[it.key()] = 0;
+            retry_deadlines_.remove(it.key());
+            ready_sync_retries_.remove(it.key());
+            // An explicit manual attempt renews this configured source's budget.
+            // Stale dormant markers must not suppress its new bounded retries.
+            if (it.value().rescan) dormant_rescan_roots_.remove(it.value().root);
+            else dormant_paths_.remove(it.value().path);
+        }
     }
+    armRetryTimer();
     const auto roots = roots_;
     const auto db_path = db_path_;
     startWorker([this, roots, db_path] {
@@ -1006,7 +1027,7 @@ void MainWindow::rebuildIndex() {
                 IndexManager manager(toUtf8(db_path));
                 const auto stats = manager.rebuildRoot(toUtf8(root), [this](const std::string& root, std::uint64_t count) {
                     QMetaObject::invokeMethod(this, [this, root, count] {
-                        if (!closing_) status_label_->setText(QStringLiteral("正在索引：%1    %2 项").arg(fromUtf8(root)).arg(count));
+                        if (!closing_ && !userSearchOwnsStatus()) status_label_->setText(QStringLiteral("正在索引：%1    %2 项").arg(fromUtf8(root)).arg(count));
                     }, Qt::QueuedConnection);
                 });
                 if (!stats.completed) error = stats.cancelled ? QStringLiteral("同步已取消")
@@ -1263,7 +1284,7 @@ void MainWindow::receiveWatcherEvent(std::uint64_t generation, const FileEvent& 
 
 void MainWindow::setBusy(bool busy, const QString& message) {
     indexing_ = busy;
-    if (!message.isEmpty()) status_label_->setText(message);
+    if (!message.isEmpty() && !closing_ && !userSearchOwnsStatus()) status_label_->setText(message);
 }
 
 void MainWindow::newWindow() {

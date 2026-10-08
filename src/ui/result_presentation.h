@@ -37,9 +37,12 @@ inline QString cachedTimestamp(std::int64_t time) {
     return time > 0 ? QDateTime::fromSecsSinceEpoch(time).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("无记录");
 }
 inline QString resultTooltip(const SearchResult& row) {
-    return QStringLiteral("%1\n来源：%2\n状态：%3\n上次检查：%4\n上次可用：%5\n缓存信息不保证文件当前可访问。")
+    const auto plain = QStringLiteral("%1\n来源：%2\n状态：%3\n上次检查：%4\n上次可用：%5\n缓存信息不保证文件当前可访问。")
         .arg(QString::fromUtf8(row.file.path.c_str()), sourceText(row), statusText(row),
              cachedTimestamp(row.source_last_check), cachedTimestamp(row.source_last_success));
+    // Qt tooltips accept rich text. Escape the whole cached payload so legal
+    // markup in a path/label stays literal and cannot load image resources.
+    return QStringLiteral("<pre>%1</pre>").arg(plain.toHtmlEscaped());
 }
 inline QString cachedActionBlock(const SearchResult& row) {
     if (row.source_status == SourceStatus::Offline) return QStringLiteral("此项目来自离线缓存；请先恢复来源并同步。仍可复制路径。");

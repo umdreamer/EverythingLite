@@ -82,3 +82,18 @@ Linux 本轮记录仅保留实际已经发生的检查：Ubuntu 24.04 ARM64、Qt
 该模块尚未接入实际扫描调用。前后目录核验不是原子文件系统快照，字面挂载表也不能完整覆盖 Mac firmlink 别名；后续扫描器必须在进入目录时检查实际归属，并剪枝其他已配置来源。真实 NAS、卸载/重挂载、供应商云占位文件、Finder 保存地址同步及完整 0.4.13 尚未验收。Linux 原生后端明确保留不支持状态，本轮不开展其实现或测试。
 
 依据：[Apple — statfs/fstatfs(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/statfs.2.html)、[Apple — kCFURLVolumeUUIDStringKey](https://developer.apple.com/documentation/corefoundation/kcfurlvolumeuuidstringkey)、[Apple — inet_pton(3)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/inet_pton.3.html)。实施与验收拆分见 [Mac 扫描计划](superpowers/plans/2026-10-08-mac-scan-pipeline.md)。
+
+
+## Mac 流式来源扫描独立模块（2026-10-08）
+
+本地实现为 `6066504`，符号链接自身大小修正为 `e5e378b`。最终范围 `cb35c28..e5e378b` 先通过静态规范审查，再通过独立质量审查。控制代理随后已顺序独立复验：Core Debug 配置与全构建 exit 0，CTest 9/9，约 3.14 秒；严格 GUI 配置及全目标构建 exit 0，实际生成 EverythingLite.app 和 everything-lite-cli。改名、删除及实际路径打开定向 Qt 用例 3 通过、0 失败、0 跳过，约 4.178 秒，只有系统字体别名警告。没有重复整套 Qt 用例、没有生成新 Release，也没有切换用户正在运行的应用。
+
+2107 个真实临时文件与根目录共暂存 2108 条记录，分为三批，每批不超过 1000 条；扫描模块不累计整棵目录记录，也不读取主索引。暂存库包含来源、策略修订、范围、任务 nonce、固定后代来源根和实际挂载边界证据。只有完整枚举及结束核验成功后才设置完成标记并关闭写入句柄；未完成结果不交付快照路径，显式输出位置可能留有待调用者清理的暂存文件。
+
+回归覆盖取消、回调异常、SQLite 写失败、缺失来源、未知身份、已核验但未分类的来源、策略不一致、根目录和大子目录替换、子树归属、静态剪枝以及输出目录和文件替换。符号链接的大小及修改时间来自链接自身，分别检查活链接、断链、扫描批次与暂存行，后代目录链接不遍历。新模块仍允许合法的目录链接作为来源根；既有扫描器的目录链接及文件链接根用法保留。特殊名称包括中文、反斜杠和问号。最终 Core 日志没有权限或卷 UUID 跳过，权限拒绝分支实际执行。
+
+使用独立临时主库和 SQLite 观察触发器验证差异合并：不变快照产生零次 files 表写入；删除一文件只产生对应删除及实际发生时的根目录 mtime 更新，不改无关记录。既有文件、替换文件和模拟主库内容未被扫描输出覆盖。六个变更文本文件检查已知开发者姓名及工作区路径标记，匹配为零；这不是识别全部隐私内容的保证。原始测试日志、实际身份、数据库和构建产物均不加入 Git。
+
+该模块尚未接入 IndexManager、CLI 或 GUI 扫描调用。输出目前必须位于完整来源根之外，因此以 `/` 为来源根无法满足这一合同，当前模块不提供该用法。实际目录核验不是原子文件系统快照，POSIX 所有者及权限检查也不构成全面 ACL 或同 UID 恶意竞争防护。真实 NAS、卸载重挂载、云端供应商、Finder 保存地址同步和整个 0.4.13 尚未验收；Linux 开发及验证延期。
+
+依据：[Apple — statfs/fstatfs(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/statfs.2.html)。后续隔离进程互斥依据：[Apple — flock(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/flock.2.html)，文件锁用于遵守同一协议的进程协调。

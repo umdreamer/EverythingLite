@@ -4,6 +4,7 @@
 #include "core/exclusion_policy.h"
 #include "core/search_query.h"
 #include "core/source_scan.h"
+#include "core/source_verification.h"
 
 #include <atomic>
 #include <cstdint>
@@ -48,6 +49,7 @@ public:
     // Source, policy and topology guards run in the main write transaction;
     // every failure rolls back all canonical changes, including prior batches.
     IndexStats mergeSourceScanSnapshot(const SourceScanRequest& captured) const;
+    SourceVerificationResult publishSourceVerification(const SourceVerificationEvidence& evidence, VerificationMode mode) const;
     std::string migrationBackupPath() const;
     ExclusionPolicy exclusionPolicy() const;
     // Validates first; atomically replaces rules, increments revision and purges

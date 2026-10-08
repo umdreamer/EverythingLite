@@ -829,6 +829,64 @@ std::uint64_t Database::saveExclusionPolicy(const ExclusionRules& rules) const {
     } catch(...) { conn.exec("ROLLBACK;"); throw; }
 }
 
+SourceVerificationResult Database::publishSourceVerification(const SourceVerificationEvidence& evidence, VerificationMode mode) const {
+    const auto& expected=evidence.expected;validateSource(expected);
+    if(expected.id<=0 || !normalizedAbsolute(expected.root) ||
+       (mode!=VerificationMode::Automatic && mode!=VerificationMode::Explicit))
+        throw std::invalid_argument("invalid source verification request");
+    SqliteConnection conn(db_path_);conn.exec("BEGIN IMMEDIATE;");
+    try {
+        const auto current=getSource(conn.get(),expected.id);
+        // Policy is independent of source identity. All persistent catalog fields
+        // must still match; cache writes through the API advance this revision.
+        if(current.revision!=expected.revision || current.root!=expected.root || current.identity!=expected.identity ||
+           current.mount_fingerprint!=expected.mount_fingerprint || current.label!=expected.label || current.type!=expected.type ||
+           current.mode!=expected.mode || current.status!=expected.status || current.interval_seconds!=expected.interval_seconds ||
+           current.last_check!=expected.last_check || current.last_success!=expected.last_success)
+            throw std::runtime_error("source changed during verification");
+        SourceVerificationResult result;const auto& observed=evidence.initial_before;
+        bool accepted=stableSourceVerification(evidence);
+        if(!current.identity.empty() && !observed.identity.empty() && current.identity!=observed.identity) {
+            accepted=false;result.issue=ProbeIssue::IdentityChanged;result.error="source identity changed; forget and add a new source";
+        } else if(accepted && mode==VerificationMode::Automatic) {
+            if(current.identity.empty()) {
+                // This check belongs INSIDE the write transaction. A legacy
+                // cache appearing after observation requires explicit consent.
+                auto cache=prepare(conn.get(),"SELECT 1 FROM files WHERE source_id=? LIMIT 1");
+                sqlite3_bind_int64(cache.get(),1,current.id);const auto rc=sqlite3_step(cache.get());
+                if(rc!=SQLITE_ROW && rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+                if(rc==SQLITE_ROW) {accepted=false;result.error="cached source requires explicit verification";}
+            } else if(!sameSourceDirectoryInstance(current.mount_fingerprint,observed.mount_fingerprint)) {
+                accepted=false;result.issue=ProbeIssue::ScopeChanged;result.error="directory instance requires explicit verification";
+            }
+        }
+        if(accepted) {
+            result.published=true;result.status=SourceStatus::Accessible;result.issue=ProbeIssue::None;
+        } else {
+            const bool classified=!result.error.empty();
+            if(!classified)result.error="source verification did not establish stable native evidence";
+            // Actual offline/failed evidence takes precedence over a mismatch
+            // inferred from an unavailable expected network slot or failed end.
+            for(const auto* p:{&evidence.initial_before,&evidence.candidate_before,&evidence.candidate_after,&evidence.initial_after}) {
+                if(p->status==SourceStatus::Offline || p->status==SourceStatus::Failed) {
+                    result.status=p->status;result.issue=p->issue;result.error="source unavailable during verification";break;
+                }
+                if(!classified && p->issue!=ProbeIssue::None && p->issue!=ProbeIssue::NeedsVerification)result.issue=p->issue;
+            }
+        }
+        auto update=prepare(conn.get(),"UPDATE sources SET identity=?,mount_fingerprint=?,type=?,status=?,last_check=?,revision=revision+1 WHERE id=?");
+        bindText(update.get(),1,accepted?observed.identity:current.identity);
+        bindText(update.get(),2,accepted?observed.mount_fingerprint:current.mount_fingerprint);
+        const auto actual_type=(observed.type==SourceType::Local || observed.type==SourceType::External || observed.type==SourceType::NAS)?observed.type:SourceType::Unknown;
+        sqlite3_bind_int(update.get(),3,static_cast<int>(accepted && current.type==SourceType::Unknown?actual_type:current.type));
+        sqlite3_bind_int(update.get(),4,static_cast<int>(result.status));
+        using namespace std::chrono;sqlite3_bind_int64(update.get(),5,duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+        sqlite3_bind_int64(update.get(),6,current.id);
+        if(sqlite3_step(update.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        conn.exec("COMMIT;");return result;
+    } catch(...) {conn.exec("ROLLBACK;");throw;}
+}
+
 std::string Database::migrationBackupPath() const {
     SqliteConnection conn(db_path_);
     auto stmt=prepare(conn.get(),"SELECT value FROM app_metadata WHERE key='source_migration_backup'");

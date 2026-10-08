@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
@@ -40,6 +41,8 @@ R"(everything-lite-cli
 Usage:
   everything-lite-cli [--db PATH] db-path
   everything-lite-cli [--db PATH] index <root> [root...]
+  everything-lite-cli [--db PATH] sources list
+  everything-lite-cli [--db PATH] sources verify <positive-source-id>
   everything-lite-cli [--db PATH] search <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] search-safe <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] search-correct <query> [--limit N] [--offset N]
@@ -154,6 +157,35 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        if(command=="sources") {
+            // Validate the whole command before opening/creating the database.
+            const bool list=args.size()==2 && args[1]=="list";
+            const bool verify=args.size()==3 && args[1]=="verify";
+            if(!list && !verify)throw std::invalid_argument("sources requires list or verify ID");
+            std::int64_t id=0;
+            if(verify) {
+                const auto& value=args[2];
+                const auto parsed=std::from_chars(value.data(),value.data()+value.size(),id);
+                if(value.empty() || value.front()<'0' || value.front()>'9' || parsed.ec!=std::errc{} ||
+                   parsed.ptr!=value.data()+value.size() || id<=0)throw std::invalid_argument("source ID must be a positive integer");
+            }
+            Database db(db_path);db.initialize();
+            if(list) {
+                for(const auto& s:db.sources())
+                    std::cout<<"id="<<s.id<<" label="<<std::quoted(s.label)<<" root="<<std::quoted(s.root)
+                             <<" status="<<static_cast<int>(s.status)<<"\n";
+            } else {
+                // CLI is already a separate process. GUI-side native probing
+                // requires the isolated verification helper in the next stage.
+                const auto result=db.publishSourceVerification(observeSourceVerification(db.source(id)),VerificationMode::Explicit);
+                if(!result.published) {
+                    std::cerr<<"来源核验失败："<<result.error<<" (issue="<<static_cast<int>(result.issue)<<")\n";return 1;
+                }
+                std::cout<<"来源核验完成：id="<<id<<"\n";
+            }
+            return 0;
+        }
+
         if (command == "index") {
             if (args.size() < 2) {
                 std::cerr << "index requires at least one root directory\n";
@@ -165,8 +197,12 @@ int main(int argc, char** argv) {
                 std::cerr << "\r[索引] " << root << "  " << scanned << " 项" << std::flush;
             });
             std::cerr << "\n";
+            if(!stats.completed) {
+                std::cerr<<"索引失败："<<(stats.error.empty()?(stats.cancelled?"已取消":"扫描未完整完成"):stats.error)<<"\n";
+                return 1;
+            }
             std::cout << "完成：扫描 " << stats.scanned
-                      << "，写入 " << stats.indexed
+                      << "，处理/比对 " << stats.indexed
                       << "，跳过 " << stats.skipped
                       << "，清理 " << stats.removed << "\n";
             return 0;
@@ -346,8 +382,12 @@ int main(int argc, char** argv) {
             const auto index_ms = std::chrono::duration<double, std::milli>(index_end - index_begin).count();
             std::cerr << "\r";
 
+            if(!stats.completed) {
+                std::cerr<<"benchmark failed: "<<(stats.error.empty()?"scan incomplete":stats.error)<<"\n";
+                std::error_code ec;fs::remove_all(bench_dir,ec);return 1;
+            }
             std::cout << "Benchmark root: " << root << "\n";
-            std::cout << "Indexed: " << stats.indexed << " items\n";
+            std::cout << "Processed/compared: " << stats.indexed << " items\n";
             std::cout << "Index time: " << std::fixed << std::setprecision(1) << index_ms << " ms\n";
             if (stats.indexed > 0) {
                 std::cout << "Index rate: " << std::setprecision(0)

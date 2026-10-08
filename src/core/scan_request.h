@@ -1,5 +1,6 @@
 #pragma once
 #include "core/source_scan.h"
+#include <array>
 namespace everything_lite {
 // Immutable job capture: no catalog or environment lookup during serialization.
 struct ScanTask {
@@ -11,6 +12,8 @@ struct ScanTask {
 };
 // Pure validation/decoding of captured evidence; never opens a source path.
 void validateSourceScanRequest(const SourceScanRequest& request);
+// Strict pure decoder shared by scan admission and source verification.
+std::array<std::string, 7> capturedSourceFingerprintFields(const std::string& fingerprint);
 std::string capturedSourceCanonicalRoot(const std::string& fingerprint);
 std::vector<std::string> capturedChildMountRoots(const std::string& fingerprint,
     const std::string& canonical_root);

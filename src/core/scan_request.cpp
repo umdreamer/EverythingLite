@@ -129,10 +129,13 @@ struct PrivateFile {
 #endif
 }
 void validateSourceScanRequest(const SourceScanRequest& request) { validateRequest(request); }
-std::string capturedSourceCanonicalRoot(const std::string& fingerprint) {
+std::array<std::string, 7> capturedSourceFingerprintFields(const std::string& fingerprint) {
     const auto fields=evidenceFields(fingerprint,7);mountFields(fields);
     require(absolute(fields[5]) && !fields[6].empty(),"invalid captured canonical source evidence");
-    return fields[5];
+    std::array<std::string, 7> out;std::copy(fields.begin(),fields.end(),out.begin());return out;
+}
+std::string capturedSourceCanonicalRoot(const std::string& fingerprint) {
+    return capturedSourceFingerprintFields(fingerprint)[5];
 }
 std::vector<std::string> capturedChildMountRoots(const std::string& fingerprint,const std::string& canonical_root) {
     cleanText(fingerprint);require(absolute(canonical_root),"invalid captured canonical root");

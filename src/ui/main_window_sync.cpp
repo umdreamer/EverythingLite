@@ -9,6 +9,7 @@
 #include <exception>
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace everything_lite {
 namespace {
@@ -84,7 +85,7 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     // Only an explicit related root/full event above reactivates it; unrelated
     // sibling churn and overflow cannot create a fresh full-source job.
     if (dormant_rescan_roots_.contains(root)) return;
-    if (event.needs_full_rescan) {
+    if (event.needs_full_rescan || root_event) {
         pending_rescan_roots_.insert(root);
     } else if (!pending_rescan_roots_.contains(root)) {
         queuePath(path);
@@ -143,7 +144,24 @@ void MainWindow::dispatchSyncJobs() {
         pending_rescan_roots_.clear();
         normal_events_due_ = false;
     }
-    std::vector<SyncFailureScope> retries;
+    std::vector<SyncFailureScope> jobs;
+    const auto queueJob = [&jobs](SyncFailureScope candidate) {
+        candidate.rescan = candidate.rescan || (pathIsWithin(native(candidate.path), native(candidate.root))
+            && pathIsWithin(native(candidate.root), native(candidate.path)));
+        if (candidate.rescan) candidate.path = candidate.root;
+        for (auto it = jobs.begin(); it != jobs.end();) {
+            if (it->root != candidate.root) { ++it; continue; }
+            if (pathIsWithin(native(candidate.path), native(it->path))) return;
+            if (pathIsWithin(native(it->path), native(candidate.path))) it = jobs.erase(it);
+            else ++it;
+        }
+        jobs.push_back(std::move(candidate));
+    };
+    for (const auto& root : rescans) queueJob({root, root, true});
+    for (const auto& path : paths) {
+        const auto root = rootForPath(path);
+        if (!root.isEmpty()) queueJob({root, path, false});
+    }
     for (const auto& key : ready_sync_retries_) {
         if (!sync_failure_scopes_.contains(key) || sync_attempts_.value(key) >= 3) continue;
         const auto scope = sync_failure_scopes_.value(key);
@@ -152,13 +170,14 @@ void MainWindow::dispatchSyncJobs() {
             if (!scope.rescan) dormant_paths_.insert(scope.path);
             continue;
         }
-        retries.push_back(scope);
+        // Normal changes and expired retries share one source-scoped ancestor
+        // merge, so a batch cannot execute the same covered snapshot twice.
+        queueJob(scope);
     }
     ready_sync_retries_.clear();
-    if (paths.isEmpty() && rescans.isEmpty() && retries.empty()) return;
+    if (jobs.empty()) return;
     const auto db_path = db_path_;
-    const auto roots = roots_;
-    startWorker([this, db_path, paths, rescans, roots, retries] {
+    startWorker([this, db_path, jobs] {
         auto process = [&](const QString& root, const QString& path, bool rescan) {
             QString error;
             try {
@@ -178,22 +197,16 @@ void MainWindow::dispatchSyncJobs() {
                 if (!closing_) reportSyncOutcome(root, path, rescan, error);
             }, Qt::QueuedConnection);
         };
-        for (const auto& root : rescans) process(root, root, true);
-        for (const auto& path : paths) {
-            QString best;
-            for (const auto& root : roots) {
-                if (pathIsWithin(native(path), native(root)) && root.size() > best.size()) best = root;
-            }
-            if (!best.isEmpty() && !rescans.contains(best)) process(best, path, false);
-        }
-        for (const auto& retry : retries) {
-            if (!rescans.contains(retry.root)) process(retry.root, retry.path, retry.rescan);
-        }
+        for (const auto& job : jobs) process(job.root, job.path, job.rescan);
     }, QStringLiteral("正在同步文件变化…"), false);
 }
 
-void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error) {
-    const auto key = failureKey(root, path, rescan);
+void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool requested_rescan, const QString& error) {
+    // A root-sized applyPathChange also scans the complete source. It shares
+    // one canonical scope/budget with explicit full rescans and manual rebuilds.
+    const bool rescan = requested_rescan || (pathIsWithin(native(path), native(root))
+        && pathIsWithin(native(root), native(path)));
+    const auto key = failureKey(root, rescan ? root : path, rescan);
     if (error.isEmpty()) {
         // A completed ancestor snapshot proves recovery for every failed scope
         // it covers in the same source. Unrelated and other-source failures stay.
@@ -219,9 +232,10 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         ready_sync_retries_.remove(key);
     } else {
         sync_errors_[key] = QStringLiteral("%1：%2").arg(path, error);
-        sync_failure_scopes_[key] = {root, path, rescan};
+        sync_failure_scopes_[key] = {root, rescan ? root : path, rescan};
         const auto attempts = ++sync_attempts_[key];
         if (attempts < 3) {
+            ready_sync_retries_.remove(key);
             retry_deadlines_.insert(key, QDeadlineTimer(1500 * attempts, Qt::PreciseTimer));
         } else {
             retry_deadlines_.remove(key);

@@ -125,7 +125,9 @@ if(BUILD_TESTS)
         target_compile_definitions(test_ui PRIVATE EVERYTHING_LITE_CLI_PATH="$<TARGET_FILE:everything-lite-cli>")
         add_dependencies(test_ui everything-lite-cli)
         add_test(NAME ui COMMAND test_ui)
-        set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
+        # Real debounce/backoff scenarios need headroom on slower CI/QEMU hosts.
+        # This limits only the whole test process, not any product deadline.
+        set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 180)
     endif()
     add_executable(test_exclusion_policy tests/test_exclusion_policy.cpp)
     target_link_libraries(test_exclusion_policy PRIVATE everything_core)

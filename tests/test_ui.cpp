@@ -217,10 +217,13 @@ class UiTest : public QObject {
         window.pending_paths_.clear(); window.pending_rescan_roots_.clear();
         window.scheduleFileEvent({(root+"/a/file").toStdString(),false,{}});
         window.scheduleFileEvent({(root+"/a").toStdString(),false,{}});
+        QCOMPARE(window.pending_paths_.size(),1); QVERIFY(window.pending_paths_.contains(root+"/a"));
         window.scheduleFileEvent({nested.toStdString(),false,{}});
         window.scheduleFileEvent({root.toStdString(),false,{}});
-        QCOMPARE(window.pending_paths_.size(),2);
-        QVERIFY(window.pending_paths_.contains(root)); QVERIFY(window.pending_paths_.contains(nested));
+        // Root-sized ordinary changes use full-source scopes; the outer
+        // source still cannot absorb the independently configured nested root.
+        QCOMPARE(window.pending_rescan_roots_.size(),2);
+        QVERIFY(window.pending_rescan_roots_.contains(root)); QVERIFY(window.pending_rescan_roots_.contains(nested));
     }
     void userDebounceRespects800msAndLateDelivery() {
         MainWindow window; window.watcher_->stop(); WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
@@ -557,6 +560,128 @@ class UiTest : public QObject {
         QVERIFY(window.dormant_paths_.contains(unrelated)); QVERIFY(window.dormant_rescan_roots_.contains(offline));
         for(const auto& scope:window.sync_failure_scopes_) QVERIFY(scope.path!=child);
         QVERIFY(!db.search("ancestor_offline_cache.txt").empty());
+    }
+    void normalAndReadyRetryMergeOneScope() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), blocked=root+"/blocked", good=dir.filePath("good");
+        QVERIFY(QDir().mkpath(blocked)); QVERIFY(QDir().mkpath(good));
+        QFile cached(blocked+"/merge_retry_cache.txt"); QVERIFY(cached.open(QIODevice::WriteOnly)); cached.close();
+        QFile live(good+"/merge_retry_other.txt"); QVERIFY(live.open(QIODevice::WriteOnly)); live.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={root,good};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        const auto permissions=QFile::permissions(blocked);
+        struct Restore {QString path;QFile::Permissions permissions;~Restore(){QFile::setPermissions(path,permissions);}} restore{blocked,permissions};
+        QVERIFY(QFile::setPermissions(blocked,{}));
+        if (manager.applyPathChange(root.toStdString(),blocked.toStdString()).completed)
+            QSKIP("The current user can traverse this directory despite removed permissions; no real failure fixture is available.");
+        WorkerGate busy; const auto dbPath=window.db_path_;
+        window.startWorker([&window,root,blocked,dbPath,started=busy.started,release=busy.release] {
+            IndexManager manager(dbPath.toStdString());
+            const auto stats=manager.applyPathChange(root.toStdString(),blocked.toStdString());
+            const auto error=stats.completed ? QString{} : QString::fromUtf8(stats.error.c_str());
+            QMetaObject::invokeMethod(&window,[&window,root,blocked,error] {window.reportSyncOutcome(root,blocked,false,error);},Qt::QueuedConnection);
+            started->release(); release->acquire();
+        },QStringLiteral("同步合并夹具"),false);
+        // Queue a normal change before the first failure report reaches the GUI.
+        // It therefore cannot renew/cancel the not-yet-recorded retry scope.
+        window.scheduleFileEvent({blocked.toStdString(),false,{}});
+        window.scheduleFileEvent({live.fileName().toStdString(),false,{}}); window.processPendingEvents();
+        QVERIFY(window.sync_failure_scopes_.isEmpty()); QVERIFY(window.pending_paths_.contains(blocked));
+        QVERIFY(busy.started->tryAcquire(1,3000)); QTRY_COMPARE(window.sync_errors_.size(),1);
+        const auto key=window.sync_failure_scopes_.cbegin().key();
+        QTRY_VERIFY_WITH_TIMEOUT(window.ready_sync_retries_.contains(key),2500);
+        QVERIFY(window.normal_events_due_); busy.release->release();
+        QTRY_VERIFY_WITH_TIMEOUT(window.sync_attempts_.value(key)>=2,2500); QTRY_VERIFY(!window.worker_thread_);
+        QCOMPARE(window.sync_attempts_.value(key),2);
+        QVERIFY(window.retry_deadlines_.contains(key)); QVERIFY(!window.ready_sync_retries_.contains(key));
+        Database db(window.db_path_.toStdString()); QVERIFY(!db.search("merge_retry_other.txt").empty());
+        QVERIFY(!db.search("merge_retry_cache.txt").empty());
+        QVERIFY(QFile::setPermissions(blocked,permissions));
+        window.scheduleFileEvent({blocked.toStdString(),false,{}});
+        QTRY_VERIFY_WITH_TIMEOUT(!window.sync_errors_.contains(key),2500); QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(!window.sync_attempts_.contains(key)); QVERIFY(!window.retry_deadlines_.contains(key));
+        QVERIFY(!window.ready_sync_retries_.contains(key)); QVERIFY(!window.dormant_paths_.contains(blocked));
+    }
+    void ordinaryRootEventUsesFullSourceRetryBudget() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.filePath("paused");
+        QVERIFY(QDir().mkpath(root));
+        QFile cached(root+"/ordinary_root_cache.txt"); QVERIFY(cached.open(QIODevice::WriteOnly)); cached.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={root};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QVERIFY(QDir(root).removeRecursively());
+        window.scheduleFileEvent({root.toStdString(),false,{}}); window.processPendingEvents();
+        QTRY_VERIFY(!window.sync_failure_scopes_.isEmpty());
+        const auto key=window.sync_failure_scopes_.cbegin().key();
+        QVERIFY2(window.sync_failure_scopes_.value(key).rescan,"An ordinary event at the configured root performs a full-source snapshot and must share its full-source budget");
+        QTimer churn; churn.setInterval(100);
+        connect(&churn,&QTimer::timeout,&window,[&] {window.scheduleFileEvent({(root+"/unrelated.txt").toStdString(),false,{}});}); churn.start();
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_rescan_roots_.contains(root),6500);
+        QTRY_VERIFY(!window.worker_thread_); QCOMPARE(window.sync_attempts_.value(key),3);
+        QTest::qWait(900); QCOMPARE(window.sync_attempts_.value(key),3); QVERIFY(!window.worker_thread_);
+        churn.stop(); Database db(window.db_path_.toStdString()); QVERIFY(!db.search("ordinary_root_cache.txt").empty());
+    }
+    void rescheduledBackoffClearsExpiredReadyJob() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), blocked=root+"/blocked", good=dir.filePath("good");
+        QVERIFY(QDir().mkpath(blocked)); QVERIFY(QDir().mkpath(good));
+        QFile cached(blocked+"/ready_cache.txt"); QVERIFY(cached.open(QIODevice::WriteOnly)); cached.close();
+        QFile live(good+"/ready_other_scope.txt"); QVERIFY(live.open(QIODevice::WriteOnly)); live.close();
+        MainWindow window; window.watcher_->stop(); window.roots_={root,good};
+        IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        const auto permissions=QFile::permissions(blocked);
+        struct Restore {QString path;QFile::Permissions permissions;~Restore(){QFile::setPermissions(path,permissions);}} restore{blocked,permissions};
+        QVERIFY(QFile::setPermissions(blocked,{}));
+        if (manager.applyPathChange(root.toStdString(),blocked.toStdString()).completed)
+            QSKIP("The current user can traverse this directory despite removed permissions; no real failure fixture is available.");
+        WorkerGate busy;
+        const auto secondBackoff=std::make_shared<std::atomic<int>>(0);
+        const auto failures=std::make_shared<std::atomic<int>>(0);
+        const auto dbPath=window.db_path_;
+        // Two actual incomplete snapshots share a busy batch. A semaphore
+        // keeps the batch running while the first real retry deadline expires.
+        window.startWorker([&window,root,blocked,dbPath,busyStarted=busy.started,busyRelease=busy.release,secondBackoff,failures] {
+            for(int attempt=1;attempt<=2;++attempt) {
+                IndexManager manager(dbPath.toStdString());
+                const auto stats=manager.applyPathChange(root.toStdString(),blocked.toStdString());
+                if(!stats.completed) ++*failures;
+                const auto error=stats.completed ? QString{} : QString::fromUtf8(stats.error.c_str());
+                QMetaObject::invokeMethod(&window,[&window,root,blocked,error,attempt,secondBackoff] {
+                    window.reportSyncOutcome(root,blocked,false,error);
+                    if(attempt==2) {
+                        QString key;
+                        for(auto it=window.sync_failure_scopes_.cbegin();it!=window.sync_failure_scopes_.cend();++it)
+                            if(it.value().root==root && it.value().path==blocked) key=it.key();
+                        const bool valid=!key.isEmpty() && window.sync_attempts_.value(key)==2
+                            && window.retry_deadlines_.contains(key) && !window.ready_sync_retries_.contains(key);
+                        secondBackoff->store(valid ? 2 : 1);
+                    }
+                },Qt::QueuedConnection);
+                if(attempt==1) {busyStarted->release();busyRelease->acquire();}
+            }
+        },QStringLiteral("同步退避夹具"),false);
+        QVERIFY(busy.started->tryAcquire(1,3000)); QTRY_COMPARE(window.sync_errors_.size(),1);
+        const auto key=window.sync_failure_scopes_.cbegin().key();
+        QTRY_VERIFY_WITH_TIMEOUT(window.ready_sync_retries_.contains(key),2500);
+        QVERIFY(window.worker_thread_); QCOMPARE(window.sync_attempts_.value(key),1);
+        // Another source must still run when the busy worker completes.
+        window.scheduleFileEvent({live.fileName().toStdString(),false,{}}); window.processPendingEvents();
+        busy.release->release(); QTRY_VERIFY(secondBackoff->load()!=0);
+        QCOMPARE(failures->load(),2);
+        QVERIFY2(secondBackoff->load()==2,"A fresh backoff deadline must replace the expired ready marker for the same scope");
+        Database db(window.db_path_.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("ready_other_scope.txt").empty(),2500);
+        QTRY_VERIFY_WITH_TIMEOUT(window.dormant_paths_.contains(blocked),4000);
+        QTRY_VERIFY(!window.worker_thread_); QCOMPARE(window.sync_attempts_.value(key),3);
+        QVERIFY(!window.ready_sync_retries_.contains(key)); QVERIFY(!window.retry_deadlines_.contains(key));
+        QVERIFY(!db.search("ready_cache.txt").empty());
+        QVERIFY(QFile::setPermissions(blocked,permissions));
+        QFile recovered(blocked+"/ready_recovered.txt"); QVERIFY(recovered.open(QIODevice::WriteOnly)); recovered.close();
+        window.scheduleFileEvent({recovered.fileName().toStdString(),false,{}});
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("ready_recovered.txt").empty(),2500); QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(!window.sync_failure_scopes_.contains(key)); QVERIFY(!window.sync_attempts_.contains(key));
+        QVERIFY(!window.sync_errors_.contains(key)); QVERIFY(!window.ready_sync_retries_.contains(key));
+        QVERIFY(!window.retry_deadlines_.contains(key)); QVERIFY(!window.dormant_paths_.contains(blocked));
+        QVERIFY(!db.search("ready_other_scope.txt").empty());
     }
     void relatedChildEventRetainsBackingOffParentScope() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

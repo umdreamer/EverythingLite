@@ -42,9 +42,14 @@ std::vector<std::string> evidenceFields(const std::string& data,std::size_t coun
     for(std::size_t i=0;i<count;++i)fields.push_back(evidenceField(data,offset));
     require(offset==data.size(),"trailing captured evidence fields");return fields;
 }
-void mountFields(const std::vector<std::string>& fields) {
+void mountFields(const std::vector<std::string>& fields,bool child_boundary=false) {
     require(absolute(fields[0]) && !fields[1].empty() && !fields[4].empty(),"invalid captured mount evidence");
-    require(fields[3]=="local" || (!fields[3].empty() && sanitizeRemoteSource("//"+fields[3])==fields[3]),"invalid captured remote evidence");
+    // SourceProbe retains every child boundary for pruning, even when a
+    // nonlocal child's remote syntax cannot establish a reusable identity.
+    // Only child evidence may carry the producer's empty sanitized marker;
+    // owning source evidence still requires local or a sanitized remote share.
+    require((child_boundary && fields[3].empty()) || fields[3]=="local" ||
+        (!fields[3].empty() && sanitizeRemoteSource("//"+fields[3])==fields[3]),"invalid captured remote evidence");
 }
 void validateRequest(const SourceScanRequest& r) {
     const auto& s=r.source;validateSource(s);
@@ -138,7 +143,7 @@ std::vector<std::string> capturedChildMountRoots(const std::string& fingerprint,
         require(previous.empty() || previous<=proof,"unordered captured child mount evidence");previous=proof;
         const auto fields=evidenceFields(proof,2);
         require(absolute(fields[0]) && fields[0]!=canonical_root && pathIsWithin(fields[0],canonical_root),"child mount outside captured root");
-        mountFields(evidenceFields(fields[1],5));roots.push_back(fields[0]);
+        mountFields(evidenceFields(fields[1],5),true);roots.push_back(fields[0]);
     }
     std::sort(roots.begin(),roots.end());roots.erase(std::unique(roots.begin(),roots.end()),roots.end());return roots;
 }

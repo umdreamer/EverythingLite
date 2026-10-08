@@ -113,6 +113,45 @@ void boundaryDecoder(Fixture& f) {
     auto r=f.scanned();sql(r.snapshot_path,"UPDATE snapshot_proof SET boundary_fingerprint='"+proof+"';INSERT INTO snapshot_child_mounts VALUES('"+root+"')");assert(f.db.mergeSourceScanSnapshot(r).completed);
     auto mismatched=f.scanned();sql(mismatched.snapshot_path,"UPDATE snapshot_proof SET boundary_fingerprint='"+proof+"'");f.rejectUnchanged(mismatched);
 }
+// Decode only the known-valid native parent's small captured evidence to
+// supply the producer's RootEvidence. Child proofs themselves are generated
+// by evaluateSourceEvidence, never by a parallel test implementation.
+std::vector<std::string> nativeFields(const std::string& fingerprint) {
+    std::vector<std::string> fields;std::size_t offset=0;
+    for(int i=0;i<7;++i){const auto colon=fingerprint.find(':',offset);assert(colon!=std::string::npos);const auto size=std::stoull(fingerprint.substr(offset,colon-offset));offset=colon+1;assert(size<=fingerprint.size()-offset);fields.push_back(fingerprint.substr(offset,size));offset+=size;}
+    assert(offset==fingerprint.size());return fields;
+}
+void installChildProof(const SourceScanRequest& request,const ProbeResult& evidence) {
+    Connection db(request.snapshot_path);sqlite3_stmt* statement=nullptr;
+    assert(sqlite3_prepare_v2(db.value,"UPDATE snapshot_proof SET boundary_fingerprint=?",-1,&statement,nullptr)==SQLITE_OK);
+    assert(sqlite3_bind_text(statement,1,evidence.boundary_fingerprint.data(),static_cast<int>(evidence.boundary_fingerprint.size()),SQLITE_TRANSIENT)==SQLITE_OK);assert(sqlite3_step(statement)==SQLITE_DONE);sqlite3_finalize(statement);
+    db.exec("DELETE FROM snapshot_child_mounts");
+    assert(sqlite3_prepare_v2(db.value,"INSERT INTO snapshot_child_mounts VALUES(?)",-1,&statement,nullptr)==SQLITE_OK);
+    for(const auto& boundary:evidence.child_mount_boundaries){sqlite3_reset(statement);assert(sqlite3_bind_text(statement,1,boundary.data(),static_cast<int>(boundary.size()),SQLITE_TRANSIENT)==SQLITE_OK);assert(sqlite3_step(statement)==SQLITE_DONE);}sqlite3_finalize(statement);
+}
+void unidentifiedChildProof(Fixture& f) {
+    const auto saved=f.db.source(f.id);const auto fields=nativeFields(saved.mount_fingerprint);assert(fields[3]=="local");
+    RootEvidence root;root.canonical_root=fields[5];root.directory_token=fields[6];
+    root.actual_mount.mount_point=fields[0];root.actual_mount.filesystem=fields[1];root.actual_mount.volume_uuid=fields[2];root.actual_mount.mount_token=fields[4];root.actual_mount.local=true;root.actual_mount.internal=true;
+    for(const auto& filesystem:{std::string("unsupportedfs"),std::string("smbfs")}) {
+        MountEvidence child;child.mount_point=root.canonical_root+"/unknown-child";child.filesystem=filesystem;child.raw_remote_source="//host/share%";child.mount_token="synthetic-child-token";child.local=false;
+        assert(sanitizeRemoteSource(child.raw_remote_source).empty());
+        const auto produced=evaluateSourceEvidence(saved,root,{root.actual_mount,child});
+        assert(produced.update_allowed && produced.identity==saved.identity && produced.mount_fingerprint==saved.mount_fingerprint && produced.child_mount_boundaries==std::vector<std::string>{child.mount_point});
+        auto request=f.scanned();installChildProof(request,produced);
+        bool accepted=false;try{accepted=f.db.mergeSourceScanSnapshot(request).completed;}catch(const std::exception& error){std::cerr<<"child proof admission: "<<error.what()<<"\n";}
+        assert(accepted && "verified native parent must admit producer evidence pruning an unidentified child mount");
+        assert(capturedChildMountRoots(produced.boundary_fingerprint,root.canonical_root)==produced.child_mount_boundaries);
+        // An unidentified child still enforces its pruning boundary. A late
+        // crossing row rolls back the first 1000 changed canonical records.
+        auto crossing=f.scanned();installChildProof(crossing,produced);const auto binding=crossing.source.root+"/unknown-child";
+        sql(crossing.snapshot_path,"UPDATE snapshot_files SET size=size+1 WHERE rowid<=1000;UPDATE snapshot_files SET path='"+binding+"/leak.txt',parent_path='"+binding+"',name='leak.txt',ext='txt',relative_path='unknown-child/leak.txt' WHERE rowid=1001");f.rejectUnchanged(crossing);
+    }
+    const auto credential_mount=field(root.canonical_root+"/unknown-child")+field("smbfs")+field("")+field("synthetic-user:synthetic-password@host/share")+field("synthetic-child-token");
+    assert(rejects([&]{capturedChildMountRoots(field(field(root.canonical_root+"/unknown-child")+field(credential_mount)),root.canonical_root);}));
+    std::string invalid_own;for(std::size_t i=0;i<fields.size();++i)invalid_own+=field(i==3?std::string{}:fields[i]);
+    assert(rejects([&]{capturedSourceCanonicalRoot(invalid_own);}) && "own source evidence must retain strict remote/local validation");
+}
 struct StagingSequence {
     std::string path;std::mutex mutex;std::condition_variable changed;
     bool requested=false,committed=false;std::atomic_bool fired{false};
@@ -168,4 +207,4 @@ void consistentCapture(Fixture& f) {
     }
     stop=true;producer.join();assert(writes>0);
 }
-int main(){Fixture f;basicAndMalformed(f);nestedTopology(f);boundaryDecoder(f);pinnedStagingRead(f);emptySnapshot(f);Fixture concurrent;consistentCapture(concurrent);std::cout<<"source snapshot tests passed\n";}
+int main(){Fixture f;basicAndMalformed(f);nestedTopology(f);boundaryDecoder(f);unidentifiedChildProof(f);pinnedStagingRead(f);emptySnapshot(f);Fixture concurrent;consistentCapture(concurrent);std::cout<<"source snapshot tests passed\n";}

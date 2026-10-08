@@ -38,6 +38,7 @@ add_library(everything_core
     src/core/scanner.cpp
     src/core/database.cpp
     src/core/source_catalog.cpp
+    src/core/source_probe.cpp
     src/core/search_engine.cpp
     src/core/search_service.cpp
     src/core/search_trace.cpp
@@ -53,7 +54,8 @@ target_compile_definitions(everything_core PUBLIC EVERYTHING_LITE_VERSION="${PRO
 if(APPLE)
     target_sources(everything_core PRIVATE src/platform/mac_fsevents_watcher.cpp)
     find_library(CORESERVICES_FRAMEWORK CoreServices REQUIRED)
-    target_link_libraries(everything_core PUBLIC ${CORESERVICES_FRAMEWORK})
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    target_link_libraries(everything_core PUBLIC ${CORESERVICES_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(everything_core PRIVATE src/platform/linux_inotify_watcher.cpp)
 endif()
@@ -132,6 +134,10 @@ if(BUILD_TESTS)
     add_executable(test_exclusion_policy tests/test_exclusion_policy.cpp)
     target_link_libraries(test_exclusion_policy PRIVATE everything_core)
     add_test(NAME exclusion_policy COMMAND test_exclusion_policy)
+    add_executable(test_source_probe tests/test_source_probe.cpp)
+    target_link_libraries(test_source_probe PRIVATE everything_core)
+    add_test(NAME source_probe COMMAND test_source_probe)
+    set_tests_properties(source_probe PROPERTIES TIMEOUT 30)
     add_executable(test_source_catalog tests/test_source_catalog.cpp)
     target_link_libraries(test_source_catalog PRIVATE everything_core)
     add_test(NAME source_catalog COMMAND test_source_catalog)

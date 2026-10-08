@@ -10,12 +10,41 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <cerrno>
 #endif
 using namespace everything_lite;
 static MountEvidence local(std::string path, std::string uuid, std::string token) {
     MountEvidence e; e.mount_point=path; e.filesystem="apfs"; e.volume_uuid=uuid; e.mount_token=token; e.local=true; e.internal=true; return e;
 }
+static void encodedRemoteTests(bool output_only=false) {
+    // Synthetic markers only; no real account/userinfo fixture.
+    const std::vector<std::string> ambiguous={
+        "smb://synthetic-owner/synthetic-secret%40host/share",
+        "//synthetic-owner/synthetic-secret%2540host/share",
+        "//host/share%00synthetic-secret", "//host/share%0asynthetic-secret",
+        "//host/share%7Fsynthetic-secret", "//synthetic-owner/synthetic-secret%3Aencoded%40host/share",
+        "//synthetic-owner/synthetic-secret%2Fhost/share", "//host/share%5csynthetic-secret",
+        "//host/share%3Fpassword=synthetic-secret", "//host/share%23synthetic-secret",
+        "//host/share%", "//host/share;password=synthetic-secret"
+    };
+    for(const auto& raw:ambiguous) {
+        if(!output_only) assert(sanitizeRemoteSource(raw).empty() && "reject encoded credential delimiter/control ambiguity before output");
+        RootEvidence root; root.canonical_root="/synthetic/root"; root.directory_token="synthetic-directory";
+        root.actual_mount.mount_point=root.canonical_root; root.actual_mount.filesystem="smbfs";
+        root.actual_mount.raw_remote_source=raw; root.actual_mount.mount_token="synthetic-mount";
+        const auto rejected=evaluateSourceEvidence({},root,{root.actual_mount});
+        assert(rejected.identity.empty() && !rejected.update_allowed && "ambiguous source cannot produce a reusable identity");
+        assert(rejected.mount_fingerprint.find("synthetic-secret")==std::string::npos);
+        auto child=root.actual_mount; child.mount_point="/synthetic/root/nested";
+        root.actual_mount=local("/synthetic/root","synthetic-uuid","synthetic-mount");
+        const auto boundaries=evaluateSourceEvidence({},root,{root.actual_mount,child});
+        assert(boundaries.boundary_fingerprint.find("synthetic-secret")==std::string::npos);
+    }
+    assert(sanitizeRemoteSource("//host/share%20name")=="host/share%20name");
+}
 static void pureTests() {
+    encodedRemoteTests();
     assert(sanitizeRemoteSource("smb://alice:secret@SERVER/share")=="server/share");
     assert(sanitizeRemoteSource("//user:p%40ss%2Fword@server/share")=="server/share");
     assert(sanitizeRemoteSource("smb://user:p@ss@host/share")=="host/share");
@@ -93,6 +122,25 @@ static int fdCount() {
     for(int fd=0;fd<1024;++fd) if(fcntl(fd,F_GETFD)!=-1) ++count;
     return count;
 }
+// fdopendir takes ownership on success. Actual readdir + fstatat evidence, not
+// an inference from open(2), decides whether the chmod restriction is bypassed.
+static bool enumerateAndStatSentinel(int fd) {
+    DIR* directory=fdopendir(fd);
+    if(!directory) {close(fd);return false;}
+    bool found=false, metadata=false, complete=false;
+    for(;;) {
+        errno=0;
+        const auto entry=readdir(directory);
+        if(!entry) {complete=errno==0;break;}
+        if(std::string(entry->d_name)=="permission-sentinel") {
+            found=true;
+            struct stat child{};
+            metadata=fstatat(dirfd(directory),entry->d_name,&child,0)==0 && S_ISREG(child.st_mode) && child.st_size==8;
+        }
+    }
+    closedir(directory);
+    return complete && found && metadata;
+}
 static void nativeTests() {
     auto base=fs::temp_directory_path()/("everything-lite-probe-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(base/"root"); fs::create_directories(base/"other");
@@ -146,15 +194,34 @@ static void nativeTests() {
     const int before=fdCount();
     for(int i=0;i<80;++i) {auto short_scan=beginSourceProbe(saved); assert(short_scan.result().update_allowed==has_uuid);}
     assert(fdCount()==before && "RAII must release each single-scan directory fd");
+    std::ofstream(base/"root"/"permission-sentinel")<<"sentinel";
+    // Establish that the independent fixture is actually enumerable/stat-able
+    // before restricting it, so a missing fixture cannot become a false skip.
+    const int baseline=open(saved.root.c_str(),O_RDONLY|O_DIRECTORY);
+    assert(baseline>=0 && enumerateAndStatSentinel(baseline));
     assert(chmod(saved.root.c_str(),0000)==0);
     const int permission_check=open(saved.root.c_str(),O_RDONLY|O_DIRECTORY);
-    if(permission_check>=0) {close(permission_check); std::cout<<"SKIP native permission-denied: host UID can open chmod(0000) directory\n";}
-    else assert(beginSourceProbe(saved).result().status==SourceStatus::Failed);
+    if(permission_check<0) {
+        const auto permission_error=errno;
+        assert(permission_error==EACCES || permission_error==EPERM);
+        assert(beginSourceProbe(saved).result().status==SourceStatus::Failed);
+        std::cout<<"native permission-denied: root open rejected and probe reported Failed\n";
+    } else if(enumerateAndStatSentinel(permission_check)) {
+        std::cout<<"SKIP native permission-denied: host UID enumerated chmod(0000) sentinel and read its metadata\n";
+    } else {
+        // Root-open success is weaker than traversal permission. This module
+        // does not promise directory enumeration; the future Scanner must reject
+        // traversal failure before committing any successful scan.
+        const auto root_only=beginSourceProbe(saved).result();
+        assert(root_only.status!=SourceStatus::Offline);
+        std::cout<<"INFO native permission: root open succeeded but sentinel traversal failed; root-only probe does not establish traversal\n";
+    }
     assert(chmod(saved.root.c_str(),0700)==0);
     fs::remove_all(base);
 }
 #endif
-int main() {
+int main(int argc, char** argv) {
+    if(argc==2 && std::string(argv[1])=="encoded-output") {encodedRemoteTests(true);return 0;}
     pureTests();
 #if defined(__APPLE__)
     nativeTests();

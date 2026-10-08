@@ -30,8 +30,26 @@ std::string sanitizeRemoteSource(const std::string& raw) {
     const auto slash=source.find('/');
     if(slash==std::string::npos || slash==0 || slash+1==source.size()) return {};
     std::string authority=source.substr(0,slash), path=source.substr(slash);
-    // Literal @ in share paths is ambiguous (possibly a malformed credential).
-    if(path.find('@')!=std::string::npos) return {};
+    // A misplaced userinfo delimiter may be escaped or nested-escaped. Refuse
+    // ambiguous path syntax instead of preserving a possible credential. Do not
+    // decode/re-emit the source: reject encoded structural delimiters/controls,
+    // including %25 (which could acquire a new delimiter after another decode).
+    if(path.find_first_of("@:;")!=std::string::npos) return {};
+    const auto hex=[](unsigned char c) {
+        if(c>='0' && c<='9') return c-'0';
+        if(c>='a' && c<='f') return c-'a'+10;
+        if(c>='A' && c<='F') return c-'A'+10;
+        return -1;
+    };
+    for(std::size_t i=0;i<path.size();++i) {
+        if(path[i]!='%') continue;
+        if(i+2>=path.size()) return {};
+        const auto high=hex(path[i+1]), low=hex(path[i+2]);
+        if(high<0 || low<0) return {};
+        const auto decoded=static_cast<unsigned char>(high*16+low);
+        if(decoded<32 || decoded==127 || std::string("@:/\\?#%;").find(decoded)!=std::string::npos) return {};
+        i+=2;
+    }
     const auto at=authority.rfind('@');
     if(at!=std::string::npos) authority.erase(0,at+1);
     else {

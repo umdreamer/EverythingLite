@@ -48,6 +48,8 @@ public:
     // This is a pre/post guard, not an atomic filesystem snapshot. A Scanner must
     // verify actual mount membership when entering directories and prune nested
     // configured sources too. Lexical boundaries alone miss firmlink aliases.
+    // Root-open/metadata evidence does not establish directory enumeration
+    // permission. Scanner must reject enumeration/read failures before success.
     // Avoid metadata probes for every ordinary file; directory entry guards are
     // the later Scanner integration contract. No persistent GUI-held descriptor.
     ProbeResult finish();

@@ -4,6 +4,7 @@
 #include "core/search_engine.h"
 #include "core/search_service.h"
 #include "core/search_trace.h"
+#include "core/scan_request.h"
 
 #include <algorithm>
 #include <chrono>
@@ -97,21 +98,20 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        std::string db_path = defaultDatabasePath();
-        // Global diagnostic switches may precede the command.
+        // Parse global options without environment or default-path effects.
+        // A value named "scan-helper" is consumed as a value, never dispatched.
+        std::string explicit_db;
+        bool db_seen=false, trace_seen=false;
         for (;;) {
             if (!args.empty() && args[0] == "--trace-search") {
-#if defined(_WIN32)
-                _putenv_s("EVERYTHING_LITE_SEARCH_TRACE", "1");
-#else
-                setenv("EVERYTHING_LITE_SEARCH_TRACE", "1", 1);
-#endif
+                trace_seen=true;
                 args.erase(args.begin());
                 continue;
             }
-            if (args.size() >= 2 && args[0] == "--db") {
-                db_path = args[1];
-                args.erase(args.begin(), args.begin() + 2);
+            if (!args.empty() && args[0] == "--db") {
+                if(args.size()<2) throw std::invalid_argument("--db requires a path");
+                db_seen=true;explicit_db=args[1];
+                args.erase(args.begin(),args.begin()+2);
                 continue;
             }
             break;
@@ -120,8 +120,34 @@ int main(int argc, char** argv) {
             usage();
             return 2;
         }
-
         const std::string command = args[0];
+        if(command=="scan-helper") {
+            if(db_seen || trace_seen) throw std::invalid_argument("scan-helper rejects database and search diagnostic options");
+            if(args.size()!=5 || args[1]!="--request" || args[3]!="--nonce")
+                throw std::invalid_argument("scan-helper requires --request ABS --nonce TOKEN");
+            const auto task=readScanTask(args[2]);
+            if(args[4]!=task.scan.nonce) throw std::invalid_argument("scan-helper nonce mismatch");
+            SourceScanLock lock(task);
+            // A helper can remain alive during output/exit flush. Transfer to OS
+            // process lifetime before any scan, failure or completion output.
+            lock.releaseToProcess();
+            const auto result=scanSourceToSnapshot(task.scan);
+            if(!result.stats.completed || result.snapshot_path.empty()) {
+                std::cerr<<"scan-helper failed: "<<result.stats.error<<"\n";
+                return 1;
+            }
+            std::cout<<"completed=1 staged="<<result.staged<<"\n";
+            return 0;
+        }
+
+        std::string db_path = db_seen ? explicit_db : defaultDatabasePath();
+        if(trace_seen) {
+#if defined(_WIN32)
+            _putenv_s("EVERYTHING_LITE_SEARCH_TRACE", "1");
+#else
+            setenv("EVERYTHING_LITE_SEARCH_TRACE", "1", 1);
+#endif
+        }
 
         if (command == "db-path") {
             std::cout << db_path << "\n";

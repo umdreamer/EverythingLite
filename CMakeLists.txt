@@ -40,6 +40,7 @@ add_library(everything_core
     src/core/source_catalog.cpp
     src/core/source_probe.cpp
     src/core/source_scan.cpp
+    src/core/scan_request.cpp
     src/core/search_engine.cpp
     src/core/search_service.cpp
     src/core/search_trace.cpp
@@ -136,6 +137,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_exclusion_policy PRIVATE everything_core)
     add_test(NAME exclusion_policy COMMAND test_exclusion_policy)
     if(APPLE)
+        add_executable(test_scan_request tests/test_scan_request.cpp)
+        target_link_libraries(test_scan_request PRIVATE everything_core)
+        add_test(NAME scan_request COMMAND test_scan_request)
+        set_tests_properties(scan_request PROPERTIES TIMEOUT 30)
         add_executable(test_source_scan tests/test_source_scan.cpp)
         target_link_libraries(test_source_scan PRIVATE everything_core)
         add_test(NAME source_scan COMMAND test_source_scan)
@@ -160,6 +165,11 @@ if(BUILD_TESTS)
         add_test(NAME cli_parity COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/tests/check_cli_parity.py $<TARGET_FILE:everything-lite-cli>)
         set_tests_properties(cli_parity PROPERTIES TIMEOUT 60)
+        if(APPLE)
+            add_test(NAME cli_scan COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/check_cli_scan.py $<TARGET_FILE:everything-lite-cli> $<TARGET_FILE:test_scan_request>)
+            set_tests_properties(cli_scan PROPERTIES TIMEOUT 90)
+        endif()
         add_test(NAME cli_excludes COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/tests/check_cli_excludes.py $<TARGET_FILE:everything-lite-cli>)
         set_tests_properties(cli_excludes PROPERTIES TIMEOUT 60)

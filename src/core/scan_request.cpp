@@ -1,6 +1,7 @@
 #include "core/scan_request.h"
 #include "core/path_utils.h"
 #include <filesystem>
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 #if defined(__APPLE__)
@@ -23,45 +24,48 @@ void paths(const std::vector<std::string>& list){require(list.size()<=maxEntries
 // mount point, filesystem, UUID, sanitized share/local marker, mount token,
 // canonical root, directory token. Parsing this evidence never probes the root.
 // Current identity and path membership are checked by SourceScan AFTER flock.
-std::string capturedCanonicalRoot(const std::string& fingerprint) {
-    cleanText(fingerprint);
-    std::size_t offset=0;
-    std::vector<std::string> fields;
-    for(int field=0;field<7;++field) {
-        require(offset<fingerprint.size(),"truncated captured source fingerprint");
-        const auto first=offset;
-        std::size_t length=0;
-        while(offset<fingerprint.size() && fingerprint[offset]>='0' && fingerprint[offset]<='9') {
-            const auto digit=static_cast<std::size_t>(fingerprint[offset++]-'0');
-            require(length<=(maxText-digit)/10,"captured source fingerprint length out of range");
-            length=length*10+digit;
-        }
-        require(offset>first && (offset==first+1 || fingerprint[first]!='0') &&
-            offset<fingerprint.size() && fingerprint[offset]==':',"invalid captured source fingerprint length");
-        ++offset;
-        require(length<=fingerprint.size()-offset,"truncated captured source fingerprint field");
-        fields.push_back(fingerprint.substr(offset,length));
-        offset+=length;
+std::string evidenceField(const std::string& data,std::size_t& offset) {
+    require(offset<data.size(),"truncated captured evidence");
+    const auto first=offset;std::size_t length=0;
+    while(offset<data.size() && data[offset]>='0' && data[offset]<='9') {
+        const auto digit=static_cast<std::size_t>(data[offset++]-'0');
+        require(length<=(maxText-digit)/10,"captured evidence length out of range");
+        length=length*10+digit;
     }
-    require(offset==fingerprint.size(),"trailing captured source fingerprint fields");
-    require(absolute(fields[0]) && !fields[1].empty() && !fields[4].empty() &&
-        absolute(fields[5]) && !fields[6].empty(),"invalid captured canonical source evidence");
-    return fields[5];
+    require(offset>first && (offset==first+1 || data[first]!='0') &&
+        offset<data.size() && data[offset]==':',"invalid captured evidence length");
+    ++offset;require(length<=data.size()-offset,"truncated captured evidence field");
+    auto result=data.substr(offset,length);offset+=length;return result;
 }
-void validate(const ScanTask& task) {
-    const auto& r=task.scan;const auto& s=r.source;validateSource(s);
+std::vector<std::string> evidenceFields(const std::string& data,std::size_t count) {
+    cleanText(data);std::size_t offset=0;std::vector<std::string> fields;
+    for(std::size_t i=0;i<count;++i)fields.push_back(evidenceField(data,offset));
+    require(offset==data.size(),"trailing captured evidence fields");return fields;
+}
+void mountFields(const std::vector<std::string>& fields) {
+    require(absolute(fields[0]) && !fields[1].empty() && !fields[4].empty(),"invalid captured mount evidence");
+    require(fields[3]=="local" || (!fields[3].empty() && sanitizeRemoteSource("//"+fields[3])==fields[3]),"invalid captured remote evidence");
+}
+void validateRequest(const SourceScanRequest& r) {
+    const auto& s=r.source;validateSource(s);
     require(s.id>0 && s.status==SourceStatus::Accessible && !s.identity.empty() && !s.mount_fingerprint.empty(),"task requires verified source evidence");
     require(s.last_check>=0 && s.last_success>=0 && s.policy_revision>=0 && s.policy_revision==r.policy.revision,"invalid task source revision or timestamp");
     cleanText(s.label);cleanText(s.identity);
-    const auto captured_root=capturedCanonicalRoot(s.mount_fingerprint);
-    require(absolute(s.root) && absolute(r.scan_path) && absolute(r.snapshot_path) && absolute(task.lock_path),"task paths must be normalized absolute paths");
-    require(pathIsWithin(r.scan_path,s.root) && !pathIsWithin(r.snapshot_path,s.root) && !pathIsWithin(task.lock_path,s.root),"task scope or private output outside allowed boundary");
-    require(!pathIsWithin(r.snapshot_path,captured_root) && !pathIsWithin(task.lock_path,captured_root),"private output cannot be inside captured canonical source root");
-    require(std::filesystem::path(task.lock_path).filename().string()=="source-"+std::to_string(s.id)+".scan.lock","invalid persistent source lock name");
+    const auto captured_root=capturedSourceCanonicalRoot(s.mount_fingerprint);
+    require(absolute(s.root) && absolute(r.scan_path) && absolute(r.snapshot_path),"task paths must be normalized absolute paths");
+    require(pathIsWithin(r.scan_path,s.root) && !pathIsWithin(r.snapshot_path,s.root),"task scope or private output outside allowed boundary");
+    require(!pathIsWithin(r.snapshot_path,captured_root),"private output cannot be inside captured canonical source root");
     require(!r.nonce.empty() && r.nonce.size()<=256,"invalid task nonce");
     for(unsigned char c:r.nonce)require((c>='A' && c<='Z') || (c>='a' && c<='z') || (c>='0' && c<='9') || c=='-' || c=='_',"invalid task nonce");
     paths(r.nested_source_roots);paths(r.policy.rules().directories);paths(r.policy.rules().files);
     cleanText(r.policy.rules().folder_filter);cleanText(r.policy.rules().file_filter);
+}
+void validate(const ScanTask& task) {
+    validateRequest(task.scan);
+    const auto& r=task.scan;const auto& s=r.source;
+    require(absolute(task.lock_path) && !pathIsWithin(task.lock_path,s.root),"task lock outside allowed boundary");
+    require(!pathIsWithin(task.lock_path,capturedSourceCanonicalRoot(s.mount_fingerprint)),"private output cannot be inside captured canonical source root");
+    require(std::filesystem::path(task.lock_path).filename().string()=="source-"+std::to_string(s.id)+".scan.lock","invalid persistent source lock name");
 }
 // Canonical little-endian framing. Each field has an explicit type byte; integer,
 // text and list tags are distinct. Fixed field order and exact singleton counts
@@ -119,6 +123,25 @@ struct PrivateFile {
 };
 #endif
 }
+void validateSourceScanRequest(const SourceScanRequest& request) { validateRequest(request); }
+std::string capturedSourceCanonicalRoot(const std::string& fingerprint) {
+    const auto fields=evidenceFields(fingerprint,7);mountFields(fields);
+    require(absolute(fields[5]) && !fields[6].empty(),"invalid captured canonical source evidence");
+    return fields[5];
+}
+std::vector<std::string> capturedChildMountRoots(const std::string& fingerprint,const std::string& canonical_root) {
+    cleanText(fingerprint);require(absolute(canonical_root),"invalid captured canonical root");
+    std::size_t offset=0;std::vector<std::string> roots;std::string previous;
+    while(offset<fingerprint.size()) {
+        require(roots.size()<maxEntries,"too many captured child mounts");
+        const auto proof=evidenceField(fingerprint,offset);
+        require(previous.empty() || previous<=proof,"unordered captured child mount evidence");previous=proof;
+        const auto fields=evidenceFields(proof,2);
+        require(absolute(fields[0]) && fields[0]!=canonical_root && pathIsWithin(fields[0],canonical_root),"child mount outside captured root");
+        mountFields(evidenceFields(fields[1],5));roots.push_back(fields[0]);
+    }
+    std::sort(roots.begin(),roots.end());roots.erase(std::unique(roots.begin(),roots.end()),roots.end());return roots;
+}
 ScanTask::ScanTask(SourceScanRequest request,std::string lock):scan(std::move(request)),lock_path(std::move(lock)){validate(*this);}
 void writeScanTask(const std::string& path,const ScanTask& task) {
 #if defined(__APPLE__)
@@ -129,7 +152,7 @@ void writeScanTask(const std::string& path,const ScanTask& task) {
     out.number(r.policy.revision);out.list(r.policy.rules().directories);out.list(r.policy.rules().files);out.text(r.policy.rules().folder_filter);out.text(r.policy.rules().file_filter);
     out.list(r.nested_source_roots);out.text(r.scan_path);out.text(r.snapshot_path);out.text(r.nonce);out.text(task.lock_path);
     require(!pathIsWithin(path,s.root),"task manifest cannot be inside source root");
-    PrivateFile file(path,true,false,capturedCanonicalRoot(s.mount_fingerprint));
+    PrivateFile file(path,true,false,capturedSourceCanonicalRoot(s.mount_fingerprint));
     std::size_t offset=0;while(offset<out.data.size()){auto n=write(file.file.value,out.data.data()+offset,out.data.size()-offset);if(n<0 && errno==EINTR)continue;require(n>0,"task manifest write failed");offset+=static_cast<std::size_t>(n);}
     require(fsync(file.file.value)==0 && file.unchanged(),"task manifest changed during write");
 #else
@@ -149,7 +172,7 @@ ScanTask readScanTask(const std::string& path) {
     auto revision=in.number();ExclusionRules rules;rules.directories=in.list();rules.files=in.list();rules.folder_filter=in.text();rules.file_filter=in.text();
     paths(rules.directories);paths(rules.files); // validate before policy normalization
     auto nested=in.list();auto scope=in.text(),snapshot=in.text(),nonce=in.text(),lock=in.text();require(in.pos==bytes.size(),"trailing task data");
-    require(!pathIsWithin(path,s.root),"task manifest cannot be inside source root");file.outside(capturedCanonicalRoot(s.mount_fingerprint));
+    require(!pathIsWithin(path,s.root),"task manifest cannot be inside source root");file.outside(capturedSourceCanonicalRoot(s.mount_fingerprint));
     return ScanTask({std::move(s),ExclusionPolicy(std::move(rules),revision),std::move(nested),std::move(scope),std::move(snapshot),std::move(nonce)},std::move(lock));
 #else
     (void)path;throw std::runtime_error("native scan task backend unsupported");
@@ -157,7 +180,7 @@ ScanTask readScanTask(const std::string& path) {
 }
 SourceScanLock::SourceScanLock(const ScanTask& task) {
 #if defined(__APPLE__)
-    validate(task);PrivateFile file(task.lock_path,false,true,capturedCanonicalRoot(task.scan.source.mount_fingerprint));
+    validate(task);PrivateFile file(task.lock_path,false,true,capturedSourceCanonicalRoot(task.scan.source.mount_fingerprint));
     require(flock(file.file.value,LOCK_EX|LOCK_NB)==0,"source scan lock is busy or unavailable");
     require(file.unchanged(),"source scan lock changed during acquisition");fd_=file.file.value;file.file.value=-1;
 #else

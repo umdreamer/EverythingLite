@@ -9,6 +9,11 @@ struct ScanTask {
     const std::string lock_path;
     ScanTask(SourceScanRequest request, std::string persistent_lock_path);
 };
+// Pure validation/decoding of captured evidence; never opens a source path.
+void validateSourceScanRequest(const SourceScanRequest& request);
+std::string capturedSourceCanonicalRoot(const std::string& fingerprint);
+std::vector<std::string> capturedChildMountRoots(const std::string& fingerprint,
+    const std::string& canonical_root);
 void writeScanTask(const std::string& manifest_path, const ScanTask& task);
 ScanTask readScanTask(const std::string& manifest_path);
 class SourceScanLock {

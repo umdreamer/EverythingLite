@@ -3,6 +3,7 @@
 #include "core/file_record.h"
 #include "core/exclusion_policy.h"
 #include "core/search_query.h"
+#include "core/source_scan.h"
 
 #include <atomic>
 #include <cstdint>
@@ -36,6 +37,17 @@ public:
     IndexStats mergeSourceSnapshotFile(const SourceRecord& expected,
                                       const std::string& snapshot_database,
                                       const std::string& subtree_relative = {}) const;
+    // One read transaction captures source, policy and strict descendant roots
+    // by value. Empty scan_path means source.root; no source filesystem access,
+    // identity binding or job/output files are created.
+    SourceScanRequest captureSourceScanRequest(std::int64_t id,
+        const std::string& scan_path, const std::string& snapshot_path,
+        const std::string& nonce) const;
+    // Production handoff: mandatory nonce/proof and fixed staging read view.
+    // Caller must wait for actual helper exit and closed staging writers.
+    // Source, policy and topology guards run in the main write transaction;
+    // every failure rolls back all canonical changes, including prior batches.
+    IndexStats mergeSourceScanSnapshot(const SourceScanRequest& captured) const;
     std::string migrationBackupPath() const;
     ExclusionPolicy exclusionPolicy() const;
     // Validates first; atomically replaces rules, increments revision and purges

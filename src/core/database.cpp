@@ -1,5 +1,6 @@
 #include "core/database.h"
 #include "core/path_utils.h"
+#include "core/scan_request.h"
 #include "core/search_trace.h"
 
 #include <sqlite3.h>
@@ -199,6 +200,39 @@ SourceRecord getSource(sqlite3* db, std::int64_t id) {
     source.policy_revision=getPolicy(db).revision;
     return source;
 }
+bool normalizedAbsolute(const std::string& path) {
+    return !path.empty() && path.front()=='/' && path.find('\0')==std::string::npos && normalizePath(path)==path;
+}
+std::vector<std::string> nestedSourceRoots(sqlite3* db,const SourceRecord& source) {
+    auto stmt=prepare(db,"SELECT root FROM sources WHERE id<>?");sqlite3_bind_int64(stmt.get(),1,source.id);
+    std::vector<std::string> roots;int rc;
+    while((rc=sqlite3_step(stmt.get()))==SQLITE_ROW) {
+        const auto root=normalizePath(columnText(stmt.get(),0));
+        if(root!=source.root && pathIsWithin(root,source.root))roots.push_back(root);
+    }
+    if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db));
+    std::sort(roots.begin(),roots.end());roots.erase(std::unique(roots.begin(),roots.end()),roots.end());return roots;
+}
+std::string snapshotText(sqlite3_stmt* stmt,int column) {
+    if(sqlite3_column_type(stmt,column)!=SQLITE_TEXT)throw std::runtime_error("snapshot text field type mismatch");
+    const auto* bytes=sqlite3_column_text(stmt,column);const auto size=sqlite3_column_bytes(stmt,column);
+    if(!bytes)throw std::runtime_error("unable to read snapshot text");
+    std::string text(reinterpret_cast<const char*>(bytes),static_cast<std::size_t>(size));
+    if(text.find('\0')!=std::string::npos)throw std::runtime_error("snapshot text contains NUL");return text;
+}
+std::int64_t snapshotInteger(sqlite3_stmt* stmt,int column) {
+    if(sqlite3_column_type(stmt,column)!=SQLITE_INTEGER)throw std::runtime_error("snapshot integer field type mismatch");
+    return sqlite3_column_int64(stmt,column);
+}
+std::vector<std::string> snapshotRoots(sqlite3* db,const char* query,const std::string& owning_root) {
+    auto stmt=prepare(db,query);std::vector<std::string> roots;int rc;
+    while((rc=sqlite3_step(stmt.get()))==SQLITE_ROW) {
+        auto root=snapshotText(stmt.get(),0);
+        if(!normalizedAbsolute(root) || root==owning_root || !pathIsWithin(root,owning_root))throw std::runtime_error("snapshot boundary outside owning root");
+        if(!roots.empty() && roots.back()>=root)throw std::runtime_error("duplicate or unordered snapshot boundary");roots.push_back(std::move(root));
+    }
+    if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db));return roots;
+}
 std::int64_t sourceForRoot(sqlite3* db, const std::string& root, bool create) {
     auto stmt=prepare(db,"SELECT id FROM sources WHERE root=? ORDER BY id");
     bindText(stmt.get(),1,normalizePath(root));
@@ -386,7 +420,9 @@ void validateScope(const std::string& scope) {
 }
 IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expected,
                          const std::function<bool(std::vector<FileRecord>&)>& next,
-                         const std::string& scope) {
+                         const std::string& scope,
+                         const std::function<void(sqlite3*)>& admission={},
+                         const ExclusionPolicy* captured_policy=nullptr) {
     validateScope(scope);
     // Snapshot membership grows with the source. Keep its temporary B-tree on
     // disk, while the record transfer remains bounded to batches of 1000.
@@ -396,8 +432,10 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         const auto s=getSource(conn.get(),expected.id);
         if(s.revision!=expected.revision || s.identity!=expected.identity || s.root!=expected.root || s.mount_fingerprint!=expected.mount_fingerprint)
             throw std::runtime_error("source binding changed during scan");
-        const auto policy=getPolicy(conn.get());
-        if(policy.revision!=expected.policy_revision) throw std::runtime_error("exclusion policy changed during scan");
+        const auto current_policy=getPolicy(conn.get());
+        const auto& policy=captured_policy?*captured_policy:current_policy;
+        if(current_policy.revision!=expected.policy_revision || policy.revision!=expected.policy_revision) throw std::runtime_error("exclusion policy changed during scan");
+        if(admission)admission(conn.get());
         conn.exec("CREATE TEMP TABLE snapshot_keys(relative_path TEXT PRIMARY KEY);");
         auto keys=prepare(conn.get(),"INSERT INTO snapshot_keys VALUES(?)");
         std::vector<FileRecord> records; std::uint64_t count=0;
@@ -912,6 +950,77 @@ IndexStats Database::mergeSourceSnapshotFile(const SourceRecord& expected,
         }
         return !batch.empty();
     },subtree_relative);
+}
+
+SourceScanRequest Database::captureSourceScanRequest(std::int64_t id,
+    const std::string& scan_path,const std::string& snapshot_path,const std::string& nonce) const {
+    if(id<=0)throw std::invalid_argument("invalid source id");
+    SqliteConnection conn(db_path_);conn.exec("BEGIN;");
+    auto stmt=prepare(conn.get(),std::string("SELECT ")+sourceColumns+" FROM sources WHERE id=?");sqlite3_bind_int64(stmt.get(),1,id);
+    if(sqlite3_step(stmt.get())!=SQLITE_ROW)throw std::runtime_error("source not found");
+    auto source=readSource(stmt.get());const auto policy=getPolicy(conn.get());source.policy_revision=policy.revision;
+    SourceScanRequest request{source,policy,nestedSourceRoots(conn.get(),source),scan_path.empty()?source.root:scan_path,snapshot_path,nonce};
+    validateSourceScanRequest(request);
+    for(const auto& root:request.nested_source_roots)if(pathIsWithin(request.scan_path,root))throw std::invalid_argument("scan scope belongs to nested source");
+    if(normalizePath(snapshot_path)==normalizePath(db_path_))throw std::invalid_argument("snapshot must be a separate database");
+    return request;
+}
+IndexStats Database::mergeSourceScanSnapshot(const SourceScanRequest& captured) const {
+    validateSourceScanRequest(captured);
+    const auto& expected=captured.source;
+    const auto canonical=capturedSourceCanonicalRoot(expected.mount_fingerprint);
+    const auto relative=relativeTo(captured.scan_path,expected.root);const auto scope=relative=="."?std::string{}:relative;
+    // Fixed captured topology is a strict, normalized, sorted set. The helper
+    // prunes these roots regardless of their current accessibility status.
+    const auto& nested=captured.nested_source_roots;
+    for(std::size_t i=0;i<nested.size();++i) {
+        if(nested[i]==expected.root || !pathIsWithin(nested[i],expected.root) || (i && nested[i-1]>=nested[i]))throw std::invalid_argument("invalid captured nested source set");
+        if(pathIsWithin(captured.scan_path,nested[i]))throw std::invalid_argument("scan scope belongs to nested source");
+    }
+    if(normalizePath(captured.snapshot_path)==normalizePath(db_path_))throw std::invalid_argument("snapshot must be a separate database");
+    sqlite3* raw=nullptr;
+    if(sqlite3_open_v2(captured.snapshot_path.c_str(),&raw,SQLITE_OPEN_READONLY|SQLITE_OPEN_FULLMUTEX,nullptr)!=SQLITE_OK) {
+        if(raw)sqlite3_close(raw);throw std::runtime_error("unable to open snapshot database");
+    }
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> staging(raw,sqlite3_close);
+    // Proof and all bounded record reads share this one pinned staging view.
+    // Production callers still wait for the helper's actual exit and closed
+    // writer; WAL concurrency consistency is not a hostile same-UID guarantee.
+    if(sqlite3_exec(raw,"BEGIN",nullptr,nullptr,nullptr)!=SQLITE_OK)throw std::runtime_error("unable to read snapshot");
+    auto complete=prepare(raw,"SELECT complete FROM snapshot_metadata");
+    if(sqlite3_step(complete.get())!=SQLITE_ROW || snapshotInteger(complete.get(),0)!=1 || sqlite3_step(complete.get())!=SQLITE_DONE)throw std::runtime_error("snapshot is incomplete");
+    auto proof=prepare(raw,"SELECT nonce,source_id,source_revision,policy_revision,binding,identity,mount_fingerprint,actual_scope,canonical_root,boundary_fingerprint,subtree_relative FROM snapshot_proof");
+    if(sqlite3_step(proof.get())!=SQLITE_ROW)throw std::runtime_error("snapshot proof missing");
+    if(snapshotText(proof.get(),0)!=captured.nonce || snapshotInteger(proof.get(),1)!=expected.id || snapshotInteger(proof.get(),2)!=expected.revision || snapshotInteger(proof.get(),3)!=captured.policy.revision ||
+       snapshotText(proof.get(),4)!=expected.root || snapshotText(proof.get(),5)!=expected.identity || snapshotText(proof.get(),6)!=expected.mount_fingerprint ||
+       snapshotText(proof.get(),7)!=captured.scan_path || snapshotText(proof.get(),8)!=canonical || snapshotText(proof.get(),10)!=scope)throw std::runtime_error("snapshot proof does not match captured request");
+    const auto child_roots=capturedChildMountRoots(snapshotText(proof.get(),9),canonical);
+    if(sqlite3_step(proof.get())!=SQLITE_DONE)throw std::runtime_error("duplicate snapshot proof");
+    if(snapshotRoots(raw,"SELECT root FROM snapshot_nested_roots ORDER BY root COLLATE BINARY",expected.root)!=nested)throw std::runtime_error("snapshot nested sources changed");
+    if(snapshotRoots(raw,"SELECT root FROM snapshot_child_mounts ORDER BY root COLLATE BINARY",canonical)!=child_roots)throw std::runtime_error("snapshot child mount proof mismatch");
+    auto rows=prepare(raw,"SELECT path,parent_path,name,ext,root,size,modified_time,is_dir,scan_generation,source_id,relative_path,cloud_copy FROM snapshot_files");
+    SqliteConnection conn(db_path_);bool done=false;
+    return mergeSnapshot(conn,expected,[&](std::vector<FileRecord>& batch) {
+        if(done)return false;
+        for(std::size_t i=0;i<1000;++i) {
+            const int rc=sqlite3_step(rows.get());if(rc==SQLITE_DONE){done=true;break;}if(rc!=SQLITE_ROW)throw std::runtime_error(sqlite3_errmsg(raw));
+            FileRecord record;record.path=snapshotText(rows.get(),0);record.parent_path=snapshotText(rows.get(),1);record.name=snapshotText(rows.get(),2);record.extension=snapshotText(rows.get(),3);record.root=snapshotText(rows.get(),4);
+            const auto size=snapshotInteger(rows.get(),5);record.modified_time=snapshotInteger(rows.get(),6);const auto directory=snapshotInteger(rows.get(),7);record.scan_generation=snapshotInteger(rows.get(),8);record.source_id=snapshotInteger(rows.get(),9);record.relative_path=snapshotText(rows.get(),10);const auto cloud=snapshotInteger(rows.get(),11);
+            if(size<0 || directory<0 || directory>1 || cloud<0 || cloud>2 || record.scan_generation!=0 || record.source_id!=expected.id)throw std::runtime_error("invalid snapshot record integer");
+            if(!normalizedAbsolute(record.path) || !normalizedAbsolute(record.parent_path) || record.root!=expected.root || !pathIsWithin(record.path,captured.scan_path) || record.relative_path!=relativeTo(record.path,expected.root))throw std::runtime_error("snapshot record outside captured scope");
+            const auto parsed=utf8ToPath(record.path);auto name=pathToUtf8(parsed.filename());if(name.empty())name=record.path;auto extension=pathToUtf8(parsed.extension());if(!extension.empty() && extension.front()=='.')extension.erase(0,1);
+            if(record.parent_path!=normalizePath(pathToUtf8(parsed.parent_path())) || record.name!=name || record.extension!=extension)throw std::runtime_error("invalid snapshot record path fields");
+            for(const auto& root:nested)if(pathIsWithin(record.path,root))throw std::runtime_error("snapshot record belongs to nested source");
+            for(const auto& root:child_roots){const auto suffix=relativeTo(root,canonical);const auto binding=expected.root=="/"?"/"+suffix:expected.root+"/"+suffix;if(pathIsWithin(record.path,binding))throw std::runtime_error("snapshot record crosses child mount");}
+            record.size=static_cast<std::uint64_t>(size);record.is_directory=directory==1;record.cloud_copy=static_cast<CloudCopy>(cloud);batch.push_back(std::move(record));
+        }
+        return !batch.empty();
+    },scope,[&](sqlite3* main) {
+        // Other sources can change this topology without advancing the owning
+        // source revision. Recheck under the SAME main write transaction,
+        // before any canonical files mutation; never open a second writer.
+        if(nestedSourceRoots(main,expected)!=nested)throw std::runtime_error("nested source topology changed during scan");
+    },&captured.policy);
 }
 
 void Database::beginRootScan(const std::string& root, std::int64_t generation) const {

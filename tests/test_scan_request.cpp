@@ -52,6 +52,12 @@ static void regressions(const fs::path& base,const ScanTask& task,const std::str
     auto noncanonical=fingerprint;auto canonical_pos=noncanonical.find(task.scan.source.root);assert(canonical_pos!=std::string::npos);noncanonical[canonical_pos]='x';r.source=task.scan.source;r.source.mount_fingerprint=noncanonical;invalid(r,task.lock_path);
     auto relative_canonical=fingerprint;auto root_end=relative_canonical.find(task.scan.source.root)+task.scan.source.root.size();relative_canonical.replace(root_end-5,5,"/a/..");r.source=task.scan.source;r.source.mount_fingerprint=relative_canonical;invalid(r,task.lock_path);
     auto nul_fingerprint=fingerprint;nul_fingerprint.back()='\0';r.source=task.scan.source;r.source.mount_fingerprint=nul_fingerprint;invalid(r,task.lock_path);
+    assert(capturedSourceCanonicalRoot(fingerprint)==task.scan.source.root);
+    assert(capturedChildMountRoots("",task.scan.source.root).empty());
+    fs::rename(base/"root",base/"held-root");
+    validateSourceScanRequest(task.scan);
+    assert(capturedSourceCanonicalRoot(fingerprint)==task.scan.source.root && "pure captured validation must not access the source root");
+    fs::rename(base/"held-root",base/"root");
     r.source=task.scan.source;r.source.policy_revision=8;invalid(r,task.lock_path);
     r.source=task.scan.source;r.source.status=SourceStatus::Unverified;invalid(r,task.lock_path);
     r.source=task.scan.source;r.source.identity.clear();invalid(r,task.lock_path);

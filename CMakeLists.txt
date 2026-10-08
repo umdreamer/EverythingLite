@@ -39,6 +39,7 @@ add_library(everything_core
     src/core/database.cpp
     src/core/source_catalog.cpp
     src/core/source_probe.cpp
+    src/core/source_scan.cpp
     src/core/search_engine.cpp
     src/core/search_service.cpp
     src/core/search_trace.cpp
@@ -134,6 +135,12 @@ if(BUILD_TESTS)
     add_executable(test_exclusion_policy tests/test_exclusion_policy.cpp)
     target_link_libraries(test_exclusion_policy PRIVATE everything_core)
     add_test(NAME exclusion_policy COMMAND test_exclusion_policy)
+    if(APPLE)
+        add_executable(test_source_scan tests/test_source_scan.cpp)
+        target_link_libraries(test_source_scan PRIVATE everything_core)
+        add_test(NAME source_scan COMMAND test_source_scan)
+        set_tests_properties(source_scan PROPERTIES TIMEOUT 60)
+    endif()
     add_executable(test_source_probe tests/test_source_probe.cpp)
     target_link_libraries(test_source_probe PRIVATE everything_core)
     add_test(NAME source_probe COMMAND test_source_probe)

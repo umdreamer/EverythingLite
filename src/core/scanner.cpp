@@ -1,3 +1,4 @@
+#if defined(_WIN32)
 #include "core/scanner.h"
 #include "core/path_utils.h"
 
@@ -60,8 +61,10 @@ bool FileScanner::readSingle(const std::string& path, FileRecord& record, const 
 IndexStats FileScanner::scanTree(const std::string& root,
                                  const BatchCallback& callback,
                                  const std::atomic_bool* cancelled,
-                                 const ExclusionPolicy* policy) const {
+                                 const ExclusionPolicy* policy,
+                                 const ScanBoundary* boundary) const {
     IndexStats stats;
+    if(boundary){stats.error="directory boundary backend unsupported";return stats;}
     std::vector<FileRecord> batch;
     batch.reserve(batch_size_);
     auto isCancelled = [&]() { return cancelled && cancelled->load(); };
@@ -132,3 +135,145 @@ IndexStats FileScanner::scanTree(const std::string& root,
 }
 
 } // namespace everything_lite
+
+#else
+#include "core/scanner.h"
+#include "core/path_utils.h"
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
+#include <memory>
+#include <sys/stat.h>
+#include <unistd.h>
+namespace everything_lite {
+namespace fs=std::filesystem;
+namespace {
+struct Descriptor {
+    int fd;
+    explicit Descriptor(int value):fd(value) {}
+    ~Descriptor(){if(fd>=0)close(fd);}
+    Descriptor(const Descriptor&)=delete;
+    Descriptor& operator=(const Descriptor&)=delete;
+};
+bool sameDirectory(const struct stat& a,const struct stat& b) {
+    if(a.st_dev!=b.st_dev || a.st_ino!=b.st_ino)return false;
+#if defined(__APPLE__)
+    return a.st_birthtimespec.tv_sec==b.st_birthtimespec.tv_sec && a.st_birthtimespec.tv_nsec==b.st_birthtimespec.tv_nsec;
+#else
+    return true;
+#endif
+}
+void fromStat(const fs::path& path,const struct stat& st,FileRecord& r) {
+    r.path=normalizePath(pathToUtf8(path));r.parent_path=normalizePath(pathToUtf8(path.parent_path()));
+    r.name=pathToUtf8(path.filename());if(r.name.empty())r.name=r.path;
+    r.extension=pathToUtf8(path.extension());if(!r.extension.empty() && r.extension[0]=='.')r.extension.erase(0,1);
+    r.is_directory=S_ISDIR(st.st_mode);r.size=S_ISREG(st.st_mode)?static_cast<std::uint64_t>(st.st_size):0;
+    // POSIX epoch seconds, read from the object itself, including broken links.
+    r.modified_time=static_cast<std::int64_t>(st.st_mtime);
+}
+}
+FileScanner::FileScanner(std::size_t n):batch_size_(std::max<std::size_t>(1,n)) {}
+bool FileScanner::makeRecord(const fs::path& path,FileRecord& r) {
+    struct stat st{};if(lstat(path.c_str(),&st)!=0)return false;fromStat(path,st,r);return true;
+}
+bool FileScanner::readSingle(const std::string& path,FileRecord& r,const ExclusionPolicy* policy) {
+    if(path.find('\0')!=std::string::npos)return false;
+    return makeRecord(utf8ToPath(path),r) && (!policy || !policy->excludes(r.path,r.is_directory));
+}
+IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& callback,
+    const std::atomic_bool* cancelled,const ExclusionPolicy* policy,const ScanBoundary* boundary) const {
+    IndexStats stats;std::vector<FileRecord> batch;batch.reserve(batch_size_);
+    auto stopped=[&] {if(cancelled && cancelled->load()){stats.cancelled=true;return true;}return false;};
+    auto fail=[&](const char* message){stats.error=message;return false;};
+    auto flush=[&] {
+        if(stopped())return false;if(batch.empty())return true;
+        const auto count=batch.size();
+        if(!callback(std::move(batch))){stats.cancelled=true;return false;}
+        stats.indexed+=count;batch.clear();batch.reserve(batch_size_);return true;
+    };
+    const auto scope=normalizePath(root);
+    auto prune=[&](const std::string& path) {
+        if(boundary)for(const auto& candidate:boundary->prune_roots)
+            if(normalizePath(candidate)!=scope && pathIsWithin(path,candidate))return true;
+        return false;
+    };
+    auto metadata=[&](const std::string& path) {
+        return !boundary || !boundary->metadata_guard || boundary->metadata_guard(path);
+    };
+    auto enter=[&](const std::string& path,int fd) {
+        return boundary && boundary->enter_directory ? boundary->enter_directory(path,fd):DirectoryDecision::Enter;
+    };
+    auto append=[&](const std::string& path,const struct stat& st) {
+        if(policy && policy->excludes(path,S_ISDIR(st.st_mode))){++stats.skipped;return true;}
+        ++stats.scanned;FileRecord record;fromStat(utf8ToPath(path),st,record);batch.push_back(std::move(record));
+        return batch.size()<batch_size_ || flush();
+    };
+    try {
+        if(stopped())return stats;
+        if(root.empty() || root.find('\0')!=std::string::npos){fail("invalid scan root");return stats;}
+        struct stat root_st{};
+        if(!metadata(scope) || lstat(scope.c_str(),&root_st)!=0){fail("unable to read root metadata");return stats;}
+        // Legacy scanTree(root) treats its root as a bound source directory.
+        // A configured subtree contract opts out; descendant links never follow.
+        const bool follow_root=S_ISLNK(root_st.st_mode) && (!boundary || boundary->allow_root_symlink);
+        std::unique_ptr<Descriptor> root_fd;
+        if(S_ISDIR(root_st.st_mode) || follow_root) {
+            root_fd=std::make_unique<Descriptor>(open(scope.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|(follow_root?0:O_NOFOLLOW)));
+            if(root_fd->fd<0 && follow_root && !boundary && errno==ENOTDIR) {
+                // Legacy file-link scope: enumerate the link itself, without
+                // obtaining its target's metadata or attempting file reads.
+                root_fd.reset();
+            } else {
+                if(root_fd->fd<0 || fstat(root_fd->fd,&root_st)!=0){fail("unable to open scan directory");return stats;}
+                if(enter(scope,root_fd->fd)!=DirectoryDecision::Enter){fail("scan root outside directory boundary");return stats;}
+            }
+        }
+        if(policy && (policy->excludes(pathToUtf8(utf8ToPath(scope).parent_path()),true) || policy->excludes(scope,S_ISDIR(root_st.st_mode)))) {
+            stats.completed=true;return stats;
+        }
+        if(!append(scope,root_st))return stats;
+        std::function<bool(int,const std::string&)> walk=[&](int fd,const std::string& path) {
+            int copy=dup(fd);if(copy<0)return fail("unable to duplicate directory");
+            DIR* opened=fdopendir(copy);if(!opened){close(copy);return fail("unable to enumerate directory");}
+            std::unique_ptr<DIR,int(*)(DIR*)> directory(opened,closedir);
+            for(;;) {
+                if(stopped())return false;
+                errno=0;dirent* entry=readdir(opened);
+                if(!entry){if(errno)return fail("directory enumeration failed");break;}
+                const std::string name=entry->d_name;if(name=="." || name=="..")continue;
+                const auto child=path=="/"?"/"+name:path+"/"+name;
+                // Whole subtree boundaries are applied before even metadata.
+                if(prune(child) || (entry->d_type==DT_DIR && policy && policy->excludes(child,true))){++stats.skipped;continue;}
+                struct stat st{};
+                if(!metadata(child) || fstatat(fd,name.c_str(),&st,AT_SYMLINK_NOFOLLOW)!=0)return fail("unable to read file metadata");
+                if(S_ISDIR(st.st_mode)) {
+                    if(policy && policy->excludes(child,true)){++stats.skipped;continue;}
+                    Descriptor nested(openat(fd,name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
+                    if(nested.fd<0)return fail("unable to open child directory");
+                    struct stat held{};if(fstat(nested.fd,&held)!=0 || !sameDirectory(st,held))return fail("directory changed before entry");
+                    const auto decision=enter(child,nested.fd);
+                    if(decision==DirectoryDecision::Prune){++stats.skipped;continue;}
+                    if(decision==DirectoryDecision::Error)return fail("directory boundary check failed");
+                    if(!append(child,st) || !walk(nested.fd,child))return false;
+                    // A held fd survives rename/replacement. Check the current
+                    // entry again on exit, before accepting old-bound paths.
+                    struct stat current{},after{};
+                    if(fstatat(fd,name.c_str(),&current,AT_SYMLINK_NOFOLLOW)!=0 ||
+                       fstat(nested.fd,&after)!=0 || !S_ISDIR(current.st_mode) ||
+                       !sameDirectory(st,current) || !sameDirectory(st,after) ||
+                       enter(child,nested.fd)!=DirectoryDecision::Enter)
+                        return fail("directory binding changed during enumeration");
+                } else if(!append(child,st))return false; // Descendant links never enter.
+            }
+            return true;
+        };
+        if(root_fd && !walk(root_fd->fd,scope))return stats;
+        if(!flush() || stopped())return stats;stats.completed=true;
+    } catch(const std::exception& error){stats.error=error.what();}
+      catch(...){stats.error="scan callback or directory check failed";}
+    return stats;
+}
+} // namespace everything_lite
+#endif

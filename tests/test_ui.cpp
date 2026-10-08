@@ -441,7 +441,16 @@ class UiTest : public QObject {
         QTimer chooser; chooser.setInterval(20);
         connect(&chooser,&QTimer::timeout,&window,[&] {
             for(auto* widget:QApplication::topLevelWidgets()) if(auto* dialog=qobject_cast<QFileDialog*>(widget)) {
-                dialog->selectFile(output); QMetaObject::invokeMethod(dialog,"accept",Qt::DirectConnection); accepted=true; chooser.stop(); return;
+                if(!dialog->isVisible()) continue;
+                // Qt 6.4 preserves focused filename edits in selectFile().
+                // Move focus away before using the public selection API.
+                if(auto* focused=dialog->focusWidget()) focused->clearFocus();
+                dialog->selectFile(output);
+                if(dialog->selectedFiles()!=QStringList{output}) return;
+                connect(dialog,&QDialog::accepted,&window,[&,dialog] {
+                    accepted=dialog->selectedFiles()==QStringList{output};
+                });
+                chooser.stop(); QMetaObject::invokeMethod(dialog,"accept",Qt::DirectConnection); return;
             }
         });
         QTimer::singleShot(2000,&window,[&]{if(!accepted) for(auto* widget:QApplication::topLevelWidgets()) if(auto* dialog=qobject_cast<QFileDialog*>(widget)) dialog->reject();});

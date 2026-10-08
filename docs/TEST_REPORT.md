@@ -67,3 +67,18 @@ Linux 本轮记录仅保留实际已经发生的检查：Ubuntu 24.04 ARM64、Qt
 2026-10-08 的有效开发范围改为 Mac 优先；后续 Linux 两架构完整流水线和安装包检查延期，没有完成本轮 Linux 发行验证。原 0.4.13 的挂载验证、隔离流式扫描、紧凑 FTS、完整来源设置及新增 Finder 地址同步仍未全部实现。真实 NAS、云端供应商、原生 IME、Finder/外部应用交互与日常大库性能仍单独验收。
 
 计时依据：[Qt — QTimer Class](https://doc.qt.io/qt-6/qtimer.html)。CSV 测试驱动依据：[Qt 6.4.2 — QFileDialog implementation](https://raw.githubusercontent.com/qt/qtbase/v6.4.2/src/widgets/dialogs/qfiledialog.cpp)。
+
+
+## Mac 来源探针独立模块（2026-10-08）
+
+实现与修复为本地提交 `ed36208`、`5d72500`、`3bb546c`、`bc513da`。最终代码范围 `93f6410..bc513da` 通过规范审查及独立质量审查。控制代理随后顺序构建并运行最终 Core Debug：8/8 入口通过，exit 0，约 2.57 秒；额外根证据与子边界证据输出检查通过。严格 GUI Debug 全目标构建 exit 0，实际生成 EverythingLite.app 和 everything-lite-cli。本次未重复完整 Qt 用例，未生成新的 Release 发行物，用户使用的热修复产物没有更换。
+
+探针用实际根目录描述符和文件系统证据核对卷 UUID、当前挂载及目录实例；UUID 不代表防克隆的物理设备认证，网络身份仅代表脱敏逻辑共享。回归包含合成挂载表、Mac Data 归属与别名证据、子挂载同路径换实例，以及真实独立临时目录的替换、符号链接改向、缺失、非目录和描述符释放。原生卷 UUID 还与独立 CoreFoundation 读取核对，未硬编码宿主 UUID。最终日志确认根打开权限拒绝和扫描结束重新打开权限拒绝均实际执行，保留 Failed/CheckFailed，没有 skip。
+
+审查发现的畸形编码凭据、主机参数凭据及部分 IPv6 验证问题均有真正失败基线，修复后根身份、根指纹及子边界指纹不保留合成凭据标记。IPv6 使用系统数字地址解析，不发起 DNS 或网络查询。真实 chmod(0111) 回归验证重新打开失败不能被空指纹误报为目录变化。
+
+最终四个变更文本文件检查已知开发者姓名及工作区路径标记，未发现匹配；此结果不是自动识别所有隐私信息的保证。测试、原始日志和二进制不加入 Git，没有读取两个原版本 ZIP 或日常索引。
+
+该模块尚未接入实际扫描调用。前后目录核验不是原子文件系统快照，字面挂载表也不能完整覆盖 Mac firmlink 别名；后续扫描器必须在进入目录时检查实际归属，并剪枝其他已配置来源。真实 NAS、卸载/重挂载、供应商云占位文件、Finder 保存地址同步及完整 0.4.13 尚未验收。Linux 原生后端明确保留不支持状态，本轮不开展其实现或测试。
+
+依据：[Apple — statfs/fstatfs(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/statfs.2.html)、[Apple — kCFURLVolumeUUIDStringKey](https://developer.apple.com/documentation/corefoundation/kcfurlvolumeuuidstringkey)、[Apple — inet_pton(3)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/inet_pton.3.html)。实施与验收拆分见 [Mac 扫描计划](superpowers/plans/2026-10-08-mac-scan-pipeline.md)。

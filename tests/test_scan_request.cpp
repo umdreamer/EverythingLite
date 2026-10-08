@@ -44,6 +44,14 @@ static void regressions(const fs::path& base,const ScanTask& task,const std::str
     auto aliaslock=base/"root-alias"/"private"/"source-7.scan.lock";ScanTask alias_task(task.scan,aliaslock.string());rejects([&]{SourceScanLock lock(alias_task);});assert(!fs::exists(aliaslock) && "canonical source boundary must be checked before creating a lock");
     auto invalid=[&](SourceScanRequest request,const std::string& lock){rejects([&]{ScanTask t(std::move(request),lock);writeScanTask((base/"job"/"invalid.bin").string(),t);});assert(!fs::exists(base/"job"/"invalid.bin"));};
     auto r=task.scan;r.source.type=static_cast<SourceType>(99);invalid(r,task.lock_path);
+    const auto fingerprint=task.scan.source.mount_fingerprint;
+    // Fingerprint shape is captured SourceProbe evidence, parsed without source IO.
+    for(const auto& bad:{std::string("malformed"),fingerprint+"0:",fingerprint+"trailing",fingerprint.substr(0,fingerprint.size()-1),std::string("999999999999999999999999999999:")+fingerprint,std::string("01:/")+fingerprint}) {
+        r.source=task.scan.source;r.source.mount_fingerprint=bad;invalid(r,task.lock_path);
+    }
+    auto noncanonical=fingerprint;auto canonical_pos=noncanonical.find(task.scan.source.root);assert(canonical_pos!=std::string::npos);noncanonical[canonical_pos]='x';r.source=task.scan.source;r.source.mount_fingerprint=noncanonical;invalid(r,task.lock_path);
+    auto relative_canonical=fingerprint;auto root_end=relative_canonical.find(task.scan.source.root)+task.scan.source.root.size();relative_canonical.replace(root_end-5,5,"/a/..");r.source=task.scan.source;r.source.mount_fingerprint=relative_canonical;invalid(r,task.lock_path);
+    auto nul_fingerprint=fingerprint;nul_fingerprint.back()='\0';r.source=task.scan.source;r.source.mount_fingerprint=nul_fingerprint;invalid(r,task.lock_path);
     r.source=task.scan.source;r.source.policy_revision=8;invalid(r,task.lock_path);
     r.source=task.scan.source;r.source.status=SourceStatus::Unverified;invalid(r,task.lock_path);
     r.source=task.scan.source;r.source.identity.clear();invalid(r,task.lock_path);

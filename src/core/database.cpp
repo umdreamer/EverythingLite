@@ -233,6 +233,22 @@ std::int64_t guardedScanSource(sqlite3* db,const std::string& root,std::int64_t 
     if(sourceForRoot(db,root,false)!=current.id) throw std::runtime_error("compatibility scan binding changed");
     return current.id;
 }
+void advanceSourceRevision(sqlite3* db,std::int64_t id) {
+    auto update=prepare(db,"UPDATE sources SET revision=revision+1 WHERE id=?");
+    sqlite3_bind_int64(update.get(),1,id);
+    if(sqlite3_step(update.get())!=SQLITE_DONE || sqlite3_changes(db)!=1)
+        throw std::runtime_error("unable to advance source revision");
+}
+void advanceScanRevision(sqlite3* db,std::int64_t id,const std::string& root,std::int64_t generation) {
+    advanceSourceRevision(db,id);
+    // Only the already validated generation owns this mutation. Refreshing
+    // every active guard would let an unrelated writer revive a stale scan.
+    auto update=prepare(db,"UPDATE compatibility_scans SET source_revision=(SELECT revision FROM sources WHERE id=?) WHERE root=? AND generation=? AND source_id=? AND state=0");
+    sqlite3_bind_int64(update.get(),1,id); bindText(update.get(),2,normalizePath(root));
+    sqlite3_bind_int64(update.get(),3,generation); sqlite3_bind_int64(update.get(),4,id);
+    if(sqlite3_step(update.get())!=SQLITE_DONE || sqlite3_changes(db)!=1)
+        throw std::runtime_error("unable to advance compatibility scan revision");
+}
 std::string relativeTo(const std::string& path, const std::string& root) {
     const auto normalized=normalizePath(path);
     if(!pathIsWithin(normalized,root)) throw std::invalid_argument("record outside source binding");
@@ -244,7 +260,7 @@ std::string accessPath(const std::string& root,const std::string& relative) {
     if(relative==".") return root;
     return normalizePath(pathToUtf8(utf8ToPath(root)/utf8ToPath(relative)));
 }
-void upsertRecords(sqlite3* db, const SourceRecord& source,
+bool upsertRecords(sqlite3* db, const SourceRecord& source,
                    const std::vector<FileRecord>& records, std::int64_t generation,
                    const ExclusionPolicy& policy) {
     auto stmt=prepare(db,R"SQL(
@@ -259,6 +275,7 @@ OR files.ext<>excluded.ext OR files.root<>excluded.root OR files.size<>excluded.
 OR files.modified_time<>excluded.modified_time OR files.is_dir<>excluded.is_dir
 OR files.cloud_copy<>excluded.cloud_copy;
 )SQL");
+    bool changed=false;
     for(const auto& r:records) {
         if(r.source_id!=0 && r.source_id!=source.id) throw std::invalid_argument("wrong source record");
         const auto relative=relativeTo(r.path,source.root);
@@ -273,7 +290,9 @@ OR files.cloud_copy<>excluded.cloud_copy;
         bindText(stmt.get(),11,asciiFold(r.name)); bindText(stmt.get(),12,asciiFold(r.path));
         sqlite3_bind_int64(stmt.get(),13,generation); sqlite3_bind_int(stmt.get(),14,static_cast<int>(r.cloud_copy));
         if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
+        changed=sqlite3_changes(db)>0 || changed;
     }
+    return changed;
 }
 std::int64_t countRows(sqlite3* db,const char* table) {
     auto stmt=prepare(db,std::string("SELECT COUNT(*) FROM ")+table);
@@ -899,6 +918,7 @@ void Database::beginRootScan(const std::string& root, std::int64_t generation) c
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
     try {
         const auto id=sourceForRoot(conn.get(),root,true);
+        advanceSourceRevision(conn.get(),id);
         const auto source=getSource(conn.get(),id);
         auto supersede=prepare(conn.get(),"UPDATE compatibility_scans SET state=2 WHERE source_id=? AND state=0");
         sqlite3_bind_int64(supersede.get(),1,id);
@@ -920,7 +940,8 @@ void Database::beginRootScan(const std::string& root, std::int64_t generation) c
 void Database::completeRootScan(const std::string& root, std::int64_t generation, std::uint64_t count) const {
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
     try {
-        guardedScanSource(conn.get(),root,generation,true);
+        const auto id=guardedScanSource(conn.get(),root,generation,true);
+        advanceSourceRevision(conn.get(),id);
         auto stmt=prepare(conn.get(),"UPDATE roots SET generation=?,last_scan_time=strftime('%s','now'),file_count=? WHERE root=?");
         sqlite3_bind_int64(stmt.get(),1,generation); sqlite3_bind_int64(stmt.get(),2,count); bindText(stmt.get(),3,normalizePath(root));
         if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
@@ -942,7 +963,11 @@ void Database::upsertBatch(const std::vector<FileRecord>& records,const std::str
         const auto id=guarded ? guarded : sourceForRoot(conn.get(),root,true);
         const auto source=getSource(conn.get(),id);
         const auto policy=getPolicy(conn.get());
-        upsertRecords(conn.get(),source,records,generation,policy);
+        const bool changed=upsertRecords(conn.get(),source,records,generation,policy);
+        if(changed) {
+            if(guarded) advanceScanRevision(conn.get(),id,root,generation);
+            else advanceSourceRevision(conn.get(),id);
+        }
         auto seen=prepare(conn.get(),"INSERT OR IGNORE INTO scan_seen(source_id,generation,relative_path) VALUES(?,?,?)");
         for(const auto& record:records) {
             if(policy.excludes(record.path,record.is_directory)) continue;
@@ -962,22 +987,43 @@ std::uint64_t Database::deleteStaleForRoot(const std::string& root,std::int64_t 
         sqlite3_bind_int64(stmt.get(),1,id); sqlite3_bind_int64(stmt.get(),2,generation);
         if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         const auto removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+        if(removed) advanceScanRevision(conn.get(),id,root,generation);
         conn.exec("COMMIT;"); return removed;
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
 std::uint64_t Database::deletePathAndDescendants(const std::string& path) const {
     SqliteConnection conn(db_path_); const auto normalized=normalizePath(path);
-    auto sources_stmt=prepare(conn.get(),"SELECT id,root FROM sources"); std::int64_t id=0;
-    while(sqlite3_step(sources_stmt.get())==SQLITE_ROW) {
-        if(pathIsWithin(normalized,columnText(sources_stmt.get(),1))) {
-            if(id) throw std::runtime_error("ambiguous path; use source id");
-            id=sqlite3_column_int64(sources_stmt.get(),0);
+    conn.exec("BEGIN IMMEDIATE;");
+    try {
+        auto sources_stmt=prepare(conn.get(),"SELECT id,root FROM sources");
+        std::int64_t id=0; std::string source_root;
+        while(sqlite3_step(sources_stmt.get())==SQLITE_ROW) {
+            const auto root=columnText(sources_stmt.get(),1);
+            if(pathIsWithin(normalized,root)) {
+                if(id) throw std::runtime_error("ambiguous path; use source id");
+                id=sqlite3_column_int64(sources_stmt.get(),0); source_root=root;
+            }
         }
-    }
-    auto stmt=prepare(conn.get(),"DELETE FROM files WHERE source_id=? AND (path=? OR path LIKE ? ESCAPE '\\')");
-    sqlite3_bind_int64(stmt.get(),1,id); bindText(stmt.get(),2,normalized); bindText(stmt.get(),3,escapeLike(normalized)+"/%");
-    if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
-    return static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+        if(!id) { conn.exec("COMMIT;"); return 0; }
+        const auto relative=relativeTo(normalized,source_root);
+        std::uint64_t removed=0;
+        const auto remove=[&](const std::string& sql,const std::vector<std::string>& bounds) {
+            auto stmt=prepare(conn.get(),sql); sqlite3_bind_int64(stmt.get(),1,id);
+            for(std::size_t i=0;i<bounds.size();++i) bindText(stmt.get(),static_cast<int>(i)+2,bounds[i]);
+            if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+            removed+=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+        };
+        if(relative==".") remove("DELETE FROM files WHERE source_id=?",{});
+        else {
+            // Use the same BINARY relative-path bounds as snapshot cleanup.
+            // Source root '/' is represented by '.', without a double-slash
+            // LIKE pattern that would leave its children behind.
+            remove("DELETE FROM files WHERE source_id=? AND relative_path=?",{relative});
+            remove("DELETE FROM files WHERE source_id=? AND relative_path>=? AND relative_path<?",{relative+"/",relative+"0"});
+        }
+        if(removed) advanceSourceRevision(conn.get(),id);
+        conn.exec("COMMIT;"); return removed;
+    } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
 std::uint64_t Database::deleteRoot(const std::string& root) const {
     SqliteConnection conn(db_path_); const auto id=sourceForRoot(conn.get(),root,false);

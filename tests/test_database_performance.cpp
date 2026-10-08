@@ -47,6 +47,108 @@ static FileRecord file(const std::string& root,const std::string& relative,bool 
 static std::vector<std::string> paths(const std::vector<SearchResult>& results) {
     std::vector<std::string> out; for(const auto& r:results) out.push_back(r.file.path); return out;
 }
+template<class Work> static bool rejected(Work&& work) {
+    try { work(); } catch(const std::exception&) { return true; } return false;
+}
+static void crossApiFreshness(const fs::path& path,const std::string& scenario) {
+    Database db(path.string()); db.initialize();
+    const std::string root=scenario=="root-delete"?"/":"/synthetic/cross-api";
+    const auto id=db.ensureSourceForRoot(root);
+#if defined(_WIN32)
+    const std::string delete_scope="old%_'.txt";
+#else
+    const std::string delete_scope="old%_\\'.txt";
+#endif
+    const auto old=file(root,scenario=="delete"?delete_scope:"old.txt"), fresh=file(root,"new.txt"), last=file(root,"last.txt");
+    std::vector<FileRecord> initial{old};
+    if(scenario=="cleanup") initial.push_back(file(root,"drop.txt"));
+    if(scenario=="delete") {
+        initial.push_back(file(root,old.name+"/child.txt"));
+        initial.push_back(file(root,old.name+"-neighbor/kept.txt"));
+    }
+    if(scenario=="case-delete") initial={file(root,"Case",true),file(root,"Case/x.txt"),file(root,"case",true),file(root,"case/x.txt")};
+    if(scenario=="root-delete") initial={file(root,".",true),file(root,"child.txt"),file(root,"nested/grandchild.txt")};
+    db.mergeSourceSnapshot(db.source(id),initial);
+    const auto before=db.source(id);
+    if(scenario=="begin") {
+        db.beginRootScan(root,1);
+        assert(rejected([&]{db.mergeSourceSnapshot(before,initial);}) && "begin must invalidate earlier modern snapshots");
+        // A modern writer captured after begin can win, then the begun scan
+        // must fail rather than restoring its own obsolete content.
+        db.mergeSourceSnapshot(db.source(id),{fresh});
+        assert(rejected([&]{db.upsertBatch(initial,root,1);}));
+    } else if(scenario=="batch") {
+        db.beginRootScan(root,1); const auto mid=db.source(id);
+        db.upsertBatch({fresh},root,1);
+        assert(rejected([&]{db.mergeSourceSnapshot(mid,initial);}) && "each published compatibility batch must invalidate captured modern snapshots");
+        db.upsertBatch({fresh},root,1); const auto between=db.source(id);
+        db.upsertBatch({last},root,1);
+        assert(rejected([&]{db.mergeSourceSnapshot(between,initial);}) && "later batches must invalidate modern snapshots captured between batches");
+        assert(db.deleteStaleForRoot(root,1)==1);
+        db.completeRootScan(root,1,2);
+        assert(db.searchReliable("new.txt").size()==1 && db.searchReliable("last.txt").size()==1);
+    } else if(scenario=="cleanup") {
+        db.beginRootScan(root,1); db.upsertBatch({old},root,1);
+        const auto mid=db.source(id);
+        assert(db.deleteStaleForRoot(root,1)==1);
+        assert(rejected([&]{db.mergeSourceSnapshot(mid,initial);}) && "compatibility cleanup must invalidate captured modern snapshots");
+        db.upsertBatch({old},root,1); db.completeRootScan(root,1,1);
+        assert(db.searchReliable("drop.txt").empty());
+    } else if(scenario=="complete") {
+        db.beginRootScan(root,1); db.upsertBatch({fresh},root,1);
+        assert(db.deleteStaleForRoot(root,1)==1);
+        const auto mid=db.source(id); db.completeRootScan(root,1,1);
+        assert(rejected([&]{db.mergeSourceSnapshot(before,initial);}) && "completed compatibility scan must reject pre-begin snapshots");
+        assert(rejected([&]{db.mergeSourceSnapshot(mid,initial);}) && "completion must invalidate snapshots captured during the scan");
+        assert(db.searchReliable("old.txt").empty() && db.searchReliable("new.txt").size()==1);
+        assert(rejected([&]{db.completeRootScan(root,1,1);}));
+    } else if(scenario=="standalone") {
+        db.upsertBatch({fresh},root,73);
+        assert(rejected([&]{db.mergeSourceSnapshot(before,initial);}) && "standalone writes must invalidate captured modern snapshots");
+        db.beginRootScan(root,1); db.upsertBatch({old},root,74);
+        // Unchanged standalone content does not interfere with the scan.
+        db.upsertBatch({fresh},root,1);
+        db.upsertBatch({last},root,75);
+        assert(rejected([&]{db.upsertBatch({fresh},root,1);}));
+        assert(rejected([&]{db.deleteStaleForRoot(root,1);}));
+        assert(rejected([&]{db.completeRootScan(root,1,1);}));
+    } else if(scenario=="delete") {
+        assert(db.deletePathAndDescendants(old.path)==2);
+        assert(db.searchReliable("kept.txt").size()==1);
+        assert(rejected([&]{db.mergeSourceSnapshot(before,initial);}) && "public path deletion must not be undone by an older snapshot");
+        db.beginRootScan(root,1); db.upsertBatch({fresh},root,1);
+        assert(db.deletePathAndDescendants(fresh.path)==1);
+        assert(rejected([&]{db.upsertBatch({last},root,1);}));
+        assert(rejected([&]{db.completeRootScan(root,1,1);}));
+    } else if(scenario=="superseded") {
+        db.beginRootScan(root,1); const auto mid=db.source(id);
+        db.beginRootScan(root,2);
+        assert(rejected([&]{db.mergeSourceSnapshot(mid,initial);}) && "a newer scan begin must invalidate intervening modern snapshots");
+        assert(rejected([&]{db.upsertBatch({old},root,1);}));
+        assert(rejected([&]{db.beginRootScan(root,1);}));
+        db.upsertBatch({fresh},root,2); db.upsertBatch({last},root,2);
+        assert(db.deleteStaleForRoot(root,2)==1); db.completeRootScan(root,2,2);
+    } else if(scenario=="case-delete") {
+        assert(db.deletePathAndDescendants(root+"/Case")==2);
+        const auto remaining=db.searchReliable("x.txt");
+        assert(remaining.size()==1 && remaining.front().file.path==root+"/case/x.txt");
+        assert(rejected([&]{db.mergeSourceSnapshot(before,initial);}));
+    } else if(scenario=="root-delete") {
+        assert(db.deletePathAndDescendants(root)==initial.size() && "source root deletion must also remove descendants of slash root");
+        assert(db.totalFileCount()==0);
+        assert(rejected([&]{db.mergeSourceSnapshot(before,initial);}));
+    } else if(scenario=="unchanged") {
+        sqlite3* raw=nullptr; assert(sqlite3_open(path.string().c_str(),&raw)==SQLITE_OK);
+        execute(raw,"CREATE TABLE audit(action TEXT); CREATE TRIGGER audit_insert AFTER INSERT ON files BEGIN INSERT INTO audit VALUES('insert'); END; CREATE TRIGGER audit_update AFTER UPDATE ON files BEGIN INSERT INTO audit VALUES('update'); END; CREATE TRIGGER audit_delete AFTER DELETE ON files BEGIN INSERT INTO audit VALUES('delete'); END;");
+        db.beginRootScan(root,1); db.upsertBatch(initial,root,1); db.upsertBatch(initial,root,1);
+        assert(db.deleteStaleForRoot(root,1)==0); db.completeRootScan(root,1,1);
+        sqlite3_stmt* stmt=nullptr; assert(sqlite3_prepare_v2(raw,"SELECT COUNT(*) FROM audit",-1,&stmt,nullptr)==SQLITE_OK);
+        assert(sqlite3_step(stmt)==SQLITE_ROW && sqlite3_column_int(stmt,0)==0);
+        sqlite3_finalize(stmt); sqlite3_close(raw);
+        if(db.nameSearchIndexReady()) db.verifyNameSearchIndex();
+    }
+    std::cout<<"cross API freshness passed: "<<scenario<<'\n';
+}
 int main(int argc,char** argv) {
     const std::string mode=argc>1?argv[1]:"all";
     const auto base=fs::temp_directory_path()/("el-performance-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -82,6 +184,13 @@ int main(int argc,char** argv) {
         assert(manager.database().searchReliable("moved.txt",20).empty());
         assert(manager.database().searchReliable("retained.txt",20).size()==1);
         fs::remove_all(base); std::cout<<"path guards passed\n"; return 0;
+    }
+    if(mode=="all" || mode.rfind("cross-api-",0)==0) {
+        for(const auto& scenario:{"begin","batch","cleanup","complete","standalone","delete","superseded","case-delete","root-delete","unchanged"}) {
+            if(mode=="all" || mode==std::string("cross-api-")+scenario)
+                crossApiFreshness(base/(std::string(scenario)+".db"),scenario);
+        }
+        if(mode!="all") { fs::remove_all(base); return 0; }
     }
     Database db(path); db.initialize();
     const auto source=db.ensureSourceForRoot("/synthetic/source");

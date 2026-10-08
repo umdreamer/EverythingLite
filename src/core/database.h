@@ -42,19 +42,25 @@ public:
     // excluded cached rows for all sources, including offline sources.
     std::uint64_t saveExclusionPolicy(const ExclusionRules& rules) const;
 
-    // Compatibility scans reserve a unique (root,generation) and capture
-    // source/policy guards. Stale or completed generations cannot mutate rows.
+    // Compatibility scans reserve a unique (root,generation) and advance the
+    // source revision at begin/completion. Every published file mutation
+    // advances that revision and refreshes only its own validated scan guard.
+    // Modern snapshots and other writers invalidate stale scan generations.
     void beginRootScan(const std::string& root, std::int64_t generation) const;
     void completeRootScan(const std::string& root, std::int64_t generation, std::uint64_t file_count) const;
     std::int64_t currentGeneration(const std::string& root) const;
 
     // Without beginRootScan, one batch uses the current policy but has no
-    // authority to delete stale rows or complete a full scan.
+    // authority to delete stale rows or complete a full scan. Changed standalone
+    // batches invalidate previously captured snapshots and active scan guards.
     void upsertBatch(const std::vector<FileRecord>& records,
                      const std::string& root,
                      std::int64_t generation) const;
 
     std::uint64_t deleteStaleForRoot(const std::string& root, std::int64_t generation) const;
+    // Cache-only deletion; callers must establish deletion authority themselves.
+    // Exact BINARY subtree removal advances the owning source revision, so
+    // older snapshots cannot restore deleted cached records.
     std::uint64_t deletePathAndDescendants(const std::string& path) const;
     std::uint64_t deleteRoot(const std::string& root) const;
     void clear() const;

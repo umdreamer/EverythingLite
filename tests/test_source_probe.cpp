@@ -20,6 +20,10 @@ static MountEvidence local(std::string path, std::string uuid, std::string token
 static void encodedRemoteTests(bool output_only=false, bool boundary_only=false) {
     // Synthetic markers only; no real account/userinfo fixture.
     const std::vector<std::string> ambiguous={
+        "smb://[abc:def:deadbeef]/synthetic-secret-share",
+        "//[2001::db8::1]/synthetic-secret-share",
+        "//[1:2:3:4:5:6:7]/synthetic-secret-share",
+        "//[::ffff:999.1.2.3]/synthetic-secret-share",
         "smb://host;password=synthetic-secret/share", "//host=synthetic-secret/share",
         "//host&password=synthetic-secret/share", "//host!synthetic-secret/share",
         "smb://synthetic-owner/synthetic-secret%40host/share",
@@ -52,6 +56,11 @@ static void encodedRemoteTests(bool output_only=false, bool boundary_only=false)
     assert(sanitizeRemoteSource("//host..invalid/share").empty());
     assert(sanitizeRemoteSource("//-invalid-host/share").empty());
     assert(sanitizeRemoteSource("//999.168.1.12/share").empty());
+    assert(sanitizeRemoteSource("[2001:db8::1]:/export")=="[2001:db8::1]/export");
+    assert(sanitizeRemoteSource("//[::ffff:192.0.2.1]/share")=="[::ffff:192.0.2.1]/share");
+    assert(sanitizeRemoteSource("//[2001:db8:0:0:0:0:0:1]/share")=="[2001:db8:0:0:0:0:0:1]/share");
+    assert(sanitizeRemoteSource("//[fe80::1%en0]/share").empty());
+    assert(sanitizeRemoteSource("//[2001:db8::1]:445/share").empty());
 }
 static void pureTests() {
     encodedRemoteTests();

@@ -4,6 +4,9 @@
 #include <utility>
 #include <cerrno>
 #include <mutex>
+#if defined(__APPLE__) || defined(__unix__)
+#include <arpa/inet.h>
+#endif
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/mount.h>
@@ -90,8 +93,15 @@ std::string sanitizeRemoteSource(const std::string& raw) {
     if(authority.front()=='[') {
         if(authority.back()!=']') return {};
         const auto address=authority.substr(1,authority.size()-2);
-        if(std::count(address.begin(),address.end(),':')<2 ||
-           !std::all_of(address.begin(),address.end(),[](unsigned char c){return std::isxdigit(c) || c==':' || c=='.';})) return {};
+#if defined(__APPLE__) || defined(__unix__)
+        // Numeric parsing only: no resolver, DNS lookup, socket or network I/O.
+        // Accept only a complete system-validated IPv6 address, never a partial
+        // character-set approximation. Zone suffixes/ports remain unsupported.
+        struct in6_addr parsed{};
+        if(inet_pton(AF_INET6,address.c_str(),&parsed)!=1) return {};
+#else
+        return {}; // No verified numeric IPv6 backend on this platform.
+#endif
     }
     std::transform(authority.begin(),authority.end(),authority.begin(),[](unsigned char c){return std::tolower(c);});
     return authority+path;

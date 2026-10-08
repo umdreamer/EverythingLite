@@ -49,7 +49,9 @@ static void scannerRegressions(const fs::path& base) {
     assert(utimensat(AT_FDCWD,(root/"link").c_str(),times,AT_SYMLINK_NOFOLLOW)==0);
     FileRecord r;assert(FileScanner::readSingle((root/"link").string(),r));
     assert(r.modified_time==1170000000 && "link own mtime must not follow target");
-    fs::remove(root/"target");assert(FileScanner::readSingle((root/"link").string(),r));assert(r.modified_time==1170000000);
+    struct stat own_link{};assert(lstat((root/"link").c_str(),&own_link)==0);
+    assert(r.size==static_cast<std::uint64_t>(own_link.st_size) && r.size!=6 && "link size is its own path-byte length, not target size or zero");
+    fs::remove(root/"target");assert(FileScanner::readSingle((root/"link").string(),r));assert(r.modified_time==1170000000 && r.size==static_cast<std::uint64_t>(own_link.st_size));
     fs::create_directory(root/"sample");fs::create_directory(root/"sample-other");
     std::ofstream(root/"sample"/"sentinel")<<"hidden";
     std::ofstream(root/"sample-other"/"中文\\name?.txt")<<"visible";
@@ -58,6 +60,7 @@ static void scannerRegressions(const fs::path& base) {
     std::vector<FileRecord> all;
     auto stats=FileScanner(1000).scanTree(root.string(),[&](std::vector<FileRecord>&& rows){for(auto& f:rows)all.push_back(f);return true;},nullptr,nullptr,&boundary);
     assert(stats.completed && all.size()==4);
+    for(const auto& row:all)if(row.name=="link")assert(row.size==static_cast<std::uint64_t>(own_link.st_size));
     assert(all.back().path.find('\\')!=std::string::npos || all[2].path.find('\\')!=std::string::npos);
     // A directory-name filter must not mistake a file with that basename for
     // an excluded directory. This checks the d_type optimization's fallback.
@@ -136,6 +139,7 @@ static void sourceRegressions(const fs::path& base,SourceScanRequest request) {
     reset(r);r.scan_path=(base/"root"/"sample-other").string();auto subtree=scanSourceToSnapshot(r);assert(subtree.stats.completed && subtree.subtree_relative=="sample-other" && subtree.staged==2);assert(scalar(r.snapshot_path,"SELECT COUNT(*) FROM snapshot_files WHERE relative_path='sample-other' AND is_dir=1")==1);
     reset(r);r.scan_path=(base/"root"/"sample").string();r.nested_source_roots={r.scan_path};incomplete(scanSourceToSnapshot(r));
     fs::create_directory_symlink(base/"outside",base/"root"/"subtree-link");reset(r);r.scan_path=(base/"root"/"subtree-link").string();auto link_file=scanSourceToSnapshot(r);assert(link_file.stats.completed && link_file.staged==1);assert(scalar(r.snapshot_path,"SELECT is_dir FROM snapshot_files")==0);
+    struct stat subtree_link{};assert(lstat((base/"root"/"subtree-link").c_str(),&subtree_link)==0);assert(scalar(r.snapshot_path,"SELECT size FROM snapshot_files")==subtree_link.st_size);
     reset(r);r.scan_path=(base/"root"/"subtree-link"/"sentinel").string();incomplete(scanSourceToSnapshot(r));
     fs::create_directory_symlink(base/"root",base/"bound-root");reset(r);r.source=verified(base/"bound-root");auto bound=scanSourceToSnapshot(r);assert(bound.stats.completed && scalar(r.snapshot_path,"SELECT is_dir FROM snapshot_files WHERE relative_path='.'")==1);
     reset(r);r.source=verified(base/"bound-root");bool retargeted=false;auto retarget=scanSourceToSnapshot(r,nullptr,[&](std::uint64_t){if(!retargeted){retargeted=true;fs::remove(base/"bound-root");fs::create_directory_symlink(base/"outside",base/"bound-root");}});incomplete(retarget);assert(scalar(r.snapshot_path,"SELECT complete FROM snapshot_metadata")==0);
@@ -163,7 +167,7 @@ static void sourceRegressions(const fs::path& base,SourceScanRequest request) {
     fs::create_directory_symlink(base/"output",base/"output-link");reset(r);r.snapshot_path=(base/"output-link"/"symlink-parent.sqlite").string();incomplete(scanSourceToSnapshot(r));assert(!fs::exists(r.snapshot_path));
     // Real Database differential merge. Audit canonical files writes only.
     Database db((base/"output"/"main.sqlite").string());db.initialize();auto saved=request.source;saved.id=0;saved.id=db.saveSource(saved);saved=db.source(saved.id);
-    reset(r);r.source=saved;auto first=scanSourceToSnapshot(r);assert(first.stats.completed);auto merged=db.mergeSourceSnapshotFile(saved,first.snapshot_path);assert(merged.completed);
+    reset(r);r.source=saved;auto first=scanSourceToSnapshot(r);assert(first.stats.completed);assert(scalar(first.snapshot_path,"SELECT size FROM snapshot_files WHERE relative_path='subtree-link'")==subtree_link.st_size);auto merged=db.mergeSourceSnapshotFile(saved,first.snapshot_path);assert(merged.completed);
     sql(db.path(),"CREATE TABLE audit(writes INTEGER);INSERT INTO audit VALUES(0);CREATE TRIGGER audit_i AFTER INSERT ON files BEGIN UPDATE audit SET writes=writes+1;END;CREATE TRIGGER audit_u AFTER UPDATE ON files BEGIN UPDATE audit SET writes=writes+1;END;CREATE TRIGGER audit_d AFTER DELETE ON files BEGIN UPDATE audit SET writes=writes+1;END;");
     saved=db.source(saved.id);reset(r);r.source=saved;auto unchanged=scanSourceToSnapshot(r);assert(unchanged.stats.completed);assert(db.mergeSourceSnapshotFile(saved,unchanged.snapshot_path).completed);assert(scalar(db.path(),"SELECT writes FROM audit")==0);
     reset(r);r.source=db.source(saved.id);r.snapshot_path=db.path();incomplete(scanSourceToSnapshot(r));assert(scalar(db.path(),"SELECT writes FROM audit")==0);

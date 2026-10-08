@@ -169,7 +169,8 @@ void fromStat(const fs::path& path,const struct stat& st,FileRecord& r) {
     r.path=normalizePath(pathToUtf8(path));r.parent_path=normalizePath(pathToUtf8(path.parent_path()));
     r.name=pathToUtf8(path.filename());if(r.name.empty())r.name=r.path;
     r.extension=pathToUtf8(path.extension());if(!r.extension.empty() && r.extension[0]=='.')r.extension.erase(0,1);
-    r.is_directory=S_ISDIR(st.st_mode);r.size=S_ISREG(st.st_mode)?static_cast<std::uint64_t>(st.st_size):0;
+    r.is_directory=S_ISDIR(st.st_mode);r.size=(S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))?static_cast<std::uint64_t>(st.st_size):0;
+    // Link size is its own stored path-byte length, not target file size.
     // POSIX epoch seconds, read from the object itself, including broken links.
     r.modified_time=static_cast<std::int64_t>(st.st_mtime);
 }

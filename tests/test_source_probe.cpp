@@ -17,9 +17,11 @@ using namespace everything_lite;
 static MountEvidence local(std::string path, std::string uuid, std::string token) {
     MountEvidence e; e.mount_point=path; e.filesystem="apfs"; e.volume_uuid=uuid; e.mount_token=token; e.local=true; e.internal=true; return e;
 }
-static void encodedRemoteTests(bool output_only=false) {
+static void encodedRemoteTests(bool output_only=false, bool boundary_only=false) {
     // Synthetic markers only; no real account/userinfo fixture.
     const std::vector<std::string> ambiguous={
+        "smb://host;password=synthetic-secret/share", "//host=synthetic-secret/share",
+        "//host&password=synthetic-secret/share", "//host!synthetic-secret/share",
         "smb://synthetic-owner/synthetic-secret%40host/share",
         "//synthetic-owner/synthetic-secret%2540host/share",
         "//host/share%00synthetic-secret", "//host/share%0asynthetic-secret",
@@ -34,14 +36,22 @@ static void encodedRemoteTests(bool output_only=false) {
         root.actual_mount.mount_point=root.canonical_root; root.actual_mount.filesystem="smbfs";
         root.actual_mount.raw_remote_source=raw; root.actual_mount.mount_token="synthetic-mount";
         const auto rejected=evaluateSourceEvidence({},root,{root.actual_mount});
-        assert(rejected.identity.empty() && !rejected.update_allowed && "ambiguous source cannot produce a reusable identity");
-        assert(rejected.mount_fingerprint.find("synthetic-secret")==std::string::npos);
+        if(!boundary_only) {
+            assert(rejected.identity.empty() && !rejected.update_allowed && "ambiguous source cannot produce a reusable identity");
+            assert(rejected.mount_fingerprint.find("synthetic-secret")==std::string::npos);
+        }
         auto child=root.actual_mount; child.mount_point="/synthetic/root/nested";
         root.actual_mount=local("/synthetic/root","synthetic-uuid","synthetic-mount");
         const auto boundaries=evaluateSourceEvidence({},root,{root.actual_mount,child});
         assert(boundaries.boundary_fingerprint.find("synthetic-secret")==std::string::npos);
     }
     assert(sanitizeRemoteSource("//host/share%20name")=="host/share%20name");
+    assert(sanitizeRemoteSource("//NAS_BOX/share")=="nas_box/share");
+    assert(sanitizeRemoteSource("//nas-box.example/share")=="nas-box.example/share");
+    assert(sanitizeRemoteSource("//192.168.1.12/share")=="192.168.1.12/share");
+    assert(sanitizeRemoteSource("//host..invalid/share").empty());
+    assert(sanitizeRemoteSource("//-invalid-host/share").empty());
+    assert(sanitizeRemoteSource("//999.168.1.12/share").empty());
 }
 static void pureTests() {
     encodedRemoteTests();
@@ -199,6 +209,24 @@ static void nativeTests() {
     // before restricting it, so a missing fixture cannot become a false skip.
     const int baseline=open(saved.root.c_str(),O_RDONLY|O_DIRECTORY);
     assert(baseline>=0 && enumerateAndStatSentinel(baseline));
+    auto permission_change=beginSourceProbe(saved);
+    assert(permission_change.result().update_allowed==has_uuid);
+    assert(chmod(saved.root.c_str(),0111)==0);
+    const int fresh_read=open(saved.root.c_str(),O_RDONLY|O_DIRECTORY);
+    if(fresh_read<0) {
+        assert(errno==EACCES || errno==EPERM);
+        const auto end=permission_change.finish();
+        assert(end.status==SourceStatus::Failed && end.issue==ProbeIssue::CheckFailed && !end.update_allowed && "fresh root reopen failure must retain its explicit Failed/CheckFailed cause");
+        std::cout<<"native finish permission-change: fresh root reopen rejected; retained Failed/CheckFailed\n";
+    } else if(enumerateAndStatSentinel(fresh_read)) {
+        assert(permission_change.finish().update_allowed==has_uuid);
+        std::cout<<"SKIP native finish permission-change: host UID enumerated chmod(0111) sentinel and read its metadata\n";
+    } else {
+        const auto end=permission_change.finish();
+        assert(end.status!=SourceStatus::Offline);
+        std::cout<<"INFO native finish permission-change: root reopen succeeded but traversal failed; Scanner must reject traversal\n";
+    }
+    assert(chmod(saved.root.c_str(),0700)==0);
     assert(chmod(saved.root.c_str(),0000)==0);
     const int permission_check=open(saved.root.c_str(),O_RDONLY|O_DIRECTORY);
     if(permission_check<0) {
@@ -222,6 +250,10 @@ static void nativeTests() {
 #endif
 int main(int argc, char** argv) {
     if(argc==2 && std::string(argv[1])=="encoded-output") {encodedRemoteTests(true);return 0;}
+    if(argc==2 && std::string(argv[1])=="boundary-output") {encodedRemoteTests(true,true);return 0;}
+    #if defined(__APPLE__)
+    if(argc==2 && std::string(argv[1])=="finish-permission") {nativeTests();return 0;}
+    #endif
     pureTests();
 #if defined(__APPLE__)
     nativeTests();

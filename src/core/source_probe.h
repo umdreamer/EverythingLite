@@ -32,6 +32,7 @@ struct ProbeResult {
 };
 // Empty means unsupported/ambiguous syntax. Credentials are discarded BEFORE
 // identifiers/fingerprints are constructed. No mount options are accepted.
+// Supports conservative ASCII hostname/address forms, not arbitrary URLs.
 std::string sanitizeRemoteSource(const std::string& raw);
 std::optional<std::size_t> selectMountForPath(const std::string& path, const std::vector<MountEvidence>& mounts);
 ProbeResult evaluateSourceEvidence(const SourceRecord& saved, const RootEvidence& root, const std::vector<MountEvidence>& mounts);

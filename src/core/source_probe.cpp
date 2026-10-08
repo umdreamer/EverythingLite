@@ -60,7 +60,33 @@ std::string sanitizeRemoteSource(const std::string& raw) {
     }
     if(authority.empty() || authority.find('%')!=std::string::npos || authority.find(' ')!=std::string::npos) return {};
     // Colon outside IPv6 brackets may be a password without a user delimiter.
-    if(authority.front()!='[' && authority.find(':')!=std::string::npos) return {};
+    if(authority.front()!='[') {
+        // Conservative ASCII DNS/IPv4/NetBIOS subset, not a general URL parser.
+        // Parameters, punctuation, non-ASCII names and ambiguous forms produce
+        // no identity instead of preserving possible credentials in a hostname.
+        const auto name_char=[](unsigned char c) {
+            return (c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') || c=='_';
+        };
+        if(authority.size()>253) return {};
+        std::vector<std::string> labels;
+        std::size_t start=0;
+        for(std::size_t end=0;end<=authority.size();++end) {
+            if(end<authority.size() && authority[end]!='.') continue;
+            auto label=authority.substr(start,end-start);
+            if(label.empty() || label.size()>63 || !name_char(label.front()) || !name_char(label.back()) ||
+               !std::all_of(label.begin(),label.end(),[&](unsigned char c){return name_char(c) || c=='-';})) return {};
+            labels.push_back(std::move(label)); start=end+1;
+        }
+        const bool numeric_address=labels.size()>1 && std::all_of(authority.begin(),authority.end(),[](unsigned char c){return (c>='0' && c<='9') || c=='.';});
+        if(numeric_address) {
+            if(labels.size()!=4) return {};
+            for(const auto& octet:labels) {
+                if(octet.size()>3 || (octet.size()>1 && octet[0]=='0')) return {};
+                int value=0; for(char digit:octet) value=value*10+digit-'0';
+                if(value>255) return {};
+            }
+        }
+    }
     if(authority.front()=='[') {
         if(authority.back()!=']') return {};
         const auto address=authority.substr(1,authority.size()-2);
@@ -273,6 +299,12 @@ ProbeResult ProbeSession::finish() {
     // Reopen the current path too: old fd may still reference a replaced mount.
     auto current=beginSourceProbe(state.saved);
     auto out=current.result();
+    // A failed reopen has no new scope proof. Preserve its precise cause;
+    // absence of evidence must not be mistaken for an observed scope change.
+    if(out.status==SourceStatus::Failed || out.status==SourceStatus::Offline ||
+       out.mount_fingerprint.empty() || out.identity.empty()) {
+        out.update_allowed=false; state.release(); return out;
+    }
     if(held.directory_token!=state.root.directory_token || held.canonical_root!=state.root.canonical_root ||
        mountFingerprint(held.actual_mount)!=mountFingerprint(state.root.actual_mount) ||
        out.mount_fingerprint!=state.initial.mount_fingerprint ||

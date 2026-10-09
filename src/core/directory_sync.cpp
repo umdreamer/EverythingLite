@@ -91,6 +91,16 @@ std::optional<DirectoryCommand> DirectorySyncState::observe(const DirectoryObser
     const bool echo = observation.directory_context && pending_ &&
         pending_->target == observation.endpoint && pending_->path == observation.path;
 
+    // Focus revocation applies to both command directions and precedes the
+    // virtual-view early return. Removing only the current-command guard would
+    // let a retained pending request revive when the same dialog returns.
+    if (!observation.active && continuously_active) {
+        active_.reset();
+        cancelPending();
+    } else if (observation.active && !continuously_active) {
+        cancelPending();
+    }
+
     if (switched) {
         cancelPending();
         attempted_.reset();
@@ -110,10 +120,6 @@ std::optional<DirectoryCommand> DirectorySyncState::observe(const DirectoryObser
         : changed || slot->needs_activation_intent;
     slot = EndpointState{observation.endpoint, observation.path, needs_activation_intent};
     if (!observation.active) {
-        if (continuously_active) {
-            active_.reset();
-            if (pending_ && pending_->target.kind == DirectoryEndpointKind::FileDialog) cancelPending();
-        }
         // Background observations establish baselines, never new intent. They
         // still invalidate a request whose source has since navigated elsewhere.
         if (intent_ && intent_->source == observation.endpoint && intent_->path != observation.path) {
@@ -124,8 +130,6 @@ std::optional<DirectoryCommand> DirectorySyncState::observe(const DirectoryObser
         return std::nullopt;
     }
 
-    if (!continuously_active && pending_ && pending_->target.kind == DirectoryEndpointKind::FileDialog &&
-        !(pending_->target == observation.endpoint)) cancelPending();
     active_ = observation.endpoint;
     slot->needs_activation_intent = false;
     if (echo) return std::nullopt;
@@ -158,8 +162,9 @@ bool DirectorySyncState::commandIsCurrent(const DirectoryCommand& command) const
         !(target->endpoint == command.target) || source->path != command.path || target->path.empty()) {
         return false;
     }
-    return command.target.kind != DirectoryEndpointKind::FileDialog ||
-           (active_ && *active_ == command.target);
+    const auto& dialog_endpoint = command.target.kind == DirectoryEndpointKind::FileDialog
+        ? command.target : command.source;
+    return active_ && *active_ == dialog_endpoint;
 }
 
 bool DirectorySyncState::acceptResult(const DirectoryCommand& command, bool success,

@@ -188,6 +188,70 @@ void background_navigation_races_and_missing_peer() {
     assert(!source_race.acceptResult(*navigated, true, D));
 }
 
+void dialog_focus_loss_cancels_both_directions() {
+    // Exercise the non-directory early-return case first: it must still revoke
+    // focus even though a background virtual observation keeps its baseline.
+    for (bool directory_context : {false, true}) {
+        for (bool reverse_direction : {false, true}) {
+            DirectorySyncState state;
+            state.setEnabled(true);
+            assert(!state.observe(at(finder, A, 1)));
+            auto command = state.observe(at(dialog, B, 2));
+            assert(command && command->target == dialog);
+            std::uint64_t sequence = 3;
+            std::string dialog_path = B;
+            if (reverse_direction) {
+                assert(state.acceptResult(*command, true, A));
+                dialog_path = C;
+                command = state.observe(at(dialog, C, sequence++));
+                assert(command && command->target == finder);
+            }
+            const auto old = *command;
+            assert(!state.observe({dialog, directory_context ? dialog_path : "",
+                                   sequence++, false, directory_context}));
+            assert(!state.commandIsCurrent(old));
+            assert(!state.acceptResult(old, true, old.path));
+            // Returning keeps the intent but creates a fresh generation. A late
+            // result must neither complete this request nor erase its baseline.
+            auto returned = state.observe(at(dialog, dialog_path, sequence++));
+            assert(returned && returned->path == old.path);
+            assert(returned->generation > old.generation);
+            assert(!state.commandIsCurrent(old));
+            assert(!state.acceptResult(old, true, old.path));
+            assert(state.commandIsCurrent(*returned));
+            assert(state.acceptResult(*returned, true, returned->path));
+            assert(!state.observe(at(dialog, reverse_direction ? C : A, sequence++)));
+        }
+    }
+}
+
+void another_foreground_endpoint_cancels_both_directions() {
+    for (bool reverse_direction : {false, true}) {
+        DirectorySyncState state;
+        state.setEnabled(true);
+        assert(!state.observe(at(finder, A, 1)));
+        auto command = state.observe(at(dialog, B, 2));
+        assert(command);
+        std::uint64_t sequence = 3;
+        std::string dialog_path = B;
+        if (reverse_direction) {
+            assert(state.acceptResult(*command, true, A));
+            dialog_path = C;
+            command = state.observe(at(dialog, C, sequence++));
+            assert(command && command->target == finder);
+        }
+        const auto old = *command;
+        assert(!state.observe(at(finder, A, sequence++)));
+        assert(!state.commandIsCurrent(old));
+        assert(!state.acceptResult(old, true, old.path));
+        auto returned = state.observe(at(dialog, dialog_path, sequence++));
+        assert(returned && returned->generation > old.generation && returned->path == old.path);
+        assert(!state.commandIsCurrent(old));
+        assert(!state.acceptResult(old, true, old.path));
+        assert(state.commandIsCurrent(*returned));
+    }
+}
+
 void invalid_inputs_and_synthetic_names() {
     DirectorySyncState state;
     state.setEnabled(true);
@@ -231,6 +295,8 @@ int main() {
     delayed_echo_and_failed_results();
     deactivation_virtual_views_and_disable();
     background_navigation_races_and_missing_peer();
+    dialog_focus_loss_cancels_both_directions();
+    another_foreground_endpoint_cancels_both_directions();
     invalid_inputs_and_synthetic_names();
     std::cout << "Directory sync synthetic state tests passed\n";
 }

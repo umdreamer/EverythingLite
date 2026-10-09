@@ -72,6 +72,9 @@ if(BUILD_GUI)
     if(Qt6_FOUND)
         set(CMAKE_AUTOMOC ON)
         add_library(everything_ui STATIC
+            src/ui/directory_sync_setup_dialog.cpp
+            src/ui/directory_sync_setup_dialog.h
+            src/ui/directory_sync_permissions.cpp
             src/ui/main_window.cpp
             src/ui/main_window_sync.cpp
             src/ui/result_presentation.h
@@ -97,8 +100,11 @@ if(BUILD_GUI)
         endif()
 
         if(APPLE)
+            find_library(APPLICATIONSERVICES_FRAMEWORK ApplicationServices REQUIRED)
+            target_link_libraries(everything_ui PUBLIC ${APPLICATIONSERVICES_FRAMEWORK} ${CORESERVICES_FRAMEWORK})
             set_target_properties(everything-lite PROPERTIES
                 MACOSX_BUNDLE TRUE
+                MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/resources/macos/Info.plist.in"
                 MACOSX_BUNDLE_BUNDLE_NAME "Everything Lite"
                 MACOSX_BUNDLE_GUI_IDENTIFIER "org.cichi.everything-lite"
                 MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
@@ -117,6 +123,10 @@ if(BUILD_TESTS)
     enable_testing()
     if(TARGET everything_ui)
         find_package(Qt6 REQUIRED COMPONENTS Test)
+        add_executable(test_directory_sync_setup tests/test_directory_sync_setup.cpp)
+        target_link_libraries(test_directory_sync_setup PRIVATE everything_ui Qt6::Test)
+        add_test(NAME directory_sync_setup COMMAND test_directory_sync_setup)
+        set_tests_properties(directory_sync_setup PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
         add_executable(test_desktop_actions tests/test_desktop_actions.cpp)
         target_link_libraries(test_desktop_actions PRIVATE everything_ui Qt6::Test)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -180,6 +190,11 @@ if(BUILD_TESTS)
             ${CMAKE_SOURCE_DIR}/tests/check_cli_parity.py $<TARGET_FILE:everything-lite-cli>)
         set_tests_properties(cli_parity PROPERTIES TIMEOUT 60)
         if(APPLE)
+            if(TARGET everything-lite)
+                add_test(NAME directory_sync_permissions COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/check_directory_sync_permissions.py $<TARGET_FILE:everything-lite> ${CMAKE_SOURCE_DIR})
+                set_tests_properties(directory_sync_permissions PROPERTIES TIMEOUT 60)
+            endif()
             add_test(NAME cli_sources COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/check_cli_sources.py $<TARGET_FILE:everything-lite-cli>)
             set_tests_properties(cli_sources PROPERTIES TIMEOUT 60)

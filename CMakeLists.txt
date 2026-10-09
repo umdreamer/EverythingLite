@@ -35,6 +35,7 @@ add_library(everything_core
     src/core/exclusion_policy.cpp
     src/core/app_paths.cpp
     src/core/path_utils.cpp
+    src/core/directory_sync.cpp
     src/core/scanner.cpp
     src/core/database.cpp
     src/core/source_catalog.cpp
@@ -138,6 +139,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_exclusion_policy PRIVATE everything_core)
     add_test(NAME exclusion_policy COMMAND test_exclusion_policy)
     if(APPLE)
+        add_executable(test_directory_sync tests/test_directory_sync.cpp)
+        target_link_libraries(test_directory_sync PRIVATE everything_core)
+        add_test(NAME directory_sync COMMAND test_directory_sync)
+        set_tests_properties(directory_sync PROPERTIES TIMEOUT 30)
         add_executable(test_source_verification tests/test_source_verification.cpp)
         target_link_libraries(test_source_verification PRIVATE everything_core)
         add_test(NAME source_verification COMMAND test_source_verification)

@@ -37,9 +37,9 @@ return runDirectorySyncPermissionHelper(valid_request);
 
 应用 plist 保留既有显示名 Everything Lite、文件名 EverythingLite、bundle ID 与版本变量；增加 NSAppleEventsUsageDescription：用于在文件打开和保存窗口与 Finder 之间同步当前目录。不能修改宿主授权配置、签名权限或 TCC 数据库。
 
-- [ ] 先增加无动作 helper 占位及早分派行为回归，验证真实失败而非缺符号；占位不能提交。Python 调用实际 GUI 二进制的只读模式，断言单行 JSON 协议及类型；实际不弹任何权限请求。畸形参数测试要求非零且无 JSON／GUI。隔离 HOME/XDG/临时模拟主库前后不变；其证明边界同时依赖 main 的真实调用顺序。
-- [ ] 实现上述权限查询、正确释放及 plist。读取实际生成 plist，核对名称、版本、bundle ID、说明字符串。执行所有 Core 回归、严格 GUI 构建及定向权限入口回归；不执行会弹授权的请求模式。
-- [ ] 规范与质量审查、隐私检查通过后，只暂存本阶段文件，以公开 noreply 身份本地提交。
+- [x] 先增加无动作 helper 占位及早分派行为回归，验证真实失败而非缺符号；占位不能提交。Python 调用实际 GUI 二进制的只读模式，断言单行 JSON 协议及类型；实际不弹任何权限请求。畸形参数测试要求非零且无 JSON／GUI。隔离 HOME/XDG/临时模拟主库前后不变；其证明边界同时依赖 main 的真实调用顺序。
+- [x] 实现上述权限查询、正确释放及 plist。读取实际生成 plist，核对名称、版本、bundle ID、说明字符串。执行所有 Core 回归、严格 GUI 构建及定向权限入口回归；不执行会弹授权的请求模式。
+- [x] 规范与质量审查、隐私检查通过后，只暂存本阶段文件，以公开 noreply 身份本地提交。
 
 ## 2b：独立授权设置窗口
 
@@ -47,8 +47,8 @@ return runDirectorySyncPermissionHelper(valid_request);
 
 设置窗口提供“检查权限”“请求系统授权”和“关闭”。进入窗口先运行只读 helper；请求按钮才调用同一可执行文件的 `--directory-sync-permission-probe --request`。当前进程尚未真实退出时不发第二次请求。只读检查有界超时，授权请求允许用户处理系统对话框；关闭后在后台清理，界面线程不析构仍运行的 QProcess。回调以窗口生命周期和请求编号守卫，迟到结果不访问已关闭窗口。输出预算 64 KiB，仅正常退出后解析协议，非法 JSON／错误退出／超时只显示固定错误，不能泄露原始 stderr 或目录。
 
-- [ ] 使用可控合成 helper 回归 granted／consent-required／denied／unavailable、非法响应、失败、超时、重复点击、关闭及迟到回调。按钮参数严格区分只读与请求；测试不触发真正授权。先运行实际行为失败再实现。
-- [ ] 严格 GUI 全回归通过，实际 app 可执行文件和 plist 完整；静态两阶段审查通过后本地提交。
+- [x] 使用可控合成 helper 回归 granted／consent-required／denied／unavailable、非法响应、失败、超时、重复点击、关闭及迟到回调。按钮参数严格区分只读与请求；测试不触发真正授权。先运行实际行为失败再实现。
+- [x] 严格 GUI 全回归通过，实际 app 可执行文件和 plist 完整；静态两阶段审查通过后本地提交。
 - [ ] 打开独立设置窗口供用户授予系统权限，不启动日常索引、不替换当前使用中的应用。随后才对合成标准面板进行已授权原生目录读取与导航验证。
 
 ## 原生验证门槛
@@ -56,3 +56,7 @@ return runDirectorySyncPermissionHelper(valid_request);
 当前研究进程 AXIsProcessTrustedWithOptions(nullptr)=false。自有标准面板的公开对象已运行，但远程子控件没有暴露可验证目录属性。跨应用 AX 树、当前目录控件以及专用导航元素的确认动作尚未验证；不编造通用属性或字符串选择器。权限缺失时不绕过系统限制。
 
 依据：[Apple — Allow accessibility apps to access your Mac](https://support.apple.com/guide/mac-help/allow-accessibility-apps-to-access-your-mac-mh43185/mac)、[Apple — AEDeterminePermissionToAutomateTarget](https://developer.apple.com/documentation/coreservices/3025784-aedeterminepermissiontoautomatet)。具体声明以本机公开 AXUIElement.h 和 AppleEvents.h 为依据。
+
+## 实施记录（2026-10-09）
+
+权限入口及设置窗口合并实现为本地提交 `8a7bbf1`，已通过只读规范与质量审查。Core Debug 15/15、严格 GUI 19/19；最后输出超限处理及版本校验调整后，定向入口与窗口测试 2/2，控制代理独立复验同样 2/2，约 2.45 秒。独立设置窗口已打开，默认只读；实际 LaunchServices 查询显示辅助功能未授权、Finder 为 consent-required，模拟索引未创建。授权请求尚未代用户发起，原生跨应用目录读取与导航仍待用户授权后验证。

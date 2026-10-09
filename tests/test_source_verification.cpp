@@ -127,6 +127,44 @@ int main() {
         if(choice==5)bad.initial_after.issue=ProbeIssue::Unsupported;
         assert(!stableSourceVerification(bad));
     }
+    // The catalog permits manual Cloud/USB labels. Probe evidence, however,
+    // must describe the physical local/network classification from Native.
+    for(const auto type:{SourceType::Cloud,SourceType::USB,SourceType::NAS}) {
+        auto bad=valid;
+        for(auto* observation:{&bad.initial_before,&bad.initial_after,&bad.candidate_before,&bad.candidate_after})
+            observation->type=type;
+        assert(!stableSourceVerification(bad) && "local evidence must reject nonlocal physical classification");
+    }
+    // Synthetic network evidence exercises the production evaluator and pure
+    // verification contract; these tests do not establish real NAS support.
+    const auto native_fields=capturedSourceFingerprintFields(valid.initial_before.mount_fingerprint);
+    for(const auto filesystem:{"smbfs","nfs","afpfs","webdav"}) {
+        MountEvidence network_mount;network_mount.mount_point=native_fields[0];network_mount.filesystem=filesystem;
+        network_mount.raw_remote_source="//synthetic.invalid/share";network_mount.mount_token="synthetic-session";
+        RootEvidence network_root;network_root.canonical_root=native_fields[5];network_root.directory_token=native_fields[6];
+        network_root.actual_mount=network_mount;
+        SourceVerificationEvidence network_evidence;network_evidence.expected=valid.expected;
+        network_evidence.initial_before=evaluateSourceEvidence(network_evidence.expected,network_root,{network_mount});
+        auto network_candidate=network_evidence.expected;network_candidate.identity=network_evidence.initial_before.identity;
+        network_candidate.mount_fingerprint=network_evidence.initial_before.mount_fingerprint;
+        network_evidence.candidate_before=evaluateSourceEvidence(network_candidate,network_root,{network_mount});
+        network_evidence.candidate_after=network_evidence.candidate_before;network_evidence.initial_after=network_evidence.initial_before;
+        assert(stableSourceVerification(network_evidence));
+        for(const auto type:{SourceType::Local,SourceType::External,SourceType::Unknown,SourceType::USB,SourceType::Cloud}) {
+            auto bad=network_evidence;
+            for(auto* observation:{&bad.initial_before,&bad.initial_after,&bad.candidate_before,&bad.candidate_after})
+                observation->type=type;
+            assert(!stableSourceVerification(bad) && "network evidence must classify the physical source as NAS");
+        }
+        auto unsupported=network_evidence;
+        for(auto* observation:{&unsupported.initial_before,&unsupported.initial_after,&unsupported.candidate_before,&unsupported.candidate_after}) {
+            auto unsupported_fields=capturedSourceFingerprintFields(observation->mount_fingerprint);
+            unsupported_fields[1]="synthetic-unsupported";
+            observation->mount_fingerprint=framed(unsupported_fields);
+            observation->identity="mac-share:synthetic-unsupported:"+unsupported_fields[3];
+        }
+        assert(!stableSourceVerification(unsupported) && "unsupported network filesystem cannot acquire a verified identity");
+    }
     fields=capturedSourceFingerprintFields(valid.initial_before.mount_fingerprint);auto altered=fields;altered[6]="1:1:0:0";
     assert(!sameSourceDirectoryInstance(framed(altered),framed(altered)));
     altered=fields;altered[6]="999999:"+fields[6].substr(fields[6].find(':')+1);

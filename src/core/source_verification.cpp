@@ -44,7 +44,14 @@ void validObservation(const ProbeResult& p) {
     const auto f=capturedSourceFingerprintFields(p.mount_fingerprint);
     if(f[5]!=p.canonical_root || static_cast<int>(p.type)<0 || static_cast<int>(p.type)>static_cast<int>(SourceType::Unknown))
         throw std::invalid_argument("inconsistent source observation");
-    const auto identity=f[3]=="local" ? (f[2].empty()?std::string{}:"mac-volume:"+f[2]) : "mac-share:"+f[1]+":"+f[3];
+    const bool local=f[3]=="local";
+    // Match SourceProbe's physical classification. Cloud/USB remain valid
+    // manual catalog labels but cannot be supplied as native probe evidence.
+    const bool supported_network=!local && (f[1]=="smbfs" || f[1]=="nfs" || f[1]=="afpfs" || f[1]=="webdav");
+    if((local && p.type!=SourceType::Local && p.type!=SourceType::External && p.type!=SourceType::Unknown) ||
+       (!local && (!supported_network || p.type!=SourceType::NAS)))
+        throw std::invalid_argument("inconsistent physical source classification");
+    const auto identity=local ? (f[2].empty()?std::string{}:"mac-volume:"+f[2]) : "mac-share:"+f[1]+":"+f[3];
     if(identity.empty() || identity!=p.identity) throw std::invalid_argument("invalid permanent source identity");
     directoryParts(f[6]);
     if(capturedChildMountRoots(p.boundary_fingerprint,p.canonical_root)!=p.child_mount_boundaries)

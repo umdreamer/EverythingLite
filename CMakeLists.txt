@@ -100,6 +100,10 @@ if(BUILD_GUI)
         endif()
 
         if(APPLE)
+            enable_language(OBJCXX)
+            target_sources(everything_ui PRIVATE src/ui/directory_sync_native_probe.mm)
+            find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+            target_link_libraries(everything_ui PUBLIC ${APPKIT_FRAMEWORK})
             find_library(APPLICATIONSERVICES_FRAMEWORK ApplicationServices REQUIRED)
             target_link_libraries(everything_ui PUBLIC ${APPLICATIONSERVICES_FRAMEWORK} ${CORESERVICES_FRAMEWORK})
             set_target_properties(everything-lite PROPERTIES
@@ -121,6 +125,15 @@ endif()
 
 if(BUILD_TESTS)
     enable_testing()
+    if(APPLE AND TARGET everything-lite)
+        enable_language(OBJC)
+        add_executable(directory_fixture MACOSX_BUNDLE tests/mac_directory_fixture.m)
+        set_target_properties(directory_fixture PROPERTIES AUTOMOC OFF
+            OUTPUT_NAME DirectoryFixture
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-tests"
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/resources/macos/DirectoryFixtureInfo.plist.in")
+        target_link_libraries(directory_fixture PRIVATE ${APPKIT_FRAMEWORK})
+    endif()
     if(TARGET everything_ui)
         find_package(Qt6 REQUIRED COMPONENTS Test)
         add_executable(test_directory_sync_setup tests/test_directory_sync_setup.cpp)
@@ -191,6 +204,9 @@ if(BUILD_TESTS)
         set_tests_properties(cli_parity PROPERTIES TIMEOUT 60)
         if(APPLE)
             if(TARGET everything-lite)
+                add_test(NAME directory_sync_native_probe COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/check_directory_sync_native_probe.py $<TARGET_FILE:everything-lite>)
+                set_tests_properties(directory_sync_native_probe PROPERTIES TIMEOUT 90)
                 add_test(NAME directory_sync_permissions COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/check_directory_sync_permissions.py $<TARGET_FILE:everything-lite> ${CMAKE_SOURCE_DIR})
                 set_tests_properties(directory_sync_permissions PROPERTIES TIMEOUT 60)

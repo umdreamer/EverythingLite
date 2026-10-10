@@ -162,3 +162,14 @@ Finder 相关新增需求已确认采用文件对话框与 Finder 的双向目�
 双向目录状态模块已实现，但原生跨应用目录读取、Finder 导航及标准文件对话框导航尚未接入。权限入口可测试不代表目录联动已启用；窗口中有明确说明。版本仍为 0.4.12，Linux 开发延期。
 
 系统授权依据：[Apple — Allow accessibility apps to access your Mac](https://support.apple.com/en-my/guide/mac-help/mh43185/mac)、[Apple — Allow apps to automate and control other apps](https://support.apple.com/en-hk/guide/mac-help/mchl108e1718/mac)。
+
+
+## Mac 独立权限引导修复（2026-10-10）
+
+实际 bundle 只读检查已返回 Finder granted，但 accessibility=false；不能据此认定两个权限均已生效，原因尚未确定。标准面板根对象的自有 AX 检查可读取 open-panel 标识，但 AXDocument 无值，远程子控件仍未取得角色或目录属性。自有检查不代表跨进程面板目录读取已经验证。
+
+本地提交 `291f4b6` 仅修改权限对话框及其回归。明确区分 Finder 弹窗与辅助功能授权，增加仅点击才执行的设置入口及当前应用定位。定位从实际程序的规范路径核对 `.app/Contents/MacOS` 布局；非应用包、误导祖先及缺少平台回调使用固定提示，不输出程序路径。打开外部界面的回调由测试显式注入；测试不打开真实系统设置或 Finder，也不请求 TCC。
+
+新增说明及按钮的回归先真实失败；缺少定位回调的提示回归也先失败，修复后严格 GUI 构建成功、定向 CTest 2/2。控制代理独立复验最终同两项入口 2/2，exit 0，约 2.87 秒。最终范围 `be27667..291f4b6` 已通过只读规范与独立质量审查。没有重复全套 Core 或 Qt 回归、生成 Release、推送或替换日常应用。新独立引导窗口已打开。
+
+原生跨应用目录识别与双向导航仍未接入；当前辅助功能检查未通过，不能宣称该功能可用。系统手动授权方式参见 [Apple — Allow accessibility apps to access your Mac](https://support.apple.com/en-my/guide/mac-help/mh43185/mac)。设置 URL 仅提供入口，不能保证每个 macOS 版本跳转到相同页面。

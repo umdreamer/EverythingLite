@@ -1,5 +1,8 @@
 #include "ui/directory_sync_setup_dialog.h"
 #include <QCoreApplication>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -7,6 +10,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <cmath>
 #include <cstdint>
@@ -16,6 +20,29 @@
 namespace everything_lite {
 namespace {
 constexpr qint64 outputBudget = 64 * 1024;
+DirectorySyncSetupDialog::GuidanceActions productionGuidance() {
+    DirectorySyncSetupDialog::GuidanceActions actions;
+    actions.applicationFilePath = QCoreApplication::applicationFilePath();
+#ifdef Q_OS_MAC
+    actions.openSettings = [](const QUrl& url) { return QDesktopServices::openUrl(url); };
+    actions.revealApplication = [](const QString& bundle) {
+        return QProcess::startDetached(QStringLiteral("/usr/bin/open"), {QStringLiteral("-R"), bundle});
+    };
+#endif
+    return actions;
+}
+QString applicationBundle(const QString& executablePath) {
+    const QFileInfo executable(executablePath);
+    if (!executable.isFile()) return {};
+    const auto canonicalPath = executable.canonicalFilePath();
+    if (canonicalPath.isEmpty()) return {};
+    auto directory = QFileInfo(canonicalPath).dir();
+    if (directory.dirName() != QStringLiteral("MacOS") || !directory.cdUp() ||
+        directory.dirName() != QStringLiteral("Contents") || !directory.cdUp()) return {};
+    const auto name = directory.dirName();
+    if (name.size() <= 4 || !name.endsWith(QStringLiteral(".app"))) return {};
+    return directory.absolutePath();
+}
 struct ProbeOutput {
     QByteArray stdoutData;
     qint64 bytes = 0;
@@ -52,22 +79,50 @@ QString permissionText(const QByteArray& data, bool request) {
     else if (finder == "unavailable") finderText = QStringLiteral("暂不可用");
     else if (finder == "error") finderText = QStringLiteral("无法检查");
     else return {};
-    return QStringLiteral("辅助功能：%1\nFinder：%2").arg(
-        object.value("accessibility").toBool() ? QStringLiteral("已授权") : QStringLiteral("未获授权"), finderText);
+    const bool accessibility = object.value("accessibility").toBool();
+    auto text = QStringLiteral("辅助功能：%1\nFinder：%2").arg(
+        accessibility ? QStringLiteral("已授权") : QStringLiteral("未获授权"), finderText);
+    if (!accessibility) text += QStringLiteral("\n辅助功能需在系统设置为当前应用开启；Finder 允许弹窗不会开启辅助功能。开启后请再次检查。");
+    return text;
 }
 } // namespace
 DirectorySyncSetupDialog::DirectorySyncSetupDialog(QWidget* parent)
     : DirectorySyncSetupDialog(HelperConfig{QCoreApplication::applicationFilePath(), {}, 15000, 300000}, parent) {}
 DirectorySyncSetupDialog::DirectorySyncSetupDialog(HelperConfig helper, QWidget* parent)
-    : QDialog(parent), helper_(std::move(helper)) {
+    : DirectorySyncSetupDialog(std::move(helper), productionGuidance(), parent) {}
+DirectorySyncSetupDialog::DirectorySyncSetupDialog(HelperConfig helper, GuidanceActions guidance, QWidget* parent)
+    : QDialog(parent), helper_(std::move(helper)), guidance_(std::move(guidance)) {
     setWindowTitle(QStringLiteral("Everything Lite — 目录联动权限"));
     auto* layout = new QVBoxLayout(this);
     auto* explanation = new QLabel(QStringLiteral("原生目录联动正在实现。获得权限不等于已启用目录联动。\n"
-        "检查权限不会弹出授权提示。请求系统授权后，请按系统提示操作。\n"
-        "辅助功能权限可在系统设置的“隐私与安全性 → 辅助功能”中开启；更改后可再次检查。"), this);
+        "检查权限不会弹出授权提示。请求系统授权时，请处理 Finder 允许弹窗。\n"
+        "辅助功能需单独在系统设置的“隐私与安全性 → 辅助功能”中为当前应用开启。\n"
+        "可点击“显示当前应用”确认本次应用；开启后请再次检查。"), this);
     explanation->setObjectName("permissionExplanation"); explanation->setWordWrap(true); layout->addWidget(explanation);
     status_ = new QLabel(QStringLiteral("正在检查权限……"), this);
     status_->setObjectName("permissionStatus"); status_->setWordWrap(true); layout->addWidget(status_);
+    auto* guidanceRow = new QHBoxLayout;
+    auto* settings = new QPushButton(QStringLiteral("打开辅助功能设置"), this);
+    settings->setObjectName("openAccessibilitySettings");
+    auto* reveal = new QPushButton(QStringLiteral("显示当前应用"), this);
+    reveal->setObjectName("revealCurrentApplication");
+    guidanceRow->addWidget(settings); guidanceRow->addWidget(reveal); layout->addLayout(guidanceRow);
+    connect(settings, &QPushButton::clicked, this, [this] {
+        if (closed_) return;
+        const QUrl url(QStringLiteral("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"));
+        if (!guidance_.openSettings || !guidance_.openSettings(url))
+            status_->setText(QStringLiteral("无法打开辅助功能设置。请手动进入系统设置 → 隐私与安全性 → 辅助功能。"));
+    });
+    connect(reveal, &QPushButton::clicked, this, [this] {
+        if (closed_) return;
+        const auto bundle = applicationBundle(guidance_.applicationFilePath);
+        if (bundle.isEmpty() || !guidance_.revealApplication) {
+            status_->setText(QStringLiteral("无法定位当前应用包。请在系统设置中手动选择当前应用。"));
+            return;
+        }
+        if (!guidance_.revealApplication(bundle))
+            status_->setText(QStringLiteral("无法显示当前应用。请在系统设置中手动选择当前应用。"));
+    });
     auto* row = new QHBoxLayout;
     check_ = new QPushButton(QStringLiteral("检查权限"), this); check_->setObjectName("checkPermissions");
     request_ = new QPushButton(QStringLiteral("请求系统授权"), this); request_->setObjectName("requestPermissions");
@@ -77,7 +132,7 @@ DirectorySyncSetupDialog::DirectorySyncSetupDialog(HelperConfig helper, QWidget*
     connect(request_, &QPushButton::clicked, this, [this] { startProbe(true); });
     connect(close, &QPushButton::clicked, this, &QDialog::reject);
     check_->setEnabled(false); request_->setEnabled(false);
-    resize(520, 220);
+    resize(560, 300);
     QTimer::singleShot(0, this, [this] { startProbe(false); });
 }
 DirectorySyncSetupDialog::~DirectorySyncSetupDialog() { cancelProbe(); }

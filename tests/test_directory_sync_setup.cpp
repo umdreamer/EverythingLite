@@ -1,12 +1,14 @@
 #include "ui/directory_sync_setup_dialog.h"
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QPushButton>
 #include <QTemporaryDir>
+#include <QUrl>
 #include <QtTest>
 using namespace everything_lite;
 class DirectorySyncSetupTest : public QObject {
@@ -74,6 +76,88 @@ print(json.dumps(v))
     void noAccessibility() {
         DirectorySyncSetupDialog d(config("no-accessibility")); QVERIFY(status(d));
         QTRY_VERIFY(status(d)->text().contains("辅助功能：未获授权"));
+        QVERIFY(status(d)->text().contains("Finder：已授权"));
+        QVERIFY(status(d)->text().contains("需在系统设置为当前应用开启"));
+    }
+    void guidanceButtonsExist() {
+        DirectorySyncSetupDialog d(config("no-accessibility"));
+        QVERIFY(button(d, "openAccessibilitySettings"));
+        QVERIFY(button(d, "revealCurrentApplication"));
+        const auto explanation=d.findChild<QLabel*>("permissionExplanation")->text();
+        QVERIFY(explanation.contains("Finder 允许弹窗"));
+        QVERIFY(explanation.contains("辅助功能需单独"));
+    }
+    void guidanceActionsOnlyOnClick() {
+        const auto bundle = dir.filePath("Synthetic.app");
+        const auto executable = bundle + "/Contents/MacOS/Synthetic";
+        QVERIFY(QDir().mkpath(QFileInfo(executable).absolutePath()));
+        QFile f(executable); QVERIFY(f.open(QIODevice::WriteOnly)); f.close();
+        int settingsCalls=0, revealCalls=0;
+        QUrl openedUrl; QString revealedBundle;
+        DirectorySyncSetupDialog::GuidanceActions actions{
+            executable,
+            [&](const QUrl& url) { ++settingsCalls; openedUrl=url; return true; },
+            [&](const QString& path) { ++revealCalls; revealedBundle=path; return true; }};
+        DirectorySyncSetupDialog d(config("no-accessibility"), actions);
+        QTRY_VERIFY(status(d)->text().contains("Finder：已授权"));
+        QCOMPARE(settingsCalls, 0); QCOMPARE(revealCalls, 0);
+        button(d, "checkPermissions")->click();
+        QTRY_COMPARE(calls().size(), 2);
+        QTRY_VERIFY(button(d, "checkPermissions")->isEnabled());
+        QCOMPARE(settingsCalls, 0); QCOMPARE(revealCalls, 0);
+        button(d, "openAccessibilitySettings")->click();
+        QCOMPARE(settingsCalls, 1); QCOMPARE(revealCalls, 0);
+        QCOMPARE(openedUrl, QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"));
+        button(d, "revealCurrentApplication")->click();
+        QCOMPARE(settingsCalls, 1); QCOMPARE(revealCalls, 1);
+        QCOMPARE(revealedBundle, QFileInfo(bundle).canonicalFilePath());
+        QCOMPARE(calls().size(), 2); // Guidance buttons do not request system consent.
+        button(d, "requestPermissions")->click();
+        QTRY_COMPARE(calls().size(), 3);
+        QTRY_VERIFY(button(d, "requestPermissions")->isEnabled());
+        QCOMPARE(settingsCalls, 1); QCOMPARE(revealCalls, 1);
+        d.reject();
+        button(d, "openAccessibilitySettings")->click();
+        button(d, "revealCurrentApplication")->click();
+        QCOMPARE(settingsCalls, 1); QCOMPARE(revealCalls, 1);
+    }
+    void guidanceActionFailures() {
+        const auto executable=dir.filePath("Failure.app/Contents/MacOS/Synthetic");
+        QVERIFY(QDir().mkpath(QFileInfo(executable).absolutePath()));
+        QFile f(executable); QVERIFY(f.open(QIODevice::WriteOnly)); f.close();
+        DirectorySyncSetupDialog::GuidanceActions actions{
+            executable, [](const QUrl&) { return false; }, [](const QString&) { return false; }};
+        DirectorySyncSetupDialog d(config("no-accessibility"), actions);
+        QTRY_VERIFY(button(d, "checkPermissions")->isEnabled());
+        button(d, "openAccessibilitySettings")->click();
+        QCOMPARE(status(d)->text(), QStringLiteral("无法打开辅助功能设置。请手动进入系统设置 → 隐私与安全性 → 辅助功能。"));
+        button(d, "revealCurrentApplication")->click();
+        QCOMPARE(status(d)->text(), QStringLiteral("无法显示当前应用。请在系统设置中手动选择当前应用。"));
+        DirectorySyncSetupDialog unsupported(config("granted"), {executable, {}, {}});
+        QTRY_VERIFY(button(unsupported, "checkPermissions")->isEnabled());
+        button(unsupported, "revealCurrentApplication")->click();
+        QCOMPARE(status(unsupported)->text(), QStringLiteral("无法定位当前应用包。请在系统设置中手动选择当前应用。"));
+    }
+    void invalidBundle_data() {
+        QTest::addColumn<QString>("relativeExecutable");
+        QTest::newRow("plain-executable") << "Plain";
+        QTest::newRow("misleading-ancestor") << "Ancestor.app/Other/Plain";
+        QTest::newRow("no-app-extension") << "NotBundle/Contents/MacOS/Plain";
+        QTest::newRow("empty-app-name") << ".app/Contents/MacOS/Plain";
+    }
+    void invalidBundle() {
+        QFETCH(QString, relativeExecutable);
+        const auto executable=dir.filePath(relativeExecutable);
+        QVERIFY(QDir().mkpath(QFileInfo(executable).absolutePath()));
+        QFile f(executable); QVERIFY(f.open(QIODevice::WriteOnly)); f.close();
+        int revealCalls=0;
+        DirectorySyncSetupDialog::GuidanceActions actions{
+            executable, [](const QUrl&) { return false; }, [&](const QString&) { ++revealCalls; return true; }};
+        DirectorySyncSetupDialog d(config("granted"), actions);
+        QTRY_VERIFY(button(d, "checkPermissions")->isEnabled());
+        button(d, "revealCurrentApplication")->click();
+        QCOMPARE(revealCalls, 0);
+        QCOMPARE(status(d)->text(), QStringLiteral("无法定位当前应用包。请在系统设置中手动选择当前应用。"));
     }
     void argumentsAndRepeatedClick() {
         DirectorySyncSetupDialog d(config("granted")); QVERIFY(status(d));

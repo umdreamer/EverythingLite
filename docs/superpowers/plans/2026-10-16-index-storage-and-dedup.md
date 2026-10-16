@@ -12,7 +12,7 @@
 
 The approved scope comprises space management, repeated-entry fixes, then directory dictionary and compact name indexing. No file-content hashing, real-file deletion, Linux development, Finder changes, remote push, archive or release ZIP inspection. Existing 0.4.12 branding remains until all approved storage changes pass. Reuse the current feature branch; stage only owned public files. Public docs contain no real database paths, filenames, searches or measured personal dataset aggregates.
 
-- [ ] Task 1 — Storage report and explicit compaction.
+- [x] Task 1 — Storage report and explicit compaction.
   Create `src/core/index_storage.h/.cpp`, `tests/test_index_storage.cpp`, `tests/check_cli_storage.py`; modify CLI and CMake. `readIndexStorage(path)` opens SQLITE_OPEN_READONLY without Database::initialize, reports main/WAL/SHM and exact app-owned backup files, page size/count/freelist bytes. Missing DB is an error, never creates one. `compactIndexStorage(path, backupPath, cancel)` checks same-device free space conservatively, rejects links/existing backup, creates a SQLite backup with bounded busy handling and validates it, runs native transactional VACUUM with interruption, validates integrity and returns before/after sizes. Failed maintenance preserves original data and recovery copy; no automatic backup removal. CLI `storage stats` and `storage compact --backup PATH` enforce strict arguments before initialization. Tests insert/delete synthetic records, observe free pages, check count/content/source preservation, refusal paths, interruption, busy writer and no accidental DB creation. Existing optimize-search remains a name-index rebuild.
 - [ ] Task 2 — Single scan ownership for nested roots.
   Modify IndexManager, existing scanner boundary integration, and focused Core regressions. Capture source topology before scanning, prune strict descendants assigned to other sources, reject a changed topology before merge, and refuse scanning a scope owned by another configured source. Whole-source and incremental events use the same ownership. Repeated scans remain idempotent; incomplete scans never infer deletions. Distinct source IDs sharing an access path remain independent; unknown identity never authorizes alias/source merging. Exercise parent/child roots, repeated/overlapping inputs, child offline, partial scope, cancellation and topology mutation. Keep source-wide change checks and unchanged-row zero-write behavior.
@@ -48,3 +48,7 @@ assert(model.rowCount() == 2);
 ```
 
 Interface details are finalized in each scoped task before implementation and recorded in its tests. No particular production-data compression ratio is promised.
+
+## Task 1 verification
+
+Final code `39337c0` passed specification and independent quality review. The implementation recorded behavioral RED failures before the storage API and CLI were added, and before reserved SQLite sidecar alias rejection was fixed. The controller independently reran the final `index_storage` and `cli_storage` tests: 2/2 passed, exit 0, 4.23 seconds. The earlier main implementation passed the full 17-test Core suite. No daily-index compaction or historical-backup removal was performed. A read-only daily-index metadata report completed successfully; no private paths or dataset values are recorded here.

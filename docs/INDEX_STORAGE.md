@@ -1,0 +1,39 @@
+# 索引存储与空间维护
+
+Everything Lite 通过 Vibe Coding 方式开发。存储优化以搜索一致性、离线缓存保留及可恢复性为验收条件，不依据文件名相同推断文件内容重复，不删除真实文件。
+
+## 空间统计
+
+```sh
+everything-lite-cli --db '/path/to/index.db' storage stats
+```
+
+该命令以只读方式查询 SQLite 页统计，不创建缺失数据库，不执行格式升级、扫描来源或重建搜索索引。输出为单行 JSON，schema_version 为 1，action 为 stats。storage 包含 main_bytes、wal_bytes、shm_bytes、page_size、page_count、freelist_bytes、backup_bytes、backup_count 和 total_bytes，单位为字节。文件长度统计不等于文件系统去重、压缩及快照后的独占物理占用。
+
+主库空闲页代表 SQLite 已可复用、尚未归还给文件系统的空间。它与重复记录不是同一概念。备份统计只计同目录中以主库文件名开头、符合 `.pre-source-catalog-<数字>.backup.sqlite` 或 `.pre-storage-<数字>.backup.sqlite` 规则的普通文件；不把符号链接、任意同前缀文件或其他目录文件算为应用备份。统计名称符合规则并不代表备份已经通过恢复验证。
+
+## 显式整理
+
+```sh
+everything-lite-cli --db '/path/to/index.db' storage compact \
+  --backup '/path/to/index.db.pre-storage-123.backup.sqlite'
+```
+
+备份必须使用不存在的新文件。维护源库和备份文件名均不得以 -journal、-wal、-shm 结尾，比较忽略 ASCII 大小写，防止与 SQLite 伴随文件重合；父目录别名也经过检查。文件创建采用独占方式，POSIX 权限为 0600，不覆盖已有备份。示例数字仅为合成值。
+
+操作先检查可用空间，创建可独立读取的 SQLite 备份并验证完整性，然后使用 SQLite 的原生 VACUUM 整理原库，最后验证原库完整性及备份仍可读取。不会用旧副本替换正在使用的主库，也不会删除历史备份。同卷保守预留主库与 WAL 合计的三倍空间；异卷分别检查源卷两倍、备份卷一倍。实际可用空间不足或无法查询时拒绝操作。
+
+结果 action 为 compact，包含 before、after 及本次 backup_bytes。after 会额外计入本次明确指定的备份，即使该文件在其他目录或不符合常规备份命名规则。常规 stats 不搜索这些外部文件。保留备份可能使总占用增加；只比较主库大小不能证明净节省空间。
+
+Core API 支持通过 atomic_bool 取消，覆盖分批备份、SQLite 锁等待、完整性检查及 VACUUM。备份允许持续进展，限制无进展等待、可观察重启次数及总时限。写入冲突或取消会报告失败，不以旧备份覆盖并发提交。操作失败时保留备份文件；尚未完成验证的副本不能视为可恢复备份。SQLite 自身的原子事务负责处理 VACUUM 失败回滚。
+
+`optimize-search` 仍仅重建名称搜索索引，与 `storage compact` 的空间整理行为不同。当前维护入口不自动删除旧备份，也不更改文件内容或来源身份。
+
+## 验证范围
+
+独立合成数据库回归覆盖空闲页回收、记录及离线来源元数据保留、备份单文件恢复、取消、写锁冲突、并发提交保留、路径别名和保留文件名拒绝。临时测试通过不代表已经整理日常索引或完成所有格式迁移。迁移及目录字典的实施进度记录于对应实施计划。
+
+## 参考资料
+
+- [SQLite — VACUUM](https://www.sqlite.org/lang_vacuum.html)
+- [SQLite — Online Backup API](https://www.sqlite.org/backup.html)

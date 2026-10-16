@@ -1,6 +1,7 @@
 #include "core/app_paths.h"
 #include "core/database.h"
 #include "core/index_manager.h"
+#include "core/index_storage.h"
 #include "core/search_engine.h"
 #include "core/search_service.h"
 #include "core/search_trace.h"
@@ -34,6 +35,14 @@ std::string humanSize(std::uint64_t bytes) {
     return out.str();
 }
 
+void storageJson(const IndexStorage& value) {
+    std::cout << "{\"main_bytes\":" << value.main_bytes
+              << ",\"wal_bytes\":" << value.wal_bytes << ",\"shm_bytes\":" << value.shm_bytes
+              << ",\"page_size\":" << value.page_size << ",\"page_count\":" << value.page_count
+              << ",\"freelist_bytes\":" << value.freelist_bytes << ",\"backup_bytes\":" << value.backup_bytes
+              << ",\"backup_count\":" << value.backup_count << ",\"total_bytes\":" << value.total_bytes << '}';
+}
+
 void usage() {
     std::cout <<
 R"(everything-lite-cli
@@ -51,6 +60,8 @@ Usage:
   everything-lite-cli [--db PATH] excludes set [--directory PATH] [--file PATH]
                            [--folder-filter FILTERS] [--file-filter FILTERS]
   everything-lite-cli [--db PATH] excludes clear
+  everything-lite-cli [--db PATH] storage stats
+  everything-lite-cli [--db PATH] storage compact --backup PATH
   everything-lite-cli [--db PATH] stats
   everything-lite-cli [--db PATH] clear
   everything-lite-cli [--db PATH] optimize-search
@@ -105,6 +116,7 @@ int main(int argc, char** argv) {
         // A value named "scan-helper" is consumed as a value, never dispatched.
         std::string explicit_db;
         bool db_seen=false, trace_seen=false;
+        unsigned db_count=0;
         for (;;) {
             if (!args.empty() && args[0] == "--trace-search") {
                 trace_seen=true;
@@ -113,7 +125,7 @@ int main(int argc, char** argv) {
             }
             if (!args.empty() && args[0] == "--db") {
                 if(args.size()<2) throw std::invalid_argument("--db requires a path");
-                db_seen=true;explicit_db=args[1];
+                db_seen=true; ++db_count; explicit_db=args[1];
                 args.erase(args.begin(),args.begin()+2);
                 continue;
             }
@@ -140,6 +152,25 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::cout<<"completed=1 staged="<<result.staged<<"\n";
+            return 0;
+        }
+
+        if(command=="storage") {
+            const bool stats=args.size()==2 && args[1]=="stats";
+            const bool compact=args.size()==4 && args[1]=="compact" && args[2]=="--backup" && !args[3].empty();
+            if(trace_seen || db_count>1 || (!stats && !compact))
+                throw std::invalid_argument("storage requires stats or compact --backup PATH, without search options");
+            const auto path=db_seen ? explicit_db : defaultDatabasePath();
+            if(stats) {
+                const auto report=readIndexStorage(path);
+                std::cout<<"{\"schema_version\":1,\"action\":\"stats\",\"storage\":";
+                storageJson(report); std::cout<<"}\n";
+            } else {
+                const auto result=compactIndexStorage(path,args[3]);
+                std::cout<<"{\"schema_version\":1,\"action\":\"compact\",\"before\":";
+                storageJson(result.before); std::cout<<",\"after\":"; storageJson(result.after);
+                std::cout<<",\"backup_bytes\":"<<result.backup_bytes<<"}\n";
+            }
             return 0;
         }
 

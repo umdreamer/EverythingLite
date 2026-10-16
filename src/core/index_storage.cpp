@@ -426,7 +426,9 @@ IndexOptimization migrateIndexStorageToDirectory(const std::string& value,const 
         transaction=false;result.migration_committed=true;
         if(vacuum) {
             if(progress)progress(IndexStoragePhase::Vacuum);cancelled(cancel);
-            check(sqlite3_exec(connection.get(),"VACUUM",nullptr,nullptr,nullptr),cancel);result.vacuum_completed=true;
+            const int vacuum_result=sqlite3_exec(connection.get(),"VACUUM",nullptr,nullptr,nullptr);
+            if(vacuum_result==SQLITE_OK)result.vacuum_completed=true;
+            check(vacuum_result,cancel);
         }
         if(progress)progress(IndexStoragePhase::Verify);
         verifyIntegrity(connection.get(),cancel,"storage: migrated database integrity check failed; keep recovery backup");

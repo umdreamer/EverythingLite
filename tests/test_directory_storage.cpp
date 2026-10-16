@@ -12,12 +12,29 @@
 #include <functional>
 #include <memory>
 #include <fstream>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 #ifndef _WIN32
 #include <sys/stat.h>
 #endif
 using namespace everything_lite;
 namespace fs=std::filesystem;
 using Handle=std::unique_ptr<sqlite3,decltype(&sqlite3_close)>;
+#if defined(__APPLE__)
+// Test-only interception delivers cancellation after native VACUUM has succeeded.
+static std::atomic_bool* vacuum_return_cancel=nullptr;
+extern "C" int sqlite3_exec(sqlite3* db,const char* text,sqlite3_callback callback,void* data,char** error) {
+    using Exec=int(*)(sqlite3*,const char*,sqlite3_callback,void*,char**);
+    static const auto native=reinterpret_cast<Exec>(dlsym(RTLD_NEXT,"sqlite3_exec"));assert(native);
+    const int rc=native(db,text,callback,data,error);
+    if(rc==SQLITE_OK && vacuum_return_cancel && text && std::string(text)=="VACUUM") {
+        vacuum_return_cancel->store(true);vacuum_return_cancel=nullptr;
+    }
+    return rc;
+}
+#endif
+
 static Handle open(const fs::path& path,bool writer=false) {
     sqlite3* raw=nullptr;assert(sqlite3_open(path.string().c_str(),&raw)==SQLITE_OK);
     if(writer)registerDirectoryWriter(raw);return Handle(raw,sqlite3_close);
@@ -109,6 +126,19 @@ static void failures(const fs::path& base) {
     assert(rejects([&]{db.initialize();}));
     auto check=open(path);assert(scalar(check.get(),"PRAGMA user_version")==414);
 }
+#if defined(__APPLE__)
+static void cancellationAfterVacuum(const fs::path& base) {
+    const auto path=base/"late-cancel.sqlite";Database db(path.string());db.initialize();
+    const auto id=db.ensureSourceForRoot("/synthetic/late-cancel");
+    db.mergeSourceSnapshot(db.source(id),{file("/synthetic/late-cancel","retained.txt")});
+    const auto before=rows(path);std::atomic_bool cancel{false};vacuum_return_cancel=&cancel;
+    const auto result=migrateIndexStorageToDirectory(path.string(),(base/"late-recovery.sqlite").string(),true,&cancel);
+    vacuum_return_cancel=nullptr;
+    assert(cancel.load() && !result.error.empty() && result.migration_committed && result.vacuum_completed);
+    assert(rows(path)==before && rows(base/"late-recovery.sqlite")==before);
+    db.initialize();db.verifyNameSearchIndex();
+}
+#endif
 static void writeApis(const fs::path& base) {
     const auto path=base/"api.sqlite";Database db(path.string());db.initialize();
     const std::string root="/synthetic/api";const auto id=db.ensureSourceForRoot(root);
@@ -201,6 +231,10 @@ static void performanceAndQueries(const fs::path& base) {
 }
 int main() {
     const auto base=fs::temp_directory_path()/"everything-directory-storage-tests";fs::remove_all(base);fs::create_directories(base);
-    failures(base);writeApis(base);performanceAndQueries(base);
+    failures(base);
+#if defined(__APPLE__)
+    cancellationAfterVacuum(base);
+#endif
+    writeApis(base);performanceAndQueries(base);
     fs::remove_all(base);std::cout<<"Directory storage guards passed\n";
 }

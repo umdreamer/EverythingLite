@@ -164,13 +164,13 @@ void reserveBackup(const fs::path& path) {
     ::close(fd);
 #endif
 }
-void verifyBackup(sqlite3* db,std::atomic_bool* cancel) {
+void verifyIntegrity(sqlite3* db,std::atomic_bool* cancel,const char* failure) {
     auto query=statement(db,"PRAGMA integrity_check",cancel);
     check(sqlite3_step(query.get()),cancel);
     const auto* text=sqlite3_column_text(query.get(),0);
-    if(!text || std::string(reinterpret_cast<const char*>(text))!="ok") fail("storage: backup integrity check failed");
+    if(!text || std::string(reinterpret_cast<const char*>(text))!="ok") fail(failure);
     const int rc=sqlite3_step(query.get()); check(rc,cancel);
-    if(rc!=SQLITE_DONE) fail("storage: backup integrity check failed");
+    if(rc!=SQLITE_DONE) fail(failure);
 }
 void copyDatabase(sqlite3* source,sqlite3* destination,std::atomic_bool* cancel) {
     sqlite3_backup* raw=sqlite3_backup_init(destination,"main",source,"main");
@@ -208,9 +208,11 @@ IndexStorage readIndexStorage(const std::string& value) {
     auto connection=openDatabase(path,true);
     IndexStorage report;
     // Metadata-only PRAGMAs: no application schema or file-row scans.
+    check(sqlite3_exec(connection.get(),"BEGIN",nullptr,nullptr,nullptr));
     report.page_size=pragma(connection.get(),"PRAGMA page_size");
     report.page_count=pragma(connection.get(),"PRAGMA page_count");
     report.freelist_bytes=multiply(report.page_size,pragma(connection.get(),"PRAGMA freelist_count"));
+    check(sqlite3_exec(connection.get(),"ROLLBACK",nullptr,nullptr,nullptr));
     report.main_bytes=fileBytes(path);
     report.wal_bytes=fileBytes(path.u8string()+"-wal",true);
     report.shm_bytes=fileBytes(path.u8string()+"-shm",true);
@@ -252,13 +254,14 @@ IndexCompaction compactIndexStorage(const std::string& value,const std::string& 
         auto backup=openDatabase(backup_path,false);
         work.attach(backup.get());
         copyDatabase(connection.get(),backup.get(),cancel);
-        verifyBackup(backup.get(),cancel);
+        verifyIntegrity(backup.get(),cancel,"storage: backup integrity check failed");
     }
     result.backup_bytes=fileBytes(backup_path);
     cancelled(cancel);
     // VACUUM runs on the live database. SQLite owns the atomic transaction;
     // never rename a stale backup or replacement over other writers' commits.
     check(sqlite3_exec(connection.get(),"VACUUM",nullptr,nullptr,nullptr),cancel);
+    verifyIntegrity(connection.get(),cancel,"storage: database integrity check failed; keep the verified backup");
     // No journal_mode changes or unconditional WAL checkpoint claims. A WAL
     // retained by another reader is included at its actual size in the report.
     connection.reset();

@@ -39,6 +39,7 @@ add_library(everything_core
     src/core/scanner.cpp
     src/core/database.cpp
     src/core/index_storage.cpp
+    src/core/directory_storage.cpp
     src/core/source_catalog.cpp
     src/core/source_probe.cpp
     src/core/source_verification.cpp
@@ -196,6 +197,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_database_performance PRIVATE everything_core)
     add_test(NAME database_performance COMMAND test_database_performance)
     add_test(NAME path_changes COMMAND test_database_performance path)
+    add_executable(test_directory_storage tests/test_directory_storage.cpp)
+    target_link_libraries(test_directory_storage PRIVATE everything_core)
+    add_test(NAME directory_storage COMMAND test_directory_storage)
+    set_tests_properties(directory_storage PROPERTIES TIMEOUT 90)
     add_executable(test_index_storage tests/test_index_storage.cpp)
     target_link_libraries(test_index_storage PRIVATE everything_core)
     add_test(NAME index_storage COMMAND test_index_storage)
@@ -208,6 +213,9 @@ if(BUILD_TESTS)
     add_test(NAME core COMMAND test_core)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME cli_directory COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/tests/check_cli_directory.py $<TARGET_FILE:everything-lite-cli>)
+        set_tests_properties(cli_directory PROPERTIES TIMEOUT 90)
         add_test(NAME cli_storage COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/tests/check_cli_storage.py $<TARGET_FILE:everything-lite-cli>)
         set_tests_properties(cli_storage PROPERTIES TIMEOUT 60)

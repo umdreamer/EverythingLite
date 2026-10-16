@@ -35,6 +35,15 @@ std::string humanSize(std::uint64_t bytes) {
     return out.str();
 }
 
+std::string jsonEscape(const std::string& text) {
+    std::ostringstream out;out<<'"';
+    for(const unsigned char c:text) {
+        if(c=='"' || c=='\\')out<<'\\'<<static_cast<char>(c);
+        else if(c<0x20)out<<"\\u"<<std::hex<<std::setw(4)<<std::setfill('0')<<static_cast<unsigned>(c);
+        else out<<static_cast<char>(c);
+    }
+    out<<'"';return out.str();
+}
 void storageJson(const IndexStorage& value) {
     std::cout << "{\"main_bytes\":" << value.main_bytes
               << ",\"wal_bytes\":" << value.wal_bytes << ",\"shm_bytes\":" << value.shm_bytes
@@ -62,6 +71,7 @@ Usage:
   everything-lite-cli [--db PATH] excludes clear
   everything-lite-cli [--db PATH] storage stats
   everything-lite-cli [--db PATH] storage compact --backup PATH
+  everything-lite-cli [--db PATH] storage optimize --backup PATH
   everything-lite-cli [--db PATH] stats
   everything-lite-cli [--db PATH] clear
   everything-lite-cli [--db PATH] optimize-search
@@ -158,13 +168,24 @@ int main(int argc, char** argv) {
         if(command=="storage") {
             const bool stats=args.size()==2 && args[1]=="stats";
             const bool compact=args.size()==4 && args[1]=="compact" && args[2]=="--backup" && !args[3].empty();
-            if(trace_seen || db_count>1 || (!stats && !compact))
-                throw std::invalid_argument("storage requires stats or compact --backup PATH, without search options");
+            const bool optimize=args.size()==4 && args[1]=="optimize" && args[2]=="--backup" && !args[3].empty();
+            if(trace_seen || db_count>1 || (!stats && !compact && !optimize))
+                throw std::invalid_argument("storage requires stats, compact --backup PATH, or optimize --backup PATH, without search options");
             const auto path=db_seen ? explicit_db : defaultDatabasePath();
             if(stats) {
                 const auto report=readIndexStorage(path);
                 std::cout<<"{\"schema_version\":1,\"action\":\"stats\",\"storage\":";
                 storageJson(report); std::cout<<"}\n";
+            } else if(optimize) {
+                const auto result=migrateIndexStorageToDirectory(path,args[3]);
+                std::cout<<"{\"schema_version\":1,\"action\":\"optimize\",\"before\":";
+                storageJson(result.before);std::cout<<",\"after\":";storageJson(result.after);
+                std::cout<<",\"backup_bytes\":"<<result.backup_bytes
+                    <<",\"already_compact\":"<<(result.already_compact?"true":"false")
+                    <<",\"migration_committed\":"<<(result.migration_committed?"true":"false")
+                    <<",\"vacuum_completed\":"<<(result.vacuum_completed?"true":"false")
+                    <<",\"error\":"<<jsonEscape(result.error)<<"}\n";
+                return result.error.empty()?0:1;
             } else {
                 const auto result=compactIndexStorage(path,args[3]);
                 std::cout<<"{\"schema_version\":1,\"action\":\"compact\",\"before\":";

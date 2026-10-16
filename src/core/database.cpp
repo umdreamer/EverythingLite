@@ -1,4 +1,5 @@
 #include "core/database.h"
+#include "core/directory_storage.h"
 #include "core/path_utils.h"
 #include "core/scan_request.h"
 #include "core/search_trace.h"
@@ -31,6 +32,7 @@ public:
             db_ = nullptr;
             throw std::runtime_error(message);
         }
+        registerDirectoryWriter(db_);
         // Configure lock waiting before any PRAGMA that may acquire a lock.
         sqlite3_busy_timeout(db_, 5000);
         exec("PRAGMA journal_mode=WAL;");
@@ -133,6 +135,7 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 }
 
 void installFtsTriggers(const SqliteConnection& conn) {
+    if(hasDirectoryStorage(conn.get())) { installDirectoryFtsTriggers(conn.get());return; }
     conn.exec(R"SQL(
 CREATE TRIGGER IF NOT EXISTS files_name_fts_ai AFTER INSERT ON files BEGIN
     INSERT INTO files_name_fts(rowid,search_name) VALUES(new.id,new.search_name);
@@ -174,7 +177,7 @@ std::uint64_t purgeExcluded(const SqliteConnection& conn,const ExclusionPolicy& 
         if(sqlite3_step(excluded.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
     }
     if(rc!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
-    conn.exec("DELETE FROM files WHERE id IN (SELECT id FROM excluded_keys);");
+    conn.exec(hasDirectoryStorage(conn.get()) ? "DELETE FROM file_entries WHERE id IN (SELECT id FROM excluded_keys);" : "DELETE FROM files WHERE id IN (SELECT id FROM excluded_keys);");
     const auto removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
     conn.exec("UPDATE roots SET file_count=(SELECT COUNT(*) FROM files WHERE files.root=roots.root);");
     return removed;
@@ -318,6 +321,17 @@ std::string accessPath(const std::string& root,const std::string& relative) {
 bool upsertRecords(sqlite3* db, const SourceRecord& source,
                    const std::vector<FileRecord>& records, std::int64_t generation,
                    const ExclusionPolicy& policy) {
+    if(hasDirectoryStorage(db)) {
+        bool changed=false;DirectoryRecordWriter writer(db);
+        for(const auto& r:records) {
+            if(r.source_id!=0 && r.source_id!=source.id)throw std::invalid_argument("wrong source record");
+            const auto relative=relativeTo(r.path,source.root);
+            if(!r.relative_path.empty() && r.relative_path!=relative)throw std::invalid_argument("relative path mismatch");
+            if(policy.excludes(r.path,r.is_directory))continue;
+            changed=writer.upsert(source.id,r,relative,generation)||changed;
+        }
+        return changed;
+    }
     auto stmt=prepare(db,R"SQL(
 INSERT INTO files(source_id,relative_path,path,parent_path,name,ext,root,size,modified_time,is_dir,search_name,search_path,scan_generation,cloud_copy)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -458,8 +472,11 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         const auto& policy=captured_policy?*captured_policy:current_policy;
         if(current_policy.revision!=expected.policy_revision || policy.revision!=expected.policy_revision) throw std::runtime_error("exclusion policy changed during scan");
         if(admission)admission(conn.get());
-        conn.exec("CREATE TEMP TABLE snapshot_keys(relative_path TEXT PRIMARY KEY);");
+        const bool compact=hasDirectoryStorage(conn.get());
+        conn.exec(compact?"CREATE TEMP TABLE snapshot_keys(entry_id INTEGER PRIMARY KEY);":"CREATE TEMP TABLE snapshot_keys(relative_path TEXT PRIMARY KEY);");
         auto keys=prepare(conn.get(),"INSERT INTO snapshot_keys VALUES(?)");
+        std::unique_ptr<DirectoryRecordWriter> compact_writer;
+        if(compact)compact_writer=std::make_unique<DirectoryRecordWriter>(conn.get());
         std::vector<FileRecord> records; std::uint64_t count=0;
         while(next(records)) {
             std::vector<FileRecord> accepted; accepted.reserve(records.size());
@@ -470,10 +487,14 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
                 if(!relativeWithin(relative,scope)) throw std::invalid_argument("record outside snapshot scope");
                 if(policy.excludes(record.path,record.is_directory)) continue;
                 accepted.push_back(record);
-                sqlite3_reset(keys.get()); sqlite3_clear_bindings(keys.get()); bindText(keys.get(),1,relative);
+                sqlite3_reset(keys.get()); sqlite3_clear_bindings(keys.get());
+                if(compact) {
+                    compact_writer->upsert(s.id,record,relative,0);
+                    sqlite3_bind_int64(keys.get(),1,compact_writer->entryId(s.id,relative));
+                } else bindText(keys.get(),1,relative);
                 if(sqlite3_step(keys.get())!=SQLITE_DONE) throw std::runtime_error("duplicate snapshot path");
             }
-            upsertRecords(conn.get(),s,accepted,0,policy); count+=accepted.size(); records.clear();
+            if(!compact)upsertRecords(conn.get(),s,accepted,0,policy); count+=accepted.size(); records.clear();
         }
         std::uint64_t retained_count=0;
         // Pruned but unconfirmed/offline children cannot prove deletion of
@@ -482,6 +503,17 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         if(protected_scopes && !protected_scopes->empty()) {
             // Separate equality/range probes keep both predicates on the
             // (source_id,relative_path) index, including large offline caches.
+            if(compact) {
+                for(const auto& protected_scope:*protected_scopes) {
+                    if(!relativeWithin(protected_scope,scope))continue;
+                    for(const auto& query:directoryScopeQueries("INSERT OR IGNORE INTO snapshot_keys SELECT id FROM file_entries WHERE ","",protected_scope)) {
+                        auto retain=prepare(conn.get(),query.sql);sqlite3_bind_int64(retain.get(),1,s.id);
+                        for(std::size_t i=0;i<query.bounds.size();++i)bindText(retain.get(),static_cast<int>(i)+2,query.bounds[i]);
+                        if(sqlite3_step(retain.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+                        retained_count+=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+                    }
+                }
+            } else {
             auto exact=prepare(conn.get(),"INSERT OR IGNORE INTO snapshot_keys SELECT relative_path FROM files WHERE source_id=? AND relative_path=?");
             auto subtree=prepare(conn.get(),"INSERT OR IGNORE INTO snapshot_keys SELECT relative_path FROM files WHERE source_id=? AND relative_path>=? AND relative_path<?");
             const auto retain=[&](sqlite3_stmt* statement,const std::string& lower,const std::string& upper) {
@@ -496,6 +528,7 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
                 retain(exact.get(),protected_scope,{});
                 retain(subtree.get(),protected_scope+"/",protected_scope+"0");
             }
+            }
         }
         const bool full=scope.empty() || scope==".";
         IndexStats stats; stats.indexed=count; stats.completed=true;
@@ -508,7 +541,10 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             if(searchTraceEnabled()) searchTrace("Database", "merge_delete vm_steps="+std::to_string(sqlite3_stmt_status(remove.get(),SQLITE_STMTSTATUS_VM_STEP,0)));
         };
         const std::string missing=" AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.relative_path=files.relative_path)";
-        if(full) {
+        if(compact) {
+            const std::string compact_missing=" AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.entry_id=file_entries.id)";
+            for(const auto& query:directoryScopeQueries("DELETE FROM file_entries WHERE ",compact_missing,scope))removeMissing(query.sql,query.bounds);
+        } else if(full) {
             removeMissing("DELETE FROM files WHERE source_id=?"+missing,{});
         } else {
             // Under BINARY collation, '/' (0x2f) immediately precedes '0'
@@ -531,6 +567,7 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         }
         if(tableExists(conn.get(),"files_name_fts") && !metadataFlag(conn.get(),"name_fts_ready")) {
             conn.exec("INSERT INTO files_name_fts(files_name_fts) VALUES('rebuild');");
+            if(compact)conn.exec("INSERT INTO files_name_fts(files_name_fts,rank) VALUES('integrity-check',1);");
             installFtsTriggers(conn); setMetadataFlag(conn.get(),"name_fts_ready",true);
         }
         conn.exec("COMMIT;"); return stats;
@@ -557,19 +594,45 @@ std::string quoteFtsPhrase(const std::string& text) {
     return out;
 }
 
-bool canUseNameFts(const SearchQuery& query, bool fts_ready) {
+std::vector<std::string> compactGrams(const std::string& term) {
+    std::vector<std::size_t> offsets;
+    for(std::size_t i=0;i<term.size();) {
+        offsets.push_back(i);const unsigned char c=term[i];
+        const std::size_t bytes=c<0x80?1:(c>=0xc2 && c<=0xdf?2:(c>=0xe0 && c<=0xef?3:(c>=0xf0 && c<=0xf4?4:0)));
+        if(!bytes || i+bytes>term.size() || c==0)return {};
+        for(std::size_t j=1;j<bytes;++j)if((static_cast<unsigned char>(term[i+j])&0xc0)!=0x80)return {};
+        if(bytes>=3) {
+            const auto second=static_cast<unsigned char>(term[i+1]);
+            if((c==0xe0 && second<0xa0)||(c==0xed && second>=0xa0)||(c==0xf0 && second<0x90)||(c==0xf4 && second>=0x90))return {};
+        }
+        i+=bytes;
+    }
+    offsets.push_back(term.size());if(offsets.size()<4)return {};
+    const std::size_t last=offsets.size()-4;
+    std::vector<std::string> grams;
+    for(const auto i:{std::size_t{0},last/2,last}) {
+        const auto gram=term.substr(offsets[i],offsets[i+3]-offsets[i]);
+        if(std::find(grams.begin(),grams.end(),gram)==grams.end())grams.push_back(gram);
+    }
+    return grams;
+}
+
+bool canUseNameFts(const SearchQuery& query, bool fts_ready,bool compact) {
     if (!fts_ready || query.match_path || query.terms.empty()) return false;
     for (const auto& term : query.terms) {
-        if (utf8CodepointCount(term) < 3) return false;
+        if (compact?compactGrams(term).empty():utf8CodepointCount(term)<3) return false;
     }
     return true;
 }
 
-std::string makeFtsExpression(const SearchQuery& query) {
+std::string makeFtsExpression(const SearchQuery& query,bool compact) {
     std::ostringstream out;
     for (std::size_t i = 0; i < query.terms.size(); ++i) {
         if (i) out << " AND ";
-        out << quoteFtsPhrase(query.terms[i]);
+        if(compact) {
+            const auto grams=compactGrams(query.terms[i]);
+            for(std::size_t j=0;j<grams.size();++j) {if(j)out<<" AND ";out<<quoteFtsPhrase(grams[j]);}
+        } else out << quoteFtsPhrase(query.terms[i]);
     }
     return out.str();
 }
@@ -587,7 +650,8 @@ std::vector<SearchResult> runSearch(sqlite3* db,
                                     bool fts_ready,
                                     const std::atomic_bool* cancel,
                                     bool force_direct = false) {
-    const bool use_fts = !force_direct && canUseNameFts(query, fts_ready);
+    const bool compact=hasDirectoryStorage(db);
+    const bool use_fts = !force_direct && canUseNameFts(query, fts_ready,compact);
     const auto trace_started = std::chrono::steady_clock::now();
 
     if (searchTraceEnabled()) {
@@ -622,7 +686,8 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     std::vector<std::string> where;
     if (use_fts) {
         where.emplace_back("files_name_fts MATCH ?");
-    } else {
+    }
+    if(!use_fts || compact) {
         for (std::size_t i = 0; i < query.terms.size(); ++i) {
             // Everything-compatible default: plain terms match the basename only.
             // Full-path matching is opt-in via Match Path.
@@ -639,7 +704,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     if (query.source_status) where.emplace_back("sources.status = ?");
     if (query.extension) where.emplace_back("files.ext = ? COLLATE NOCASE");
     if (query.path_term) {
-        where.emplace_back(force_direct
+        where.emplace_back((force_direct || compact)
             ? "instr(files.search_path, ?) > 0"
             : "files.search_path LIKE ? ESCAPE '\\'");
     }
@@ -663,7 +728,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     sql << " ORDER BY files.search_name ASC, files.parent_path COLLATE NOCASE ASC, files.id ASC LIMIT ? OFFSET ?";
 
     searchTrace("Database", "SQL=" + sql.str());
-    if (use_fts) searchTrace("Database", "bind[1] FTS=\"" + makeFtsExpression(query) + "\"");
+    if (use_fts) searchTrace("Database", "bind[1] FTS=\"" + makeFtsExpression(query,compact) + "\"");
 
     if (cancel) {
         sqlite3_progress_handler(db, 1000, cancelProgressCallback, const_cast<std::atomic_bool*>(cancel));
@@ -672,8 +737,9 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     auto stmt = prepare(db, sql.str());
     int bind_index = 1;
     if (use_fts) {
-        bindText(stmt.get(), bind_index++, makeFtsExpression(query));
-    } else {
+        bindText(stmt.get(), bind_index++, makeFtsExpression(query,compact));
+    }
+    if(!use_fts || compact) {
         for (const auto& token : query.terms) {
             searchTrace("Database", "bind[" + std::to_string(bind_index) + "] term=\"" + token + "\" hex=[" + bytesToHex(token) + "]");
             bindText(stmt.get(), bind_index++, token);
@@ -683,7 +749,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     if (query.source_status) sqlite3_bind_int(stmt.get(), bind_index++, static_cast<int>(*query.source_status));
     if (query.extension) bindText(stmt.get(), bind_index++, *query.extension);
     if (query.path_term) {
-        if (force_direct) bindText(stmt.get(), bind_index++, *query.path_term);
+        if (force_direct || compact) bindText(stmt.get(), bind_index++, *query.path_term);
         else bindText(stmt.get(), bind_index++, "%" + escapeLike(*query.path_term) + "%");
     }
     if (query.min_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.min_size));
@@ -735,12 +801,18 @@ void Database::initialize() const {
     // batch/statistics initializers must not compete for the WAL writer lock.
     conn.exec("BEGIN;");
     try {
-        const bool ready=schemaReady(conn.get());
+        const bool compact=hasDirectoryStorage(conn.get());
+        const bool ready=compact?directoryStorageReady(conn.get()):schemaReady(conn.get());
+        if(compact && !ready)throw std::runtime_error("unsupported or damaged directory storage; restore the verified recovery backup");
         conn.exec("COMMIT;");
         if(ready) return;
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
     conn.exec("BEGIN IMMEDIATE;");
     try {
+        if(hasDirectoryStorage(conn.get())) {
+            if(!directoryStorageReady(conn.get()))throw std::runtime_error("unsupported or damaged directory storage; restore the verified recovery backup");
+            conn.exec("COMMIT;");return;
+        }
         if(schemaReady(conn.get())) { conn.exec("COMMIT;"); return; }
         // Recheck only after taking the writer lock: another initializer may
         // already have migrated the schema while this connection was waiting.
@@ -980,7 +1052,7 @@ std::int64_t Database::saveSource(const SourceRecord& value) const {
         if(s.id) sqlite3_bind_int64(stmt.get(),11,s.id);
         if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         if(!s.id) s.id=sqlite3_last_insert_rowid(conn.get());
-        if(!old.root.empty() && old.root!=s.root) {
+        if(!old.root.empty() && old.root!=s.root && !hasDirectoryStorage(conn.get())) {
             auto files=prepare(conn.get(),"SELECT id,relative_path FROM files WHERE source_id=?");
             sqlite3_bind_int64(files.get(),1,s.id);
             auto update=prepare(conn.get(),"UPDATE files SET path=?,parent_path=?,root=?,search_path=? WHERE id=?");
@@ -1003,9 +1075,13 @@ std::uint64_t Database::forgetSource(std::int64_t id) const {
         const auto s=getSource(conn.get(),id);
         auto seen=prepare(conn.get(),"DELETE FROM scan_seen WHERE source_id=?"); sqlite3_bind_int64(seen.get(),1,id);
         if(sqlite3_step(seen.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
-        auto files=prepare(conn.get(),"DELETE FROM files WHERE source_id=?"); sqlite3_bind_int64(files.get(),1,id);
+        auto files=prepare(conn.get(),hasDirectoryStorage(conn.get())?"DELETE FROM file_entries WHERE source_id=?":"DELETE FROM files WHERE source_id=?"); sqlite3_bind_int64(files.get(),1,id);
         if(sqlite3_step(files.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         const auto removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+        if(hasDirectoryStorage(conn.get())) {
+            auto dirs=prepare(conn.get(),"DELETE FROM directories WHERE source_id=?");sqlite3_bind_int64(dirs.get(),1,id);
+            if(sqlite3_step(dirs.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        }
         auto source_stmt=prepare(conn.get(),"DELETE FROM sources WHERE id=?"); sqlite3_bind_int64(source_stmt.get(),1,id);
         if(sqlite3_step(source_stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         auto roots=prepare(conn.get(),"DELETE FROM roots WHERE root=? AND NOT EXISTS(SELECT 1 FROM sources WHERE root=?)");
@@ -1205,12 +1281,16 @@ void Database::upsertBatch(const std::vector<FileRecord>& records,const std::str
             if(guarded) advanceScanRevision(conn.get(),id,root,generation);
             else advanceSourceRevision(conn.get(),id);
         }
-        auto seen=prepare(conn.get(),"INSERT OR IGNORE INTO scan_seen(source_id,generation,relative_path) VALUES(?,?,?)");
+        const bool compact=hasDirectoryStorage(conn.get());
+        std::unique_ptr<DirectoryRecordWriter> compact_writer;
+        if(compact)compact_writer=std::make_unique<DirectoryRecordWriter>(conn.get());
+        auto seen=prepare(conn.get(),compact?"INSERT OR IGNORE INTO scan_seen(source_id,generation,entry_id) VALUES(?,?,?)":"INSERT OR IGNORE INTO scan_seen(source_id,generation,relative_path) VALUES(?,?,?)");
         for(const auto& record:records) {
             if(policy.excludes(record.path,record.is_directory)) continue;
             sqlite3_reset(seen.get()); sqlite3_clear_bindings(seen.get());
             sqlite3_bind_int64(seen.get(),1,id); sqlite3_bind_int64(seen.get(),2,generation);
-            bindText(seen.get(),3,relativeTo(record.path,source.root));
+            if(compact)sqlite3_bind_int64(seen.get(),3,compact_writer->entryId(id,relativeTo(record.path,source.root)));
+            else bindText(seen.get(),3,relativeTo(record.path,source.root));
             if(sqlite3_step(seen.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         }
         conn.exec("COMMIT;");
@@ -1220,7 +1300,9 @@ std::uint64_t Database::deleteStaleForRoot(const std::string& root,std::int64_t 
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
     try {
         const auto id=guardedScanSource(conn.get(),root,generation,true);
-        auto stmt=prepare(conn.get(),"DELETE FROM files WHERE source_id=? AND NOT EXISTS(SELECT 1 FROM scan_seen WHERE scan_seen.source_id=files.source_id AND scan_seen.generation=? AND scan_seen.relative_path=files.relative_path)");
+        auto stmt=prepare(conn.get(),hasDirectoryStorage(conn.get())?
+            "DELETE FROM file_entries WHERE source_id=? AND NOT EXISTS(SELECT 1 FROM scan_seen WHERE scan_seen.source_id=file_entries.source_id AND scan_seen.generation=? AND scan_seen.entry_id=file_entries.id)":
+            "DELETE FROM files WHERE source_id=? AND NOT EXISTS(SELECT 1 FROM scan_seen WHERE scan_seen.source_id=files.source_id AND scan_seen.generation=? AND scan_seen.relative_path=files.relative_path)");
         sqlite3_bind_int64(stmt.get(),1,id); sqlite3_bind_int64(stmt.get(),2,generation);
         if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         const auto removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
@@ -1250,7 +1332,9 @@ std::uint64_t Database::deletePathAndDescendants(const std::string& path) const 
             if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
             removed+=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
         };
-        if(relative==".") remove("DELETE FROM files WHERE source_id=?",{});
+        if(hasDirectoryStorage(conn.get())) {
+            for(const auto& query:directoryScopeQueries("DELETE FROM file_entries WHERE ","",relative))remove(query.sql,query.bounds);
+        } else if(relative==".") remove("DELETE FROM files WHERE source_id=?",{});
         else {
             // Use the same BINARY relative-path bounds as snapshot cleanup.
             // Source root '/' is represented by '.', without a double-slash
@@ -1266,7 +1350,12 @@ std::uint64_t Database::deleteRoot(const std::string& root) const {
     SqliteConnection conn(db_path_); const auto id=sourceForRoot(conn.get(),root,false);
     return id ? forgetSource(id) : 0;
 }
-void Database::clear() const { SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE; DELETE FROM files; DELETE FROM scan_seen; DELETE FROM sources; DELETE FROM roots; UPDATE compatibility_scans SET state=2; COMMIT;"); }
+void Database::clear() const {
+    SqliteConnection conn(db_path_);
+    conn.exec(hasDirectoryStorage(conn.get())?
+        "BEGIN IMMEDIATE; DELETE FROM file_entries; DELETE FROM directories; DELETE FROM scan_seen; DELETE FROM sources; DELETE FROM roots; UPDATE compatibility_scans SET state=2; COMMIT;":
+        "BEGIN IMMEDIATE; DELETE FROM files; DELETE FROM scan_seen; DELETE FROM sources; DELETE FROM roots; UPDATE compatibility_scans SET state=2; COMMIT;");
+}
 
 std::vector<SearchResult> Database::search(const SearchQuery& query,
                                            std::size_t limit,
@@ -1354,6 +1443,15 @@ void Database::rebuildNameSearchIndex() const {
     SqliteConnection conn(db_path_);
     if (!tableExists(conn.get(), "files_name_fts")) return;
 
+    if(hasDirectoryStorage(conn.get())) {
+        conn.exec("BEGIN IMMEDIATE;");
+        try {
+            conn.exec("INSERT INTO files_name_fts(files_name_fts) VALUES('rebuild');");
+            conn.exec("INSERT INTO files_name_fts(files_name_fts,rank) VALUES('integrity-check',1);");
+            installFtsTriggers(conn);setMetadataFlag(conn.get(),"name_fts_ready",true);
+            conn.exec("COMMIT;");return;
+        }catch(...) {conn.exec("ROLLBACK;");throw;}
+    }
     // External-content FTS tables require one initial rebuild for databases
     // created by v0.2 and earlier. This is a one-time O(N) migration.
     conn.exec("INSERT INTO files_name_fts(files_name_fts) VALUES('rebuild');");

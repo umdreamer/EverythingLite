@@ -43,6 +43,23 @@ int main() {
     const auto reported=readIndexStorage(path.string());
     assert(reported.backup_count==2 && reported.backup_bytes==10);
     assert(reported.total_bytes==reported.main_bytes+reported.wal_bytes+reported.shm_bytes+10);
+    // SQLite owns these names even when the sidecars do not yet exist.
+    // Refusal must happen before creating a backup or compacting the source.
+    fs::create_directories(base/"child");
+    fs::create_directory_symlink(base,base/"parent-alias");
+    for(const char* suffix:{"-wal","-shm","-journal"}) {
+        for(const auto& directory:{base,base/"child"/"..",base/"parent-alias",base.lexically_relative(fs::current_path())/"child"/".."}) {
+            const auto guarded=base/(std::string("guarded")+suffix+".sqlite");
+            fs::copy_file(path,guarded,fs::copy_options::overwrite_existing);
+            const auto target=directory/(guarded.filename().string()+suffix);
+            assert(!fs::exists(target));
+            assert(rejected([&]{compactIndexStorage(guarded.string(),target.string());}) && "reserved sidecar backup must be rejected");
+            assert(!fs::exists(target) && "refusal must not create a reserved backup");
+            assert(bytes(guarded)==original && "refusal must not compact the original");
+        }
+    }
+    assert(rejected([&]{compactIndexStorage(path.string(),(base/"parent-alias"/path.filename()).string());}));
+    assert(bytes(path)==original);
     const auto backup=base/"index.sqlite.pre-storage-456.backup.sqlite";
     const auto result=compactIndexStorage(path.string(),backup.string());
     assert(result.after.main_bytes<result.before.main_bytes && result.after.freelist_bytes==0);

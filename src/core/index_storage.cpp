@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -50,6 +51,22 @@ fs::path absolutePath(const std::string& value) {
     // An absolute filesystem path cannot be interpreted as a file: URI.
     return p;
 }
+fs::path canonicalFileLocation(const fs::path& path) {
+    std::error_code ec;
+    const auto parent=fs::canonical(path.parent_path(),ec);
+    if(ec) fail("storage: cannot inspect storage directory");
+    return parent/path.filename();
+}
+void rejectReservedBackup(const fs::path& source,const fs::path& backup) {
+    const auto canonical_source=canonicalFileLocation(source);
+    const auto canonical_backup=canonicalFileLocation(backup);
+    if(canonical_backup==canonical_source)
+        fail("storage: backup path conflicts with database storage files");
+    for(const char* suffix:{"-journal","-wal","-shm"}) {
+        if(canonical_backup==fs::path(canonical_source.u8string()+suffix))
+            fail("storage: backup path conflicts with database storage files");
+    }
+}
 void regular(const fs::path& path) {
     std::error_code ec;
     const auto status=fs::symlink_status(path,ec);
@@ -62,6 +79,13 @@ std::uint64_t fileBytes(const fs::path& path,bool optional=false) {
     if(ec || !fs::is_regular_file(status)) fail("storage: cannot inspect regular storage file");
     auto bytes=fs::file_size(path,ec);
     if(ec) fail("storage: cannot inspect storage size");
+    return bytes;
+}
+std::uint64_t readableFileBytes(const fs::path& path) {
+    const auto bytes=fileBytes(path);
+    std::ifstream input(path,std::ios::binary);
+    if(!input || input.peek()==std::char_traits<char>::eof())
+        fail("storage: verified backup is no longer readable");
     return bytes;
 }
 Connection openDatabase(const fs::path& path,bool readonly) {
@@ -237,6 +261,7 @@ IndexCompaction compactIndexStorage(const std::string& value,const std::string& 
     cancelled(cancel);
     const auto path=absolutePath(value),backup_path=absolutePath(backup_value);
     regular(path);
+    rejectReservedBackup(path,backup_path);
     std::error_code ec;
     const auto status=fs::symlink_status(backup_path,ec);
     if((ec && ec!=std::errc::no_such_file_or_directory) || status.type()!=fs::file_type::not_found)
@@ -265,6 +290,9 @@ IndexCompaction compactIndexStorage(const std::string& value,const std::string& 
     // No journal_mode changes or unconditional WAL checkpoint claims. A WAL
     // retained by another reader is included at its actual size in the report.
     connection.reset();
+    // SQLite owns its sidecar lifecycle. Success requires the independent
+    // verified backup to still exist and be readable after live maintenance.
+    result.backup_bytes=readableFileBytes(backup_path);
     result.after=readIndexStorage(path.u8string());
     const auto source_parent=fs::canonical(path.parent_path(),ec);
     if(ec) fail("storage: cannot inspect backup directory");

@@ -37,6 +37,17 @@ with tempfile.TemporaryDirectory(prefix="everything-cli-storage-", dir="/private
     fields = {"main_bytes", "wal_bytes", "shm_bytes", "page_size", "page_count", "freelist_bytes", "backup_bytes", "backup_count", "total_bytes"}
     assert set(data["storage"]) == fields and data["storage"]["freelist_bytes"] > 0, data
     assert original == db.read_bytes()
+    (base / "child").mkdir()
+    (base / "parent-alias").symlink_to(base, target_is_directory=True)
+    for suffix in ("-wal", "-shm", "-journal"):
+        for directory in (base, base / "child" / "..", base / "parent-alias", pathlib.Path(os.path.relpath(base)) / "child" / ".."):
+            reserved = directory / (db.name + suffix)
+            assert not reserved.exists()
+            refused = run("storage", "compact", "--backup", str(reserved))
+            assert refused.returncode != 0, refused
+            assert not reserved.exists() and db.read_bytes() == original
+    same = run("storage", "compact", "--backup", str(base / "parent-alias" / db.name))
+    assert same.returncode != 0 and db.read_bytes() == original, same
     backup = base / "synthetic.sqlite.pre-storage-123.backup.sqlite"
     compact = run("storage", "compact", "--backup", str(backup))
     assert compact.returncode == 0, compact

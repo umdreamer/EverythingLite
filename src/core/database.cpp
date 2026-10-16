@@ -660,7 +660,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     // search_name is ASCII-folded name; its BINARY order equals name NOCASE.
     // Reuse the existing name index for direct/short queries and sort only
     // equal-name parent groups. FTS retains its selective query plan.
-    sql << " ORDER BY files.search_name ASC, files.parent_path COLLATE NOCASE ASC LIMIT ? OFFSET ?";
+    sql << " ORDER BY files.search_name ASC, files.parent_path COLLATE NOCASE ASC, files.id ASC LIMIT ? OFFSET ?";
 
     searchTrace("Database", "SQL=" + sql.str());
     if (use_fts) searchTrace("Database", "bind[1] FTS=\"" + makeFtsExpression(query) + "\"");

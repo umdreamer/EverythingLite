@@ -4,6 +4,8 @@
 
 #include <QAbstractTableModel>
 
+#include <set>
+#include <utility>
 #include <vector>
 
 namespace everything_lite {
@@ -29,9 +31,11 @@ public:
 
 private:
     std::vector<SearchResult> results_;
+    std::set<std::pair<std::int64_t, std::string>> membership_;
     int sort_column_ = -1;
     Qt::SortOrder sort_order_ = Qt::AscendingOrder;
 
+    void appendUniqueResults(std::vector<SearchResult> results);
     void applySort();
     static QString formatSize(std::uint64_t bytes);
 };

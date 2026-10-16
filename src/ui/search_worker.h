@@ -2,11 +2,13 @@
 
 #include "core/file_record.h"
 #include "core/search_service.h"
+#include "core/search_revision.h"
 
 #include <QObject>
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,8 @@ struct BackgroundSearchResult {
     std::string error;
     double elapsed_ms = 0.0;
     bool cancelled = false;
+    bool snapshot_changed = false;
+    std::optional<std::uint64_t> revision;
 };
 
 // Dedicated background search executor. It owns a SearchService that is lazily
@@ -30,11 +34,13 @@ public:
                                   std::size_t limit,
                                   std::size_t offset,
                                   const SearchOptions& options,
-                                  const std::atomic_bool* cancellation = nullptr);
+                                  const std::atomic_bool* cancellation = nullptr,
+                                  std::optional<std::uint64_t> expected_revision = std::nullopt);
 
 private:
     std::string db_path_;
     std::unique_ptr<SearchService> service_;
+    std::unique_ptr<SearchRevision> revision_;
 };
 
 } // namespace everything_lite

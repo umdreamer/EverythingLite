@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QAction;
@@ -117,6 +118,9 @@ private:
     QSet<QString> pending_rescan_roots_;
     QString pending_search_query_;
     bool results_have_more_ = false;
+    std::size_t next_search_offset_ = 0;
+    std::optional<std::uint64_t> search_revision_;
+    QString pagination_signature_;
     bool search_ime_composing_ = false;
     bool search_in_flight_ = false;
     bool search_pending_ = false;
@@ -154,6 +158,7 @@ private:
     void launchSearch(const QString& query, std::size_t offset = 0, bool append = false);
     void cancelActiveSearch();
     void loadMoreResults();
+    void resetPaging();
     QString currentSearchSignature() const;
     void rebuildIndex();
     void editRoots();

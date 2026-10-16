@@ -17,6 +17,8 @@
 #include <QAbstractTextDocumentLayout>
 #include <algorithm>
 #include <atomic>
+#include <optional>
+#include <sqlite3.h>
 #include <QFile>
 #include <QFileDialog>
 #include <QInputMethodEvent>
@@ -80,6 +82,78 @@ class UiTest : public QObject {
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
+    }
+    void paginationDeduplicatesStructuredIdentity() {
+        SearchResultModel model;
+        auto row=[](std::int64_t source,const std::string& relative,const std::string& name) {
+            SearchResult result; result.file.source_id=source; result.file.relative_path=relative;
+            result.file.name=name; result.file.path="/synthetic/shared/"+relative;
+            return result;
+        };
+        const auto first=row(1,"same.txt","first"), second=row(2,"same.txt","second");
+        const auto third=row(1,"other.txt","third");
+        model.setResults({first,first,second});
+        QCOMPARE(model.rowCount(),2);
+        model.sort(0,Qt::DescendingOrder);
+        model.appendResults({third,second,first,third});
+        QCOMPARE(model.rowCount(),3);
+        QCOMPARE(model.nameAt(0),QStringLiteral("third"));
+        // Delimiters in relative paths must remain part of the structured key.
+        model.appendResults({row(12,"3:same.txt","delimiter-a"),row(123,"same.txt","delimiter-b")});
+        QCOMPARE(model.rowCount(),5);
+        // Unknown/manual rows have no valid identity and remain independent.
+        model.appendResults({row(0,"","unknown-a"),row(0,"","unknown-b"),
+                             row(0,"same.txt","unknown-c"),row(-1,"same.txt","unknown-d"),
+                             row(1,"","unknown-e"),row(1,"","unknown-f")});
+        QCOMPARE(model.rowCount(),11);
+        model.setResults({first,first}); QCOMPARE(model.rowCount(),1);
+        model.appendResults({second}); QCOMPARE(model.rowCount(),2);
+        model.clearResults(); model.appendResults({first,first,second});
+        QCOMPARE(model.rowCount(),2);
+    }
+    void workerRejectsChangedPageRevision() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto path=dir.filePath("paging.db").toStdString();
+        Database db(path); db.initialize(); const auto source=db.ensureSourceForRoot("/synthetic/paging");
+        std::vector<FileRecord> rows;
+        for(int i=0;i<6;++i) {
+            FileRecord file; file.root="/synthetic/paging"; file.relative_path="page"+std::to_string(i)+".txt";
+            file.path=file.root+"/"+file.relative_path; file.name=file.relative_path; file.parent_path=file.root;
+            rows.push_back(file);
+        }
+        db.mergeSourceSnapshot(db.source(source),rows);
+        SearchWorker worker(path);
+        auto search=[&](std::size_t offset,std::optional<std::uint64_t> expected=std::nullopt) {
+            return worker.search("page",3,offset,SearchOptions{},nullptr,expected);
+        };
+        auto first=search(0);
+        QVERIFY(first.error.empty()); QCOMPARE(first.results.size(),std::size_t(3));
+        const auto token=first.revision; QVERIFY(token.has_value());
+        auto repeat=search(0);
+        QCOMPARE(repeat.revision,token);
+        auto second=search(3,token);
+        QVERIFY(second.error.empty()); QVERIFY(!second.snapshot_changed);
+        QCOMPARE(second.results.size(),std::size_t(3));
+        QVERIFY(first.results.back().file.name<second.results.front().file.name);
+        // Raw writers do not increment the source revision. data_version must
+        // still notice their commits on the same monitoring connection.
+        sqlite3* raw=nullptr; QCOMPARE(sqlite3_open(path.c_str(),&raw),SQLITE_OK);
+        struct Close { sqlite3* db; ~Close(){sqlite3_close(db);} } close{raw};
+        QCOMPARE(sqlite3_exec(raw,"UPDATE files SET size=size+7",nullptr,nullptr,nullptr),SQLITE_OK);
+        auto invalid=search(3,token);
+        QVERIFY2(invalid.snapshot_changed,"A raw SQL commit between pages must invalidate the earlier page token");
+        QVERIFY(invalid.results.empty()); QVERIFY(invalid.error.empty());
+        const auto fresh=search(0);
+        QVERIFY(!fresh.snapshot_changed); QVERIFY(fresh.revision!=token);
+        // Delete/recreate with identical ids/revisions must not produce an ABA
+        // match, even though the catalog returns to the exact previous values.
+        QCOMPARE(sqlite3_exec(raw,"BEGIN; CREATE TEMP TABLE prior_sources AS SELECT * FROM sources; DELETE FROM sources; INSERT INTO sources SELECT * FROM prior_sources; DROP TABLE prior_sources; COMMIT",nullptr,nullptr,nullptr),SQLITE_OK);
+        const auto aba=search(3,fresh.revision);
+        QVERIFY(aba.snapshot_changed); QVERIFY(aba.results.empty());
+        auto restart=search(0); QVERIFY(!restart.snapshot_changed);
+        int frames=-1,checkpointed=-1;
+        QCOMPARE(sqlite3_wal_checkpoint_v2(raw,nullptr,SQLITE_CHECKPOINT_TRUNCATE,&frames,&checkpointed),SQLITE_OK);
+        // A page token must not keep a SQLite read transaction alive.
+        QCOMPARE(frames,0); QCOMPARE(checkpointed,0);
     }
     void cachedSourceColumns() {
         SearchResultModel model;
@@ -460,6 +534,87 @@ class UiTest : public QObject {
         QVERIFY(csv.contains("\"a\"\"b.txt\""));
         QVERIFY(csv.contains(QStringLiteral("\"Cloud,\"\"A\"\"\nB（网盘）\"").toUtf8()));
         QVERIFY(csv.contains(QStringLiteral("\"离线缓存 · 副本未核验\"").toUtf8()));
+    }
+    void paginationConsumesRawRows() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("item"); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1000); QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.last_search_raw_result_count_,1001); QVERIFY(window.results_have_more_);
+        // Projecting fewer display rows must not rewind the server cursor.
+        // This represents a deduplicated display window independent of SQL rows.
+        Database db(window.db_path_.toStdString());
+        const auto first=db.search("item",1); QVERIFY(!first.empty());
+        window.model_->setResults(first); QCOMPARE(window.model_->rowCount(),1);
+        window.model_->sort(0,Qt::DescendingOrder);
+        window.loadMoreResults(); QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.last_search_raw_result_count_,5);
+        QCOMPARE(window.model_->rowCount(),6);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("item1004.txt"));
+        QVERIFY(!window.results_have_more_);
+    }
+    void paginationRefreshesChangedSnapshot() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("item"); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1000); QTRY_VERIFY(!window.search_in_flight_);
+        sqlite3* raw=nullptr; QCOMPARE(sqlite3_open(window.db_path_.toStdString().c_str(),&raw),SQLITE_OK);
+        const auto changed=sqlite3_exec(raw,"UPDATE files SET size=size+1 WHERE name='item0000.txt'",nullptr,nullptr,nullptr);
+        sqlite3_close(raw); QCOMPARE(changed,SQLITE_OK);
+        window.loadMoreResults(); QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.model_->rowCount(),0);
+        QVERIFY(!window.results_have_more_); QVERIFY(window.search_timer_->isActive());
+        const auto rejectedId=window.search_request_id_;
+        QTest::qWait(100); QCOMPARE(window.search_request_id_,rejectedId);
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1000,3000);
+        QVERIFY(window.search_request_id_>rejectedId);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("item0000.txt"));
+        window.loadMoreResults(); QTRY_COMPARE(window.model_->rowCount(),1005);
+        QVERIFY(!window.results_have_more_);
+    }
+    void paginationSignaturePreservesPercentText() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("%2");
+        const auto oldSignature=window.currentSearchSignature();
+        window.search_edit_->setText("0");
+        QVERIFY2(window.currentSearchSignature()!=oldSignature,"Literal query placeholders must not be formatted into another query's signature");
+        // Retain an earlier page's signature and token, then attempt to append
+        // after programmatic setText(), which emits no textEdited signal.
+        window.pagination_signature_=oldSignature;
+        window.search_revision_=1; window.next_search_offset_=1000;
+        window.results_have_more_=true;
+        window.loadMoreResults();
+        QVERIFY(!window.search_in_flight_); QVERIFY(!window.results_have_more_);
+        QCOMPARE(window.next_search_offset_,std::size_t(0));
+        QVERIFY(!window.search_revision_); QVERIFY(window.search_timer_->isActive());
+    }
+    void paginationRejectsProgrammaticQueryChange() {
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("item"); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1000); QTRY_VERIFY(!window.search_in_flight_);
+        window.search_edit_->setText("alpha"); window.loadMoreResults();
+        QVERIFY(!window.search_in_flight_); QVERIFY(!window.results_have_more_);
+        QVERIFY(window.search_timer_->isActive());
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1,3000);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
+    }
+    void paginationOldAppendCannotReplaceChangedQuery_data() {
+        QTest::addColumn<bool>("changeFilter");
+        QTest::newRow("query")<<false; QTest::newRow("filter")<<true;
+    }
+    void paginationOldAppendCannotReplaceChangedQuery() {
+        QFETCH(bool,changeFilter);
+        MainWindow window; window.watcher_->stop();
+        window.search_edit_->setText("item"); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1000); QTRY_VERIFY(!window.search_in_flight_);
+        WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
+        window.loadMoreResults(); QVERIFY(window.search_in_flight_);
+        if(changeFilter) window.scope_combo_->setCurrentIndex(2);
+        else {window.search_edit_->selectAll(); QTest::keyClicks(window.search_edit_,"beta");}
+        QVERIFY(!window.results_have_more_);
+        gate.release->release(); QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.model_->rowCount(),1000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),changeFilter?0:1,3000);
+        if(!changeFilter) QCOMPARE(window.model_->nameAt(0),QStringLiteral("beta.txt"));
+        QVERIFY(!window.results_have_more_);
     }
     void paginationWaitsForPendingUserQueryAndIme() {
         MainWindow window; window.watcher_->stop();

@@ -222,7 +222,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         cancelActiveSearch();
         search_pending_ = false;
         ++search_request_id_;
-        results_have_more_ = false;
+        resetPaging();
         search_timer_->stop();
         status_label_->setText(QStringLiteral("输入中… 停止输入 %1 ms 后后台搜索").arg(kSearchIdleDelayMs));
         if (!search_ime_composing_) {
@@ -247,6 +247,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         cancelActiveSearch();
         search_pending_ = false;
         ++search_request_id_;
+        resetPaging();
         updateSearchStateLabel();
         search_timer_->start(kSearchIdleDelayMs);
     });
@@ -255,6 +256,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         cancelActiveSearch();
         search_pending_ = false;
         ++search_request_id_;
+        resetPaging();
         updateSearchStateLabel();
         search_timer_->start(kSearchIdleDelayMs);
     });
@@ -368,6 +370,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             cancelActiveSearch();
             search_pending_ = false;
             ++search_request_id_;
+            resetPaging();
             search_ime_composing_ = true;
             if (search_timer_) search_timer_->stop();
             if (searchTraceEnabled()) {
@@ -772,10 +775,9 @@ void MainWindow::updateCachedStatus() {
 }
 
 QString MainWindow::currentSearchSignature() const {
-    return QStringLiteral("%1\x1f%2\x1f%3")
-        .arg(normalizeGuiQuery(search_edit_->text()))
-        .arg(scope_combo_->currentIndex())
-        .arg(match_path_check_->isChecked() ? 1 : 0);
+    return normalizeGuiQuery(search_edit_->text())
+        + QLatin1Char('\x1f') + QString::number(scope_combo_->currentIndex())
+        + QLatin1Char('\x1f') + QString::number(match_path_check_->isChecked() ? 1 : 0);
 }
 
 void MainWindow::runSearch() {
@@ -783,16 +785,28 @@ void MainWindow::runSearch() {
     search_timer_->stop();
     cancelActiveSearch();
     pending_search_query_ = normalizeGuiQuery(search_edit_->text());
-    results_have_more_ = false;
+    resetPaging();
     ++search_request_id_;
     launchSearch(pending_search_query_, 0, false);
+}
+
+void MainWindow::resetPaging() {
+    results_have_more_ = false;
+    next_search_offset_ = 0;
+    search_revision_.reset();
+    pagination_signature_.clear();
 }
 
 void MainWindow::loadMoreResults() {
     if (closing_ || !results_have_more_ || search_in_flight_ || search_pending_
         || search_ime_composing_ || search_timer_->isActive()) return;
+    if (pagination_signature_ != currentSearchSignature() || !search_revision_) {
+        resetPaging();
+        search_timer_->start(kSearchIdleDelayMs);
+        return;
+    }
     ++search_request_id_;
-    launchSearch(normalizeGuiQuery(search_edit_->text()), static_cast<std::size_t>(model_->rowCount()), true);
+    launchSearch(normalizeGuiQuery(search_edit_->text()), next_search_offset_, true);
 }
 
 void MainWindow::launchSearch(const QString& query, std::size_t offset, bool append) {
@@ -802,6 +816,8 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     const bool match_path = match_path_check_->isChecked();
     const auto request_id = search_request_id_;
     const auto effective_limit = kPageSize + 1;
+    const auto signature = currentSearchSignature();
+    const auto expected_revision = append ? search_revision_ : std::nullopt;
 
     last_search_query_ = normalized_query;
     last_search_utf8_hex_ = utf8Hex(normalized_query);
@@ -860,13 +876,13 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     QPointer<MainWindow> window(this);
 
     QMetaObject::invokeMethod(worker, [window, worker, query_utf8, effective_limit, offset, options,
-                                       request_id, append, normalized_query, db_path, cancellation] {
+                                       request_id, append, normalized_query, db_path, cancellation, signature, expected_revision] {
         auto outcome = std::make_shared<BackgroundSearchResult>(
-            worker->search(query_utf8, effective_limit, offset, options, cancellation.get()));
+            worker->search(query_utf8, effective_limit, offset, options, cancellation.get(), expected_revision));
         if (!window) return;
 
         QMetaObject::invokeMethod(window.data(), [window, outcome, request_id, append,
-                                                   normalized_query, effective_limit, offset, db_path] {
+                                                   normalized_query, effective_limit, offset, db_path, signature] {
             if (!window) return;
             auto* self = window.data();
             self->search_in_flight_ = false;
@@ -875,12 +891,30 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
 
             // textEdited/scope changes invalidate request_id immediately. Old
             // queries may finish, but are never allowed to flash stale results.
-            const bool still_current = request_id == self->search_request_id_ && !outcome->cancelled;
+            const bool same_configuration = signature == self->currentSearchSignature();
+            const bool still_current = request_id == self->search_request_id_
+                && same_configuration && !outcome->cancelled;
             if (!still_current) {
                 searchTrace("GUI-SEARCH", "discarded stale background result request_id="
                     + std::to_string(request_id)
                     + " current_request_id=" + std::to_string(self->search_request_id_));
+                if (request_id == self->search_request_id_ && !same_configuration) {
+                    self->resetPaging();
+                    if (!self->search_ime_composing_ && !self->search_timer_->isActive())
+                        self->search_timer_->start(kSearchIdleDelayMs);
+                }
+            } else if (outcome->snapshot_changed) {
+                self->resetPaging();
+                self->model_->clearResults();
+                self->last_search_elapsed_ms_ = outcome->elapsed_ms;
+                self->last_search_raw_result_count_ = 0;
+                self->last_search_result_count_ = 0;
+                self->status_label_->setText(QStringLiteral("索引已变化，等待重新加载…"));
+                // Reuse the user-search debounce so repeated commits coalesce
+                // and cannot cause an immediate restart loop on a busy index.
+                self->search_timer_->start(kSearchIdleDelayMs);
             } else if (!outcome->error.empty()) {
+                self->resetPaging();
                 self->last_search_elapsed_ms_ = outcome->elapsed_ms;
                 self->last_search_raw_result_count_ = 0;
                 self->last_search_result_count_ = self->model_->rowCount();
@@ -894,6 +928,11 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
 
                 self->results_have_more_ = outcome->results.size() > kPageSize;
                 if (self->results_have_more_) outcome->results.resize(kPageSize);
+                // The look-ahead row is not consumed. Display deduplication
+                // and local sorting never determine the next SQL offset.
+                self->next_search_offset_ = offset + outcome->results.size();
+                self->search_revision_ = outcome->revision;
+                self->pagination_signature_ = signature;
 
                 if (append) self->model_->appendResults(std::move(outcome->results));
                 else self->model_->setResults(std::move(outcome->results));

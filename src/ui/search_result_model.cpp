@@ -5,7 +5,6 @@
 #include <QString>
 
 #include <algorithm>
-#include <iterator>
 
 namespace everything_lite {
 
@@ -79,7 +78,9 @@ void SearchResultModel::sort(int column, Qt::SortOrder order) {
 
 void SearchResultModel::setResults(std::vector<SearchResult> results) {
     beginResetModel();
-    results_ = std::move(results);
+    results_.clear();
+    membership_.clear();
+    appendUniqueResults(std::move(results));
     applySort();
     endResetModel();
 }
@@ -90,9 +91,7 @@ void SearchResultModel::appendResults(std::vector<SearchResult> results) {
     // the loaded window as one model update. Server-side global sorting can be
     // added later without changing the incremental-loading API.
     beginResetModel();
-    results_.insert(results_.end(),
-                    std::make_move_iterator(results.begin()),
-                    std::make_move_iterator(results.end()));
+    appendUniqueResults(std::move(results));
     applySort();
     endResetModel();
 }
@@ -100,7 +99,18 @@ void SearchResultModel::appendResults(std::vector<SearchResult> results) {
 void SearchResultModel::clearResults() {
     beginResetModel();
     results_.clear();
+    membership_.clear();
     endResetModel();
+}
+
+void SearchResultModel::appendUniqueResults(std::vector<SearchResult> results) {
+    for (auto& row : results) {
+        const auto& file = row.file;
+        // Legacy/manual rows without a complete identity remain independent.
+        if (file.source_id > 0 && !file.relative_path.empty()
+            && !membership_.emplace(file.source_id, file.relative_path).second) continue;
+        results_.push_back(std::move(row));
+    }
 }
 
 QString SearchResultModel::pathAt(int row) const {

@@ -14,7 +14,8 @@ BackgroundSearchResult SearchWorker::search(const std::string& query,
                                              std::size_t limit,
                                              std::size_t offset,
                                              const SearchOptions& options,
-                                             const std::atomic_bool* cancellation) {
+                                             const std::atomic_bool* cancellation,
+                                             std::optional<std::uint64_t> expected_revision) {
     BackgroundSearchResult outcome;
     const auto started = std::chrono::steady_clock::now();
     try {
@@ -29,7 +30,21 @@ BackgroundSearchResult SearchWorker::search(const std::string& query,
             searchTrace("SearchWorker", "initializing SearchService on background thread");
             service_ = std::make_unique<SearchService>(db_path_);
         }
-        outcome.results = service_->search(query, limit, offset, options, cancellation);
+        // Initialization may migrate/write the index, so open the persistent
+        // read-only monitor only after the service has initialized it.
+        if (!revision_) revision_ = std::make_unique<SearchRevision>(db_path_);
+        const auto before = revision_->read();
+        if ((offset > 0 && !expected_revision) || (expected_revision && *expected_revision != before)) {
+            outcome.snapshot_changed = true;
+        } else {
+            outcome.results = service_->search(query, limit, offset, options, cancellation);
+            if (revision_->read() != before) {
+                outcome.results.clear();
+                outcome.snapshot_changed = true;
+            } else {
+                outcome.revision = before;
+            }
+        }
     } catch (const std::exception& e) {
         outcome.error = e.what();
     } catch (...) {

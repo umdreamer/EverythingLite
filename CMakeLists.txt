@@ -46,6 +46,7 @@ add_library(everything_core
     src/core/scan_request.cpp
     src/core/search_engine.cpp
     src/core/search_service.cpp
+    src/core/search_revision.cpp
     src/core/search_trace.cpp
     src/core/search_query.cpp
     src/core/index_manager.cpp
@@ -199,6 +200,9 @@ if(BUILD_TESTS)
     target_link_libraries(test_index_storage PRIVATE everything_core)
     add_test(NAME index_storage COMMAND test_index_storage)
     set_tests_properties(index_storage PROPERTIES TIMEOUT 30)
+    add_executable(test_search_paging tests/test_search_paging.cpp)
+    target_link_libraries(test_search_paging PRIVATE everything_core)
+    add_test(NAME search_paging COMMAND test_search_paging)
     add_executable(test_core tests/test_core.cpp)
     target_link_libraries(test_core PRIVATE everything_core)
     add_test(NAME core COMMAND test_core)

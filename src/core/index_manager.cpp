@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <stdexcept>
 #include <iterator>
+#include <optional>
 
 namespace everything_lite {
 
@@ -30,9 +31,17 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
                                            const std::string& subtree_relative,
                                            const ProgressCallback& progress,
                                            const std::atomic_bool* cancelled) {
-    const auto policy=database_.exclusionPolicy();
-    if(policy.revision!=expected.policy_revision) {
-        IndexStats stats; stats.error="exclusion policy changed before scan"; return stats;
+    std::optional<SourceOwnershipSnapshot> ownership;
+    try { ownership.emplace(database_.captureSourceDescendants(expected)); }
+    catch(const std::exception& error) { IndexStats stats; stats.error=error.what(); return stats; }
+    const auto& policy=ownership->policy;
+    const auto& descendants=ownership->descendants;
+    ScanBoundary boundary; boundary.allow_root_symlink=subtree_relative.empty();
+    for(const auto& child:descendants) {
+        if(pathIsWithin(scan_path,child.root)) {
+            IndexStats stats; stats.error="scan scope belongs to nested source"; return stats;
+        }
+        boundary.prune_roots.push_back(child.root);
     }
     std::vector<FileRecord> snapshot;
     std::uint64_t reported = 0;
@@ -42,10 +51,10 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
         snapshot.insert(snapshot.end(), std::make_move_iterator(batch.begin()), std::make_move_iterator(batch.end()));
         if (progress) progress(expected.root, reported);
         return !(cancelled && cancelled->load());
-    }, cancelled, &policy);
+    }, cancelled, &policy, boundary.prune_roots.empty()?nullptr:&boundary);
     if (stats.completed && !(cancelled && cancelled->load())) {
         try {
-            const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative);
+            const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative, &descendants);
             stats.removed = merged.removed;
         } catch (const std::exception& error) {
             stats.completed = false; stats.error = error.what(); stats.indexed = 0;
@@ -81,11 +90,21 @@ IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
                                       const std::atomic_bool* cancelled) {
     IndexStats total; total.completed = true;
     std::unordered_set<std::string> seen;
+    std::vector<std::pair<std::string,std::int64_t>> configured;
     for (const auto& root : roots) {
         if (cancelled && cancelled->load()) { total.completed = false; total.cancelled = true; break; }
         const auto normalized = normalizePath(root);
         if (!seen.insert(normalized).second) continue;
-        const auto stats = rebuildRoot(normalized, progress, cancelled);
+        configured.emplace_back(normalized,database_.ensureSourceForRoot(normalized));
+    }
+    // Register the complete ownership topology before any traversal. Children
+    // establish their snapshots first, so one rebuild can retire old overlaps.
+    std::stable_sort(configured.begin(),configured.end(),[](const auto& left,const auto& right) {
+        return left.first.size()>right.first.size();
+    });
+    for(const auto& entry:configured) {
+        if (cancelled && cancelled->load()) { total.completed = false; total.cancelled = true; break; }
+        const auto stats = rebuildSource(entry.second, progress, cancelled);
         total.scanned += stats.scanned; total.indexed += stats.indexed;
         total.skipped += stats.skipped; total.removed += stats.removed;
         total.completed = total.completed && stats.completed;
@@ -107,6 +126,14 @@ IndexStats IndexManager::applyPathChange(const std::string& root, const std::str
         }
     }
     if (!expected.id) return rebuildRoot(normalized_root);
+    // Reject delegated events before testing even the child's existence.
+    try {
+        const auto ownership=database_.captureSourceDescendants(expected);
+        for(const auto& child:ownership.descendants)
+            if(pathIsWithin(scan_path,child.root)) {
+                IndexStats stats; stats.error="scan scope belongs to nested source"; return stats;
+            }
+    } catch(const std::exception& error) { IndexStats stats; stats.error=error.what(); return stats; }
     std::error_code ec;
     const bool exists = std::filesystem::exists(utf8ToPath(scan_path), ec);
     if (ec) { IndexStats stats; stats.error = ec.message(); return stats; }

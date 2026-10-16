@@ -15,6 +15,11 @@ struct sqlite3;
 
 namespace everything_lite {
 
+struct SourceOwnershipSnapshot {
+    ExclusionPolicy policy;
+    std::vector<SourceRecord> descendants;
+};
+
 class Database {
 public:
     explicit Database(std::string db_path);
@@ -26,11 +31,16 @@ public:
     std::int64_t ensureSourceForRoot(const std::string& root) const;
     std::int64_t saveSource(const SourceRecord& source) const;
     std::uint64_t forgetSource(std::int64_t id) const;
-    // Full snapshots are merged only when the captured revision, identity,
-    // binding and mount fingerprint still agree. Failure never deletes files.
+    // Captures literal descendants and policy in one read snapshot, validating
+    // the owning source guard. No source filesystem or identity probing occurs.
+    SourceOwnershipSnapshot captureSourceDescendants(const SourceRecord& expected) const;
+    // Full snapshots require the captured source/policy guard to agree.
+    // When provided, ownership/protection admission runs inside the main write
+    // transaction. Offline or never-successful children retain parent cache.
     IndexStats mergeSourceSnapshot(const SourceRecord& expected,
                                   const std::vector<FileRecord>& records,
-                                  const std::string& subtree_relative = {}) const;
+                                  const std::string& subtree_relative = {},
+                                  const std::vector<SourceRecord>* expected_descendants = nullptr) const;
     // Read-only staging SQLite: snapshot_metadata(complete=1), snapshot_files
     // columns follow FileRecord (path,parent_path,name,ext,root,size,
     // modified_time,is_dir,scan_generation,source_id,relative_path,cloud_copy).

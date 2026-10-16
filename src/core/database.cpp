@@ -213,6 +213,27 @@ std::vector<std::string> nestedSourceRoots(sqlite3* db,const SourceRecord& sourc
     if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db));
     std::sort(roots.begin(),roots.end());roots.erase(std::unique(roots.begin(),roots.end()),roots.end());return roots;
 }
+std::vector<SourceRecord> sourceDescendants(sqlite3* db,const SourceRecord& source) {
+    auto stmt=prepare(db,std::string("SELECT ")+sourceColumns+" FROM sources WHERE id<>? ORDER BY id");
+    sqlite3_bind_int64(stmt.get(),1,source.id);
+    std::vector<SourceRecord> descendants; int rc;
+    while((rc=sqlite3_step(stmt.get()))==SQLITE_ROW) {
+        auto child=readSource(stmt.get()); child.root=normalizePath(child.root);
+        if(child.root!=source.root && pathIsWithin(child.root,source.root)) descendants.push_back(std::move(child));
+    }
+    if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db));
+    return descendants;
+}
+bool ownsSuccessfulSnapshot(const SourceRecord& source) {
+    return source.last_success>0 && source.status==SourceStatus::Accessible;
+}
+bool sameDescendantOwnership(const std::vector<SourceRecord>& captured,const std::vector<SourceRecord>& current) {
+    if(captured.size()!=current.size())return false;
+    for(std::size_t i=0;i<captured.size();++i)
+        if(captured[i].id!=current[i].id || captured[i].root!=current[i].root ||
+           ownsSuccessfulSnapshot(captured[i])!=ownsSuccessfulSnapshot(current[i]))return false;
+    return true;
+}
 std::string snapshotText(sqlite3_stmt* stmt,int column) {
     if(sqlite3_column_type(stmt,column)!=SQLITE_TEXT)throw std::runtime_error("snapshot text field type mismatch");
     const auto* bytes=sqlite3_column_text(stmt,column);const auto size=sqlite3_column_bytes(stmt,column);
@@ -422,7 +443,8 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
                          const std::function<bool(std::vector<FileRecord>&)>& next,
                          const std::string& scope,
                          const std::function<void(sqlite3*)>& admission={},
-                         const ExclusionPolicy* captured_policy=nullptr) {
+                         const ExclusionPolicy* captured_policy=nullptr,
+                         const std::vector<std::string>* protected_scopes=nullptr) {
     validateScope(scope);
     // Snapshot membership grows with the source. Keep its temporary B-tree on
     // disk, while the record transfer remains bounded to batches of 1000.
@@ -453,6 +475,28 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             }
             upsertRecords(conn.get(),s,accepted,0,policy); count+=accepted.size(); records.clear();
         }
+        std::uint64_t retained_count=0;
+        // Pruned but unconfirmed/offline children cannot prove deletion of
+        // the parent's last historical copy. Preserve only existing own keys;
+        // never copy records to another source or read a child filesystem.
+        if(protected_scopes && !protected_scopes->empty()) {
+            // Separate equality/range probes keep both predicates on the
+            // (source_id,relative_path) index, including large offline caches.
+            auto exact=prepare(conn.get(),"INSERT OR IGNORE INTO snapshot_keys SELECT relative_path FROM files WHERE source_id=? AND relative_path=?");
+            auto subtree=prepare(conn.get(),"INSERT OR IGNORE INTO snapshot_keys SELECT relative_path FROM files WHERE source_id=? AND relative_path>=? AND relative_path<?");
+            const auto retain=[&](sqlite3_stmt* statement,const std::string& lower,const std::string& upper) {
+                sqlite3_reset(statement); sqlite3_clear_bindings(statement);
+                sqlite3_bind_int64(statement,1,s.id); bindText(statement,2,lower);
+                if(!upper.empty())bindText(statement,3,upper);
+                if(sqlite3_step(statement)!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+                retained_count+=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
+            };
+            for(const auto& protected_scope:*protected_scopes) {
+                if(!relativeWithin(protected_scope,scope))continue;
+                retain(exact.get(),protected_scope,{});
+                retain(subtree.get(),protected_scope+"/",protected_scope+"0");
+            }
+        }
         const bool full=scope.empty() || scope==".";
         IndexStats stats; stats.indexed=count; stats.completed=true;
         const auto removeMissing=[&](const std::string& sql,const std::vector<std::string>& bounds) {
@@ -482,7 +526,7 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         if(sqlite3_step(update.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         if(full) {
             auto root=prepare(conn.get(),"INSERT INTO roots(root,generation,last_scan_time,file_count) VALUES(?,0,strftime('%s','now'),?) ON CONFLICT(root) DO UPDATE SET last_scan_time=excluded.last_scan_time,file_count=excluded.file_count");
-            bindText(root.get(),1,s.root); sqlite3_bind_int64(root.get(),2,count);
+            bindText(root.get(),1,s.root); sqlite3_bind_int64(root.get(),2,count+retained_count);
             if(sqlite3_step(root.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         }
         if(tableExists(conn.get(),"files_name_fts") && !metadataFlag(conn.get(),"name_fts_ready")) {
@@ -970,16 +1014,42 @@ std::uint64_t Database::forgetSource(std::int64_t id) const {
         conn.exec("COMMIT;"); return removed;
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
+SourceOwnershipSnapshot Database::captureSourceDescendants(const SourceRecord& expected) const {
+    SqliteConnection conn(db_path_); conn.exec("BEGIN;");
+    const auto current=getSource(conn.get(),expected.id);
+    if(current.revision!=expected.revision || current.root!=expected.root || current.identity!=expected.identity || current.mount_fingerprint!=expected.mount_fingerprint)
+        throw std::runtime_error("source binding changed before scan");
+    const auto policy=getPolicy(conn.get());
+    if(policy.revision!=expected.policy_revision)throw std::runtime_error("exclusion policy changed before scan");
+    return {policy,sourceDescendants(conn.get(),expected)};
+}
 IndexStats Database::mergeSourceSnapshot(const SourceRecord& expected,
                                         const std::vector<FileRecord>& records,
-                                        const std::string& subtree_relative) const {
+                                        const std::string& subtree_relative,
+                                        const std::vector<SourceRecord>* expected_descendants) const {
+    std::vector<std::string> protected_scopes;
+    if(expected_descendants)for(const auto& child:*expected_descendants)
+        if(!ownsSuccessfulSnapshot(child))protected_scopes.push_back(relativeTo(child.root,expected.root));
     SqliteConnection conn(db_path_); std::size_t offset=0;
     return mergeSnapshot(conn,expected,[&](std::vector<FileRecord>& batch) {
         if(offset==records.size()) return false;
         const auto end=std::min(records.size(),offset+1000);
         batch.assign(records.begin()+offset,records.begin()+end); offset=end;
+        if(expected_descendants)for(const auto& record:batch)
+            for(const auto& child:*expected_descendants)
+                if(pathIsWithin(record.path,child.root))throw std::invalid_argument("snapshot record belongs to nested source");
         return true;
-    },subtree_relative);
+    },subtree_relative,[&](sqlite3* main) {
+        if(!expected_descendants)return;
+        // This check must follow BEGIN IMMEDIATE and precede every files write.
+        // Child file/label updates do not change ownership and stay admissible.
+        if(!sameDescendantOwnership(*expected_descendants,sourceDescendants(main,expected)))
+            throw std::runtime_error("nested source ownership changed during scan");
+        const auto scope=subtree_relative.empty() || subtree_relative=="." ? expected.root :
+            normalizePath(pathToUtf8(utf8ToPath(expected.root)/utf8ToPath(subtree_relative)));
+        for(const auto& child:*expected_descendants)
+            if(pathIsWithin(scope,child.root))throw std::invalid_argument("scan scope belongs to nested source");
+    },nullptr,expected_descendants?&protected_scopes:nullptr);
 }
 IndexStats Database::mergeSourceSnapshotFile(const SourceRecord& expected,
                                             const std::string& snapshot_database,

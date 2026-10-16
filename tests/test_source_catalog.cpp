@@ -4,6 +4,9 @@
 #include <thread>
 #if !defined(_WIN32)
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 #endif
 #include <sqlite3.h>
 #include <cassert>
@@ -11,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <algorithm>
 using namespace everything_lite;
 namespace fs = std::filesystem;
 static void sql(const fs::path& db, const char* text) {
@@ -26,6 +30,28 @@ static std::int64_t scalar(const fs::path& db, const char* text) {
     sqlite3_finalize(stmt); sqlite3_close(handle); return result;
 }
 static bool rejected(const std::function<void()>& work) { try { work(); } catch (const std::exception&) { return true; } return false; }
+#if defined(__APPLE__)
+// Interception is local to this executable. Mutate ownership exactly as the
+// merge starts BEGIN IMMEDIATE, after any possible out-of-transaction check.
+struct BeginMutation {
+    std::string path; std::function<void()> mutate; bool fired=false;
+};
+static BeginMutation* begin_mutation=nullptr;
+static int ownershipTrace(unsigned kind,void*,void* statement,void*) {
+    if(!begin_mutation || begin_mutation->fired || kind!=SQLITE_TRACE_STMT)return 0;
+    auto* stmt=static_cast<sqlite3_stmt*>(statement);
+    const auto* query=sqlite3_sql(stmt); const auto* path=sqlite3_db_filename(sqlite3_db_handle(stmt),"main");
+    if(!query || !path || begin_mutation->path!=path || std::string(query)!="BEGIN IMMEDIATE;")return 0;
+    begin_mutation->fired=true; begin_mutation->mutate(); return 0;
+}
+extern "C" int sqlite3_open_v2(const char* path,sqlite3** db,int flags,const char* vfs) {
+    using Open=int(*)(const char*,sqlite3**,int,const char*);
+    static const auto native=reinterpret_cast<Open>(dlsym(RTLD_NEXT,"sqlite3_open_v2")); assert(native);
+    const int rc=native(path,db,flags,vfs);
+    if(rc==SQLITE_OK && begin_mutation)assert(sqlite3_trace_v2(*db,SQLITE_TRACE_STMT,ownershipTrace,nullptr)==SQLITE_OK);
+    return rc;
+}
+#endif
 // The external writer keeps a WAL write lock while both migration callers
 // enter. Old implementations publish two backups before obtaining that lock;
 // corrected implementations cannot publish a backup until it is released.
@@ -81,10 +107,185 @@ INSERT INTO roots VALUES('/synthetic/concurrent',1,1,0);
         assert(scalar(path,"SELECT modified_time FROM files")==91);
     }
 }
+// POSIX scanners implement pruning boundaries; the Windows scanner currently
+// rejects configured boundaries and keeps its existing tests below.
+#if !defined(_WIN32)
+static std::vector<SearchResult> sourceRows(Database& db, std::int64_t id) {
+    SearchQuery query; query.source_id=id;
+    return db.search(query,10000);
+}
+static std::vector<std::pair<std::string,std::uint64_t>> cachedRows(Database& db,std::int64_t id) {
+    std::vector<std::pair<std::string,std::uint64_t>> rows;
+    for(const auto& row:sourceRows(db,id)) rows.emplace_back(row.file.relative_path,row.file.size);
+    std::sort(rows.begin(),rows.end()); return rows;
+}
+static void transactionalOwnershipAdmission(const fs::path& base) {
+#if defined(__APPLE__)
+    const auto parent=base/"transactional-ownership", child=parent/"nested";
+    fs::create_directories(child);
+    std::ofstream(parent/"transaction-item.txt")<<"unchanged";
+    IndexManager manager((base/"transactional-ownership.db").string());
+    assert(manager.rebuildRoots({parent.string(),child.string()}).completed);
+    auto& db=manager.database(); const auto id=db.ensureSourceForRoot(parent.string());
+    const auto child_id=db.ensureSourceForRoot(child.string());
+    const auto expected=db.source(id); const auto ownership=db.captureSourceDescendants(expected);
+    auto rows=sourceRows(db,id); std::vector<FileRecord> snapshot;
+    for(auto& row:rows) { row.file.size+=123; snapshot.push_back(row.file); }
+    const auto before=cachedRows(db,id);
+    BeginMutation sequence{fs::canonical(db.path()).string(),[&] {
+        const auto update="UPDATE sources SET root=root||'/moved',revision=revision+1 WHERE id="+std::to_string(child_id);
+        sql(db.path(),update.c_str());
+    }};
+    begin_mutation=&sequence;
+    const auto refused=rejected([&]{db.mergeSourceSnapshot(expected,snapshot,{},&ownership.descendants);});
+    begin_mutation=nullptr;
+    if(!sequence.fired || !refused)std::cerr<<"write transaction trace fired="<<sequence.fired<<", rejected="<<refused<<"\n";
+    assert(sequence.fired && refused && "ownership admission must run under the actual write transaction");
+    assert(cachedRows(db,id)==before && db.source(id).revision==expected.revision);
+#else
+    (void)base;
+#endif
+}
+static void nestedTopologyChanges(const fs::path& base) {
+    bool correct=true;
+    for(int change=0;change<6;++change) {
+        const auto parent=base/("topology-"+std::to_string(change)), child=parent/"nested";
+        fs::create_directories(child);
+        for(int i=0;i<1002;++i) std::ofstream(parent/("payload-"+std::to_string(i)+".txt"))<<"payload";
+        std::ofstream(parent/"stale-item.txt")<<"stale";
+        std::ofstream(parent/"kept-item.txt")<<"old";
+        std::ofstream(child/"nested-item.txt")<<"child";
+        IndexManager manager((base/("topology-"+std::to_string(change)+".db")).string());
+        if(change>0 && change<5) assert(manager.rebuildRoots({parent.string(),child.string()}).completed);
+        else assert(manager.rebuildRoot(parent.string()).completed);
+        auto& db=manager.database(); const auto id=db.ensureSourceForRoot(parent.string());
+        const auto child_id=change ? db.ensureSourceForRoot(child.string()):0;
+        const auto before=cachedRows(db,id); const auto revision=db.source(id).revision;
+        fs::remove(parent/"stale-item.txt");
+        std::ofstream(parent/"kept-item.txt")<<"changed size";
+        std::ofstream(parent/"new-item.txt")<<"new";
+        bool changed=false;
+        const auto scan=manager.rebuildSource(id,[&](const std::string&,std::uint64_t count) {
+            if(changed || count<1000) return;
+            changed=true;
+            if(change==0) db.ensureSourceForRoot(child.string());
+            else if(change==1) { auto source=db.source(child_id); source.root=(parent/"moved-child").string(); db.saveSource(source); }
+            else if(change==2) db.forgetSource(child_id);
+            else if(change==3) { auto source=db.source(child_id); source.status=SourceStatus::Offline; db.saveSource(source); }
+            else {
+                std::ofstream(child/"nested-item.txt")<<"updated child";
+                assert(manager.rebuildSource(child_id).completed);
+                auto source=db.source(child_id); source.label="changed label"; db.saveSource(source);
+            }
+        });
+        assert(changed && "mutation must occur after the first 1000-row batch");
+        const bool expected_success=change==4;
+        const bool valid=expected_success ? scan.completed :
+            (!scan.completed && !scan.error.empty() && cachedRows(db,id)==before && db.source(id).revision==revision);
+        if(!valid) std::cerr<<"topology change case "<<change<<" violated atomic ownership admission\n";
+        correct=correct && valid;
+    }
+    assert(correct && "topology/protection changes must reject all parent writes; ordinary child updates must remain admissible");
+}
+static void nestedSourceOwnership(const fs::path& base) {
+    const auto parent=base/"ownership", child=parent/"nested";
+    fs::create_directories(child);
+    std::ofstream(parent/"parent-item.txt")<<"parent";
+    std::ofstream(child/"ownership-item.txt")<<"child";
+    IndexManager manager((base/"ownership.db").string());
+    int parent_callbacks=0;
+    const auto first=manager.rebuildRoots({parent.string(),child.string(),(parent/".").string()},
+        [&](const std::string& root,std::uint64_t) { if(root==parent.string())++parent_callbacks; });
+    assert(first.completed && parent_callbacks==1);
+    auto& db=manager.database();
+    const auto parent_id=db.ensureSourceForRoot(parent.string()), child_id=db.ensureSourceForRoot(child.string());
+    assert(db.search("ownership-item").size()==1 && "first parent/child rebuild must not duplicate child rows");
+    assert(db.searchReliable("ownership-item").size()==1);
+    assert(sourceRows(db,parent_id).size()==2 && sourceRows(db,child_id).size()==2);
+    const auto event=manager.applyPathChange(parent.string(),(child/"ownership-item.txt").string());
+    assert(!event.completed && !event.error.empty() && "parent events cannot claim a nested source subtree");
+    assert(sourceRows(db,parent_id).size()==2 && sourceRows(db,child_id).size()==2);
+#if !defined(_WIN32)
+    if(geteuid()!=0) {
+        fs::permissions(child,fs::perms::none);
+        const auto parent_scan=manager.rebuildSource(parent_id);
+        const auto child_scan=manager.rebuildSource(child_id);
+        fs::permissions(child,fs::perms::owner_all);
+        assert(parent_scan.completed && !child_scan.completed);
+        assert(sourceRows(db,child_id).size()==2);
+    }
+#endif
+    fs::rename(child,base/"ownership-offline");
+    const auto offline=manager.rebuildSource(child_id);
+    assert(!offline.completed && db.source(child_id).status==SourceStatus::Offline);
+    const auto parent_scan=manager.rebuildSource(parent_id);
+    assert(parent_scan.completed && parent_scan.error.empty());
+    assert(sourceRows(db,child_id).size()==2);
+    const auto missing_event=manager.applyPathChange(parent.string(),(child/"ownership-item.txt").string());
+    assert(!missing_event.completed && !missing_event.error.empty());
+    assert(sourceRows(db,child_id).size()==2 && sourceRows(db,parent_id).size()==2);
+
+    const auto old_parent=base/"old-overlap", old_child=old_parent/"nested";
+    fs::create_directories(old_child);
+    fs::create_directories(old_parent/"nested-other");
+    std::ofstream(old_parent/"nested-other"/"prefix-item.txt")<<"sibling";
+    std::ofstream(old_child/"old-child-item.txt")<<"cached";
+    IndexManager old((base/"old-overlap.db").string());
+    assert(old.rebuildRoot(old_parent.string()).completed);
+    assert(old.rebuildRoot(old_child.string()).completed);
+    assert(old.database().search("old-child-item").size()==2);
+    const auto corrected=old.rebuildRoot(old_parent.string());
+    assert(corrected.completed && corrected.removed==2);
+    assert(old.database().search("old-child-item").size()==1);
+    assert(sourceRows(old.database(),old.database().ensureSourceForRoot(old_parent.string())).size()==3);
+    assert(old.database().search("prefix-item").size()==1);
+    assert(sourceRows(old.database(),old.database().ensureSourceForRoot(old_child.string())).size()==2);
+
+    const auto sole_parent=base/"sole-cache", sole_child=sole_parent/"nested";
+    fs::create_directories(sole_child);
+    std::ofstream(sole_child/"sole-cached-item.txt")<<"sole snapshot";
+    IndexManager sole((base/"sole-cache.db").string());
+    assert(sole.rebuildRoot(sole_parent.string()).completed);
+    const auto sole_id=sole.database().ensureSourceForRoot(sole_child.string());
+    fs::rename(sole_child,base/"sole-offline");
+    assert(!sole.rebuildSource(sole_id).completed);
+    assert(sole.rebuildRoot(sole_parent.string()).completed);
+    assert(sole.database().search("sole-cached-item").size()==1 && "unconfirmed child must not delete the only cached copy");
+    assert(sourceRows(sole.database(),sole_id).empty());
+    const auto sole_parent_id=sole.database().ensureSourceForRoot(sole_parent.string());
+    const auto count_sql="SELECT file_count FROM roots WHERE root=(SELECT root FROM sources WHERE id="+std::to_string(sole_parent_id)+")";
+    assert(scalar(sole.database().path(),count_sql.c_str())==static_cast<std::int64_t>(sourceRows(sole.database(),sole_parent_id).size()));
+    fs::rename(base/"sole-offline",sole_child);
+    assert(sole.rebuildSource(sole_id).completed);
+    assert(sole.rebuildRoot(sole_parent.string()).completed);
+    assert(sole.database().search("sole-cached-item").size()==1);
+    assert(sourceRows(sole.database(),sole_id).size()==2);
+#if !defined(_WIN32)
+    // Bound directory roots keep their historical root-link behavior, including
+    // when literal nested roots require a pruning boundary.
+    const auto target=base/"link-target", linked=base/"linked-root";
+    fs::create_directories(target/"nested");
+    std::ofstream(target/"nested"/"linked-item.txt")<<"linked";
+    fs::create_directory_symlink(target,linked);
+    IndexManager links((base/"links.db").string());
+    assert(links.rebuildRoots({linked.string(),(linked/"nested").string()}).completed);
+    assert(links.database().search("linked-item").size()==1);
+    const auto linked_file=base/"linked-file";
+    fs::create_symlink(target/"nested"/"linked-item.txt",linked_file);
+    assert(links.rebuildRoot(linked_file.string()).completed);
+    assert(sourceRows(links.database(),links.database().ensureSourceForRoot(linked_file.string())).size()==1);
+#endif
+}
+#endif
 int main() {
     assert(pathIsWithin("/synthetic/file.txt","/"));
     const auto nonce=std::chrono::steady_clock::now().time_since_epoch().count();
     auto base=fs::temp_directory_path()/("everything-lite-source-test-"+std::to_string(nonce));
+#if !defined(_WIN32)
+    transactionalOwnershipAdmission(base);
+    nestedTopologyChanges(base);
+    nestedSourceOwnership(base);
+#endif
     fs::create_directories(base/"root");
     std::ofstream(base/"root"/"retained.txt") << "retained";
     IndexManager manager((base/"index.db").string());

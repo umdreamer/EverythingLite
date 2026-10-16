@@ -57,7 +57,20 @@ fs::path canonicalFileLocation(const fs::path& path) {
     if(ec) fail("storage: cannot inspect storage directory");
     return parent/path.filename();
 }
+bool sqliteSidecarName(const fs::path& path) {
+    auto name=path.filename().u8string();
+    for(char& c:name) if(c>='A' && c<='Z') c=static_cast<char>(c-'A'+'a');
+    for(const std::string suffix:{"-journal","-wal","-shm"}) {
+        if(name.size()>=suffix.size() && name.compare(name.size()-suffix.size(),suffix.size(),suffix)==0) return true;
+    }
+    return false;
+}
 void rejectReservedBackup(const fs::path& source,const fs::path& backup) {
+    // Conservative maintenance naming rule: case-insensitive filesystems can
+    // alias any basename. Also reject a sidecar-named source: opening the
+    // backup could otherwise treat that source as the backup's own journal.
+    if(sqliteSidecarName(source) || sqliteSidecarName(backup))
+        fail("storage: maintenance paths must not use SQLite sidecar suffixes");
     const auto canonical_source=canonicalFileLocation(source);
     const auto canonical_backup=canonicalFileLocation(backup);
     if(canonical_backup==canonical_source)

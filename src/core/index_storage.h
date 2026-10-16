@@ -16,6 +16,7 @@ struct IndexCompaction {
 IndexStorage readIndexStorage(const std::string& path);
 // Keeps the verified backup. Failure never restores over an active database.
 // after includes the explicit backup even when outside the report naming rule.
+// Source/backup names must not end in -journal/-wal/-shm (ASCII case-insensitive).
 IndexCompaction compactIndexStorage(const std::string& path, const std::string& backup_path,
                                     std::atomic_bool* cancel=nullptr);
 } // namespace everything_lite

@@ -60,6 +60,22 @@ int main() {
     }
     assert(rejected([&]{compactIndexStorage(path.string(),(base/"parent-alias"/path.filename()).string());}));
     assert(bytes(path)==original);
+    // Maintenance paths cannot be SQLite sidecars, including ASCII case
+    // aliases and reverse relationships where opening backup owns the source.
+    for(const char* suffix:{"-jOuRnAl","-WaL","-sHm"}) {
+        const auto target=base/(std::string("INDEX.SQLITE")+suffix);
+        assert(!fs::exists(target));
+        assert(rejected([&]{compactIndexStorage(path.string(),target.string());}));
+        assert(!fs::exists(target) && bytes(path)==original);
+        const auto other_directory=base/"child"/(std::string("unrelated")+suffix);
+        assert(rejected([&]{compactIndexStorage(path.string(),other_directory.string());}));
+        assert(!fs::exists(other_directory) && bytes(path)==original);
+        const auto reverse_source=base/(std::string("reverse.sqlite")+suffix);
+        const auto reverse_backup=base/"reverse.sqlite";
+        fs::copy_file(path,reverse_source);
+        assert(rejected([&]{compactIndexStorage(reverse_source.string(),reverse_backup.string());}));
+        assert(!fs::exists(reverse_backup) && bytes(reverse_source)==original);
+    }
     const auto backup=base/"index.sqlite.pre-storage-456.backup.sqlite";
     const auto result=compactIndexStorage(path.string(),backup.string());
     assert(result.after.main_bytes<result.before.main_bytes && result.after.freelist_bytes==0);

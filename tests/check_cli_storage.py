@@ -48,6 +48,17 @@ with tempfile.TemporaryDirectory(prefix="everything-cli-storage-", dir="/private
             assert not reserved.exists() and db.read_bytes() == original
     same = run("storage", "compact", "--backup", str(base / "parent-alias" / db.name))
     assert same.returncode != 0 and db.read_bytes() == original, same
+    for suffix in ("-jOuRnAl", "-WaL", "-sHm"):
+        for reserved in (base / (db.name.upper() + suffix), base / "child" / ("unrelated" + suffix)):
+            refused = run("storage", "compact", "--backup", str(reserved))
+            assert refused.returncode != 0, refused
+            assert not reserved.exists() and db.read_bytes() == original
+        reverse_source = base / ("reverse.sqlite" + suffix)
+        reverse_source.write_bytes(original)
+        reverse_backup = base / "reverse.sqlite"
+        reverse = subprocess.run([cli, "--db", str(reverse_source), "storage", "compact", "--backup", str(reverse_backup)], capture_output=True, text=True, env=env, timeout=15)
+        assert reverse.returncode != 0, reverse
+        assert not reverse_backup.exists() and reverse_source.read_bytes() == original
     backup = base / "synthetic.sqlite.pre-storage-123.backup.sqlite"
     compact = run("storage", "compact", "--backup", str(backup))
     assert compact.returncode == 0, compact

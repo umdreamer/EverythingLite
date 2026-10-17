@@ -97,6 +97,13 @@ std::uint64_t fileBytes(const fs::path& path,bool optional=false) {
     if(ec) fail("storage: cannot inspect storage size");
     return bytes;
 }
+bool missingRegularSidecar(const fs::path& path) {
+    std::error_code ec;
+    const auto status=fs::symlink_status(path,ec);
+    if(status.type()==fs::file_type::not_found || ec==std::errc::no_such_file_or_directory) return true;
+    if(ec || !fs::is_regular_file(status)) fail("storage: cannot inspect regular storage file");
+    return false;
+}
 std::uint64_t readableFileBytes(const fs::path& path) {
     const auto bytes=fileBytes(path);
     std::ifstream input(path,std::ios::binary);
@@ -271,14 +278,46 @@ IndexMaintenanceLock::~IndexMaintenanceLock() {
 IndexStorage readIndexStorage(const std::string& value) {
     const auto path=absolutePath(value);
     regular(path);
+    // Reject linked or special sidecars before asking SQLite to access them.
+    missingRegularSidecar(path.u8string()+"-wal");
+    missingRegularSidecar(path.u8string()+"-shm");
     auto connection=openDatabase(path,true);
     IndexStorage report;
-    // Metadata-only PRAGMAs: no application schema or file-row scans.
-    check(sqlite3_exec(connection.get(),"BEGIN",nullptr,nullptr,nullptr));
-    report.page_size=pragma(connection.get(),"PRAGMA page_size");
-    report.page_count=pragma(connection.get(),"PRAGMA page_count");
-    report.freelist_bytes=multiply(report.page_size,pragma(connection.get(),"PRAGMA freelist_count"));
-    check(sqlite3_exec(connection.get(),"ROLLBACK",nullptr,nullptr,nullptr));
+    auto read_pages=[&] {
+        // Metadata-only PRAGMAs: no application schema or file-row scans.
+        check(sqlite3_exec(connection.get(),"BEGIN",nullptr,nullptr,nullptr));
+        report.page_size=pragma(connection.get(),"PRAGMA page_size");
+        report.page_count=pragma(connection.get(),"PRAGMA page_count");
+        report.freelist_bytes=multiply(report.page_size,pragma(connection.get(),"PRAGMA freelist_count"));
+        check(sqlite3_exec(connection.get(),"ROLLBACK",nullptr,nullptr,nullptr));
+    };
+    try { read_pages(); }
+    catch(const std::runtime_error& error) {
+        // SQLite cannot start a read-only WAL snapshot when its sidecars are
+        // absent. A no-create, query-only connection lets SQLite recreate its
+        // own sidecars. Disabling close-time checkpoint keeps the main file
+        // unchanged; this fallback is restricted to a missing WAL sidecar.
+        const bool missing_wal=missingRegularSidecar(path.u8string()+"-wal");
+        const bool missing_shm=missingRegularSidecar(path.u8string()+"-shm");
+        const bool missing_sidecar=missing_wal || missing_shm;
+        std::ifstream input(path,std::ios::binary);
+        char header[20]{};
+        input.read(header,sizeof(header));
+        const bool wal_header=input.gcount()==sizeof(header) &&
+            std::string(header,15)=="SQLite format 3" && header[15]=='\0' &&
+            static_cast<unsigned char>(header[18])==2 && static_cast<unsigned char>(header[19])==2;
+        if(std::string(error.what()).find("(code 14)")==std::string::npos ||
+           !missing_sidecar || !wal_header) throw;
+        connection.reset();
+        connection=openDatabase(path,false);
+#ifdef SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE
+        check(sqlite3_db_config(connection.get(),SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,1,nullptr));
+#else
+        fail("storage: SQLite cannot report WAL statistics without checkpoint control");
+#endif
+        check(sqlite3_exec(connection.get(),"PRAGMA query_only=ON",nullptr,nullptr,nullptr));
+        read_pages();
+    }
     report.main_bytes=fileBytes(path);
     report.wal_bytes=fileBytes(path.u8string()+"-wal",true);
     report.shm_bytes=fileBytes(path.u8string()+"-shm",true);

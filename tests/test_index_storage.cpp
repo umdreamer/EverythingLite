@@ -100,7 +100,11 @@ int main() {
     assert(!fs::exists(absent) && !fs::exists(base/"missing.backup"));
     assert(rejected([&]{compactIndexStorage(path.string(),backup.string());}));
     const auto linked=base/"linked.sqlite"; fs::create_symlink(path,linked);
+    assert(rejected([&]{readIndexStorage(linked.string());}));
     assert(rejected([&]{compactIndexStorage(linked.string(),(base/"linked.backup").string());}));
+    const auto missing_link=base/"dangling-main.sqlite";
+    fs::create_symlink(absent,missing_link);
+    assert(rejected([&]{readIndexStorage(missing_link.string());}));
     fs::create_symlink(absent,base/"dangling.backup");
     assert(rejected([&]{compactIndexStorage(path.string(),(base/"dangling.backup").string());}));
     assert(rejected([&]{compactIndexStorage(base.string(),(base/"directory.backup").string());}));
@@ -138,6 +142,31 @@ int main() {
     const auto corrupt_before=bytes(corrupt);
     assert(rejected([&]{readIndexStorage(corrupt.string());}));
     assert(bytes(corrupt)==corrupt_before);
+    // SQLite may remove WAL sidecars when the last unrelated reader closes.
+    // A valid committed WAL database must still be reportable afterward.
+    const auto cold_wal=base/"cold-wal.sqlite";
+    db=open(cold_wal);
+    sql(db,"CREATE TABLE probe(value TEXT); PRAGMA journal_mode=WAL; INSERT INTO probe VALUES('committed');");
+    assert(sqlite3_close(db)==SQLITE_OK);
+    // The last writer checkpointed the committed row into the main file.
+    if(fs::exists(cold_wal.string()+"-wal")) {
+        assert(fs::file_size(cold_wal.string()+"-wal")==0);
+        fs::remove(cold_wal.string()+"-wal");
+    }
+    if(fs::exists(cold_wal.string()+"-shm")) fs::remove(cold_wal.string()+"-shm");
+    assert(!fs::exists(cold_wal.string()+"-wal") && !fs::exists(cold_wal.string()+"-shm"));
+    const auto sidecar_target=base/"outside-sidecar";
+    fs::create_symlink(sidecar_target,cold_wal.string()+"-wal");
+    assert(rejected([&]{readIndexStorage(cold_wal.string());}));
+    assert(!fs::exists(sidecar_target));
+    fs::remove(cold_wal.string()+"-wal");
+    const auto cold_original=bytes(cold_wal);
+    const auto cold_report=readIndexStorage(cold_wal.string());
+    assert(cold_report.page_count>0 && cold_report.page_size>0);
+    assert(bytes(cold_wal)==cold_original && "storage reporting must not rewrite the main database");
+    db=open(cold_wal);
+    assert(scalar(db,"SELECT value FROM probe")=="committed");
+    sqlite3_close(db);
     assert(rejected([&]{compactIndexStorage(path.string(),(base/"absent-dir"/"backup").string());}));
     assert(!fs::exists(base/"absent-dir"));
     fs::remove_all(base);

@@ -8,9 +8,26 @@ Everything Lite 通过 Vibe Coding 方式开发。存储优化以搜索一致性
 everything-lite-cli --db '/path/to/index.db' storage stats
 ```
 
-该命令以只读方式查询 SQLite 页统计，不创建缺失数据库，不执行格式升级、扫描来源或重建搜索索引。输出为单行 JSON，schema_version 为 1，action 为 stats。storage 包含 main_bytes、wal_bytes、shm_bytes、page_size、page_count、freelist_bytes、backup_bytes、backup_count 和 total_bytes，单位为字节。文件长度统计不等于文件系统去重、压缩及快照后的独占物理占用。
+该命令只查询 SQLite 页统计，不创建缺失数据库，不执行格式升级、扫描来源或重建搜索索引。WAL 数据库缺少辅助文件且 SQLite 只读连接返回错误 14 时，会用不创建主库、禁止 SQL 写入与关闭时检查点的连接让 SQLite 重建辅助文件；统计连接自身不修改主库，但可能新增 `-wal`、`-shm`。并发写入者仍可能修改主库。输出为单行 JSON，schema_version 为 1，action 为 stats。storage 包含 main_bytes、wal_bytes、shm_bytes、page_size、page_count、freelist_bytes、backup_bytes、backup_count 和 total_bytes，单位为字节。文件长度统计不等于文件系统去重、压缩及快照后的独占物理占用。
 
 主库空闲页代表 SQLite 已可复用、尚未归还给文件系统的空间。它与重复记录不是同一概念。备份统计只计同目录中以主库文件名开头、符合 `.pre-source-catalog-<数字>.backup.sqlite` 或 `.pre-storage-<数字>.backup.sqlite` 规则的普通文件；不把符号链接、任意同前缀文件或其他目录文件算为应用备份。统计名称符合规则并不代表备份已经通过恢复验证。
+
+## 目录字典与紧凑名称索引
+
+目录字典格式 `directory-v1` 将同一来源的父目录路径保存一次，文件条目保存目录编号、名称和元数据。完整路径通过兼容视图重建，不再为每条文件记录重复保存完整路径、父路径、来源根路径和折叠路径。显示名称与路径中的文件名分别保留；来源 ID、记录 ID、离线缓存及排除规则保持有效。
+
+名称搜索索引采用 FTS5 的 `detail=none,columnsize=0`。三字符候选匹配后仍检查完整原词，避免分散出现的字符片段形成错误结果。短词、路径查询和不支持的输入使用可靠查询路径，不承诺固定压缩比例。
+
+```sh
+everything-lite-cli --db '/path/to/index.db' storage optimize \
+  --backup '/path/to/index.db.pre-storage-124.backup.sqlite'
+```
+
+格式升级是显式操作，普通启动不自动转换现有索引。输入须为已完成来源目录升级的 schema 413；更早格式明确拒绝，须先使用支持来源目录的版本完成常规升级。新格式使用独立 schema 414，旧程序不能写入；这些数字是数据库格式号。重复执行已完成的格式迁移返回 `already_compact=true`，不创建另一份备份。已使用紧凑格式时，空闲页仍可通过 `storage compact` 回收。
+
+迁移先取得写锁，再从独立只读连接创建并验证准确前态的恢复备份。新旧结构在事务内比较全部记录及派生字段；路径不能精确重建时回滚。来源修订号推进，正在执行的过期扫描不能继续回写。搜索索引重建和检查也属于迁移事务。迁移与空间整理共用维护锁，锁文件保留供后续维护复用。
+
+输出 action 为 optimize，包含 before、after、backup_bytes、already_compact、migration_committed、vacuum_completed 和 error。提交前失败会回滚格式及数据；格式提交后 VACUUM 失败或取消，会保留有效的新格式，报告 `migration_committed=true`、`vacuum_completed=false` 和错误，不以备份覆盖活动数据库。命令仅在 error 为空时返回成功。恢复备份单独计入总占用。
 
 ## 显式整理
 
@@ -49,3 +66,4 @@ Core API 支持通过 atomic_bool 取消，覆盖分批备份、SQLite 锁等待
 
 - [SQLite — VACUUM](https://www.sqlite.org/lang_vacuum.html)
 - [SQLite — Online Backup API](https://www.sqlite.org/backup.html)
+- [SQLite — FTS5 Extension](https://www.sqlite.org/fts5.html)

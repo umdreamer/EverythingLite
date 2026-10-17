@@ -14,6 +14,8 @@ macOS 使用 FSEvents，Linux 使用递归 inotify 监听文件变化。两平�
 
 GUI 显示名称为 **Everything Lite**，GUI 可执行文件名为 `EverythingLite`（macOS 为 `EverythingLite.app`），命令行程序名为 `everything-lite-cli`。文件名、界面名称与内部配置标识分别按用途命名，已有数据库及 QSettings 标识保持兼容。
 
+索引保留来源身份及离线缓存，Core 和 CLI 支持排除目录与文件。`storage stats` 报告主库、辅助文件、空闲页和同目录备份；`storage optimize` 显式迁移到目录字典与紧凑名称索引，`storage compact` 显式整理空闲页。实际执行迁移或整理前会保留恢复备份，含备份总占用可能增加。操作条件、格式兼容与恢复方法见[索引存储](docs/INDEX_STORAGE.md)。
+
 ## 构建与测试
 
 Core/CLI 需要 CMake 3.21.1 或更高版本、C++17 编译器、SQLite 开发库及构建工具。仓库预设使用 Unix Makefiles：

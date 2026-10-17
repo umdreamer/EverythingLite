@@ -12,6 +12,12 @@ ctest --preset core-debug
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
 
+## Mac 索引存储开发分支（2026-10-17）
+
+本轮仍使用应用版本 0.4.12。最终代码的 Core Debug 全套 20/20 通过；严格 gui-debug 全套 25/25 通过，其中 Qt UI 为 66 passed、0 failed、0 skipped。GUI Debug 及独立 Release 构建均生成实际 `EverythingLite.app/Contents/MacOS/EverythingLite` 和 `everything-lite-cli`。测试按顺序运行；Release 构建不代替 Debug 断言回归。
+
+临时数据库中 100001 行记录在显式格式迁移前后，`files` 全部字段和稳定 ID 的哈希一致。该构造使用重复长目录：主库从 110198784 降至 19165184 字节；保留恢复备份和来源凭证后的总量从 110231552 增至 129397363 字节。迁移耗时约 1.77 秒，仅描述该合成夹具及当前机器，不能推断日常索引的压缩率或速度。未对日常索引执行迁移或删除备份，未作人工 GUI 交互验收。
+
 ## 最终构建与回归
 
 本次 0.4.12 本地验证于 2026-10-02 完成。Mac 使用 AppleClang 17、Qt 6.11.2，GUI Debug 的 desktop_actions、ui、core、cli_parity 通过（4/4）。Ubuntu 24.04 容器使用 GCC 13、Qt 6.4.2；arm64 在 ARM64 引擎中执行，amd64 通过 Docker 异构模拟执行，两者的 desktop_actions、ui、core、cli_parity、linux_watcher 均通过（各 5/5）。测试按环境顺序执行，不并发运行旧 core 实例。

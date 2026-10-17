@@ -1,4 +1,5 @@
 #include "core/index_storage.h"
+#include "core/database.h"
 #include "core/directory_storage.h"
 #include <sqlite3.h>
 #include <algorithm>
@@ -9,6 +10,9 @@
 #include <memory>
 #include <stdexcept>
 #include <thread>
+#include <set>
+#include <sstream>
+#include <cerrno>
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
@@ -26,6 +30,18 @@ namespace {
 namespace fs=std::filesystem;
 using Connection=std::unique_ptr<sqlite3,decltype(&sqlite3_close)>;
 using Statement=std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)>;
+struct SourceIdentity {
+    fs::path location;
+#ifndef _WIN32
+    struct stat info{};
+#endif
+};
+SourceIdentity sourceIdentity(const fs::path& source);
+void unchangedSource(const SourceIdentity& expected,const fs::path& source);
+void writeBackupProvenance(const fs::path& source,const fs::path& backup,const SourceIdentity& expected);
+bool backupProvenanceMatches(const fs::path& source,const fs::path& backup);
+fs::path provenancePath(const fs::path& backup) {return fs::path(backup.u8string()+".provenance");}
+
 [[noreturn]] void fail(const char* reason) { throw std::runtime_error(reason); }
 void cancelled(std::atomic_bool* cancel) {
     if(cancel && cancel->load()) fail("storage: cancelled; keep any completed backup");
@@ -87,6 +103,29 @@ void regular(const fs::path& path) {
     std::error_code ec;
     const auto status=fs::symlink_status(path,ec);
     if(ec || !fs::is_regular_file(status)) fail("storage: database must be an existing regular file");
+}
+SourceIdentity sourceIdentity(const fs::path& source) {
+    SourceIdentity identity;
+    identity.location=canonicalFileLocation(source);
+#ifndef _WIN32
+    if(::lstat(identity.location.c_str(),&identity.info)!=0 || !S_ISREG(identity.info.st_mode))
+        fail("storage: cannot inspect source identity");
+#endif
+    return identity;
+}
+void unchangedSource(const SourceIdentity& expected,const fs::path& source) {
+#ifndef _WIN32
+    const auto actual=sourceIdentity(source);
+    if(actual.location!=expected.location || actual.info.st_dev!=expected.info.st_dev ||
+       actual.info.st_ino!=expected.info.st_ino
+#if defined(__APPLE__)
+       || actual.info.st_birthtimespec.tv_sec!=expected.info.st_birthtimespec.tv_sec ||
+       actual.info.st_birthtimespec.tv_nsec!=expected.info.st_birthtimespec.tv_nsec
+#endif
+    )fail("storage: source identity changed during backup; keep the unclaimed backup");
+#else
+    (void)expected;(void)source;
+#endif
 }
 std::uint64_t fileBytes(const fs::path& path,bool optional=false) {
     std::error_code ec;
@@ -151,6 +190,13 @@ bool ownedBackup(const fs::path& database,const fs::path& candidate) {
         if(std::all_of(first,last,[](char c){return c>='0' && c<='9';})) return true;
     }
     return false;
+}
+bool ownedReceipt(const fs::path& database,const fs::path& candidate) {
+    const auto value=candidate.u8string();const std::string suffix=".provenance";
+    if(value.size()<=suffix.size() || value.compare(value.size()-suffix.size(),suffix.size(),suffix)!=0)return false;
+    const fs::path backup(value.substr(0,value.size()-suffix.size()));
+    std::error_code ec;const auto status=fs::symlink_status(backup,ec);
+    return !ec && fs::is_regular_file(status) && ownedBackup(database,backup);
 }
 void total(IndexStorage& report) {
     report.total_bytes=add(add(add(report.main_bytes,report.wal_bytes),report.shm_bytes),report.backup_bytes);
@@ -332,13 +378,17 @@ IndexStorage readIndexStorage(const std::string& value) {
                 report.backup_bytes=add(report.backup_bytes,fileBytes(it->path()));
                 report.backup_count=add(report.backup_count,1);
             }
+        } else if(ownedReceipt(path,it->path())) {
+            const auto status=it->symlink_status(ec);
+            if(ec)fail("storage: cannot inspect backup receipt");
+            if(fs::is_regular_file(status))report.backup_bytes=add(report.backup_bytes,fileBytes(it->path()));
         }
         it.increment(ec); if(ec) fail("storage: cannot inspect backup directory");
     }
     total(report); return report;
 }
 
-IndexCompaction compactIndexStorage(const std::string& value,const std::string& backup_value,std::atomic_bool* cancel) {
+IndexCompaction compactIndexStorage(const std::string& value,const std::string& backup_value,std::atomic_bool* cancel,const IndexStorageProgress& progress) {
     cancelled(cancel);
     const auto path=absolutePath(value),backup_path=absolutePath(backup_value);
     regular(path);
@@ -353,21 +403,32 @@ IndexCompaction compactIndexStorage(const std::string& value,const std::string& 
     checkSpace(path.parent_path(),backup_path.parent_path(),current);
     IndexMaintenanceLock maintenance(path.u8string());
     Work work{cancel};
+    const auto source_identity=sourceIdentity(path);
     auto connection=openDatabase(path,false);
+    unchangedSource(source_identity,path);
     work.attach(connection.get());
     cancelled(cancel);
-    reserveBackup(backup_path);
+    if(progress)progress(IndexStoragePhase::Backup);
+    cancelled(cancel);reserveBackup(backup_path);
     {
         auto backup=openDatabase(backup_path,false);
         work.attach(backup.get());
         copyDatabase(connection.get(),backup.get(),cancel);
         verifyIntegrity(backup.get(),cancel,"storage: backup integrity check failed");
     }
+    if(progress)progress(IndexStoragePhase::BackupVerified);
     result.backup_bytes=fileBytes(backup_path);
+    writeBackupProvenance(path,backup_path,source_identity);
     cancelled(cancel);
     // VACUUM runs on the live database. SQLite owns the atomic transaction;
     // never rename a stale backup or replacement over other writers' commits.
-    check(sqlite3_exec(connection.get(),"VACUUM",nullptr,nullptr,nullptr),cancel);
+    if(progress)progress(IndexStoragePhase::Vacuum);
+    cancelled(cancel);
+    const int vacuum_result=sqlite3_exec(connection.get(),"VACUUM",nullptr,nullptr,nullptr);
+    // Record native completion before cancellation can turn success into an
+    // interrupted final verification. The GUI uses Verify as this boundary.
+    if(vacuum_result==SQLITE_OK && progress)progress(IndexStoragePhase::Verify);
+    check(vacuum_result,cancel);
     verifyIntegrity(connection.get(),cancel,"storage: database integrity check failed; keep the verified backup");
     // No journal_mode changes or unconditional WAL checkpoint claims. A WAL
     // retained by another reader is included at its actual size in the report.
@@ -381,7 +442,7 @@ IndexCompaction compactIndexStorage(const std::string& value,const std::string& 
     const auto backup_parent=fs::canonical(backup_path.parent_path(),ec);
     if(ec) fail("storage: cannot inspect backup directory");
     if(source_parent!=backup_parent || !ownedBackup(path,backup_path)) {
-        result.after.backup_bytes=add(result.after.backup_bytes,result.backup_bytes);
+        result.after.backup_bytes=add(result.after.backup_bytes,add(result.backup_bytes,fileBytes(provenancePath(backup_path),true)));
         result.after.backup_count=add(result.after.backup_count,1);
         total(result.after);
     }
@@ -407,7 +468,7 @@ void optimizationReport(IndexOptimization& result,const fs::path& path,const fs:
     const auto backup_parent=fs::canonical(backup_path.parent_path(),ec);
     if(ec)fail("storage: cannot inspect backup directory");
     if(source_parent!=backup_parent || !ownedBackup(path,backup_path)) {
-        result.after.backup_bytes=add(result.after.backup_bytes,result.backup_bytes);
+        result.after.backup_bytes=add(result.after.backup_bytes,add(result.backup_bytes,fileBytes(provenancePath(backup_path),true)));
         result.after.backup_count=add(result.after.backup_count,1);total(result.after);
     }
 }
@@ -438,7 +499,9 @@ IndexOptimization migrateIndexStorageToDirectory(const std::string& value,const 
         // New and old tables coexist transactionally, and WAL/VACUUM need workspace.
         // Reuse the conservative compaction budget with double the live size.
         checkSpace(path.parent_path(),backup_path.parent_path(),multiply(2,add(result.before.main_bytes,result.before.wal_bytes)));
-        connection=openDatabase(path,false);work.attach(connection.get());registerDirectoryWriter(connection.get());
+        const auto source_identity=sourceIdentity(path);
+        connection=openDatabase(path,false);unchangedSource(source_identity,path);
+        work.attach(connection.get());registerDirectoryWriter(connection.get());
         check(sqlite3_exec(connection.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr),cancel);transaction=true;
         if(hasDirectoryStorage(connection.get())) {
             if(!directoryStorageReady(connection.get()))fail("storage: damaged or unsupported directory format");
@@ -454,7 +517,9 @@ IndexOptimization migrateIndexStorageToDirectory(const std::string& value,const 
             copyDatabase(source.get(),backup.get(),cancel);
             verifyIntegrity(backup.get(),cancel,"storage: backup integrity check failed");
         }
+        if(progress)progress(IndexStoragePhase::BackupVerified);
         result.backup_bytes=readableFileBytes(backup_path);
+        writeBackupProvenance(path,backup_path,source_identity);
         if(progress)progress(IndexStoragePhase::Migrate);cancelled(cancel);
         migrateDirectorySchema(connection.get());
         verifyIntegrity(connection.get(),cancel,"storage: migrated database integrity check failed");
@@ -482,6 +547,229 @@ IndexOptimization migrateIndexStorageToDirectory(const std::string& value,const 
         connection.reset();
         if(!path.empty())try{optimizationReport(result,path,backup_path);}catch(const std::exception&){}
     }
+    return result;
+}
+namespace {
+bool independentRegular(const fs::path& path) {
+    std::error_code ec;const auto status=fs::symlink_status(path,ec);
+    if(ec || !fs::is_regular_file(status))return false;
+    const auto links=fs::hard_link_count(path,ec);
+    return !ec && links==1;
+}
+struct BackupIdentity {
+    fs::path path;
+    std::uint64_t bytes=0;
+    fs::file_time_type modified;
+#ifndef _WIN32
+    dev_t device{};ino_t inode{};
+#endif
+};
+BackupIdentity backupIdentity(const fs::path& path) {
+    if(!independentRegular(path))fail("storage: backup must be an independent regular file");
+    BackupIdentity identity;identity.path=path;identity.bytes=fileBytes(path);
+    std::error_code ec;identity.modified=fs::last_write_time(path,ec);
+    if(ec)fail("storage: cannot inspect backup identity");
+#ifndef _WIN32
+    struct stat info{};
+    if(::lstat(path.c_str(),&info)!=0 || !S_ISREG(info.st_mode) || info.st_nlink!=1)
+        fail("storage: cannot inspect backup identity");
+    identity.device=info.st_dev;identity.inode=info.st_ino;
+#endif
+    return identity;
+}
+void unchangedBackup(const BackupIdentity& expected) {
+    const auto actual=backupIdentity(expected.path);
+    if(actual.bytes!=expected.bytes || actual.modified!=expected.modified
+#ifndef _WIN32
+       || actual.device!=expected.device || actual.inode!=expected.inode
+#endif
+    )fail("storage: backup changed; cleanup stopped");
+}
+#ifndef _WIN32
+std::string provenanceContent(const fs::path& source,const fs::path& backup,const SourceIdentity* expected=nullptr) {
+    const auto canonical_source=canonicalFileLocation(source),canonical_backup=canonicalFileLocation(backup);
+    const auto current_source=sourceIdentity(source);
+    if(expected)unchangedSource(*expected,source);
+    const auto& source_info=expected?expected->info:current_source.info;
+    const auto identity=backupIdentity(canonical_backup);
+    struct stat backup_info{};
+    if(::lstat(canonical_backup.c_str(),&backup_info)!=0 || !S_ISREG(backup_info.st_mode))
+        fail("storage: cannot inspect backup provenance identity");
+    const auto hex=[](const std::string& text){static constexpr char digits[]="0123456789abcdef";std::string out;for(const unsigned char c:text){out+=digits[c>>4];out+=digits[c&15];}return out;};
+    std::ostringstream out;
+    out<<"EverythingLite backup provenance 1\n"<<hex(canonical_source.u8string())<<'\n'
+       <<static_cast<std::uintmax_t>(source_info.st_dev)<<' '<<static_cast<std::uintmax_t>(source_info.st_ino);
+#if defined(__APPLE__)
+    out<<' '<<source_info.st_birthtimespec.tv_sec<<' '<<source_info.st_birthtimespec.tv_nsec;
+#endif
+    out<<'\n'<<hex(canonical_backup.u8string())<<'\n'<<static_cast<std::uintmax_t>(backup_info.st_dev)<<' '
+       <<static_cast<std::uintmax_t>(backup_info.st_ino)<<' '<<identity.bytes<<' ';
+#if defined(__APPLE__)
+    out<<backup_info.st_mtimespec.tv_sec<<' '<<backup_info.st_mtimespec.tv_nsec;
+#else
+    out<<backup_info.st_mtim.tv_sec<<' '<<backup_info.st_mtim.tv_nsec;
+#endif
+    out<<'\n';return out.str();
+}
+#endif
+void writeBackupProvenance(const fs::path& source,const fs::path& backup,const SourceIdentity& expected) {
+#ifdef _WIN32
+    // No POSIX file identity exists here. Backups remain usable manually, but
+    // cleanup below refuses to trust them without a reliable file-id binding.
+    (void)source;(void)backup;(void)expected;
+#else
+    const auto content=provenanceContent(source,backup,&expected),receipt=provenancePath(backup).u8string();
+    const int fd=::open(receipt.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+    if(fd<0)fail("storage: cannot create exclusive backup provenance receipt");
+    int directory=-1;
+    try {
+        std::size_t offset=0;
+        while(offset<content.size()) {
+            const auto written=::write(fd,content.data()+offset,content.size()-offset);
+            if(written<0 && errno==EINTR)continue;
+            if(written<=0)fail("storage: cannot write backup provenance receipt");
+            offset+=static_cast<std::size_t>(written);
+        }
+        if(::fsync(fd)!=0)fail("storage: cannot persist backup provenance receipt");
+        directory=::open(canonicalFileLocation(backup).parent_path().c_str(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
+        if(directory<0 || ::fsync(directory)!=0)fail("storage: cannot persist backup provenance directory");
+        ::close(directory);directory=-1;::close(fd);
+    }catch(...) {
+        // An incomplete or non-durable receipt must never authorize cleanup.
+        ::ftruncate(fd,0);::fsync(fd);::close(fd);if(directory>=0)::close(directory);
+        ::unlink(receipt.c_str());throw;
+    }
+#endif
+}
+bool backupProvenanceMatches(const fs::path& source,const fs::path& backup) {
+#ifdef _WIN32
+    (void)source;(void)backup;return false;
+#else
+    try {
+        const auto receipt=provenancePath(backup);const auto identity=backupIdentity(receipt);
+        const auto expected=provenanceContent(source,backup);
+        if(identity.bytes!=expected.size())return false;
+        struct stat info{};if(::lstat(receipt.c_str(),&info)!=0 || (info.st_mode&0777)!=0600)return false;
+        const int fd=::open(receipt.c_str(),O_RDONLY|O_NOFOLLOW);if(fd<0)return false;
+        std::string actual(expected.size(),'\0');std::size_t offset=0;
+        while(offset<actual.size()) {
+            const auto count=::read(fd,actual.data()+offset,actual.size()-offset);
+            if(count<0 && errno==EINTR)continue;
+            if(count<=0){::close(fd);return false;}offset+=static_cast<std::size_t>(count);
+        }
+        char extra=0;const auto trailing=::read(fd,&extra,1);::close(fd);
+        unchangedBackup(identity);return trailing==0 && actual==expected;
+    }catch(const std::exception&) {return false;}
+#endif
+}
+void standaloneSidecars(const fs::path& path) {
+    for(const auto* suffix:{"-wal","-journal"})
+        if(fileBytes(path.u8string()+suffix,true)!=0)
+            fail("storage: recovery backup requires a standalone database without pending WAL or journal");
+    // SHM is disposable coordination data; require a regular file if present.
+    fileBytes(path.u8string()+"-shm",true);
+}
+Connection openStandaloneBackup(const fs::path& path) {
+    // immutable is safe only after rejecting sidecars, and only for retained
+    // backup files. Live database validation must continue to read its WAL.
+    static constexpr char hex[]="0123456789ABCDEF";
+    std::string uri="file:";
+    for(const unsigned char c:path.generic_u8string()) {
+        if((c>='a'&&c<='z') || (c>='A'&&c<='Z') || (c>='0'&&c<='9') || c=='/' || c==':' || c=='-' || c=='_' || c=='.')uri+=static_cast<char>(c);
+        else {uri+='%';uri+=hex[c>>4];uri+=hex[c&15];}
+    }
+    uri+="?mode=ro&immutable=1";
+    sqlite3* raw=nullptr;int flags=SQLITE_OPEN_READONLY|SQLITE_OPEN_URI;
+#ifdef SQLITE_OPEN_NOFOLLOW
+    flags|=SQLITE_OPEN_NOFOLLOW;
+#endif
+    const int rc=sqlite3_open_v2(uri.c_str(),&raw,flags,nullptr);
+    Connection connection(raw,sqlite3_close);check(rc);return connection;
+}
+void verifyApplicationRecovery(sqlite3* db,std::atomic_bool* cancel) {
+    if(hasDirectoryStorage(db)) {
+        if(!directoryStorageReady(db))fail("storage: recovery database has unsupported or incomplete application schema");
+    }else if(!sourceCatalogSchemaReady(db)) {
+        fail("storage: recovery database has unsupported or incomplete application schema");
+    }
+    verifyIntegrity(db,cancel,"storage: recovery database integrity check failed");
+    auto foreign=statement(db,"PRAGMA foreign_key_check",cancel);
+    const auto rc=sqlite3_step(foreign.get());check(rc,cancel);
+    if(rc!=SQLITE_DONE)fail("storage: recovery database has invalid references");
+    auto source=statement(db,"SELECT 1 FROM files f LEFT JOIN sources s ON s.id=f.source_id WHERE s.id IS NULL LIMIT 1",cancel);
+    const auto source_rc=sqlite3_step(source.get());check(source_rc,cancel);
+    if(source_rc!=SQLITE_DONE)fail("storage: recovery database has missing sources");
+}
+}
+std::vector<IndexStorageBackup> listIndexStorageBackups(const std::string& value) {
+    const auto input=absolutePath(value);regular(input);const auto path=canonicalFileLocation(input);
+    std::vector<IndexStorageBackup> result;std::error_code ec;
+    fs::directory_iterator it(path.parent_path(),ec),end;
+    if(ec)fail("storage: cannot inspect backup directory");
+    while(it!=end) {
+        if(ownedBackup(path,it->path()) && independentRegular(it->path()))result.push_back({it->path().u8string(),fileBytes(it->path())});
+        it.increment(ec);if(ec)fail("storage: cannot inspect backup directory");
+    }
+    std::sort(result.begin(),result.end(),[](const auto& a,const auto& b){return a.path<b.path;});
+    return result;
+}
+IndexBackupCleanup removeIndexStorageBackups(const std::string& value,const std::vector<std::string>& selected,std::atomic_bool* cancel,const std::function<void(std::size_t)>& removed_progress) {
+    IndexBackupCleanup result;
+    try {
+        cancelled(cancel);
+#ifdef _WIN32
+        fail("storage: backup cleanup requires reliable file identity on this platform");
+#endif
+        const auto input=absolutePath(value);regular(input);const auto path=canonicalFileLocation(input);
+        IndexMaintenanceLock maintenance(path.u8string());
+        if(selected.empty())fail("storage: select exact backup files before cleanup");
+        std::set<std::string> selected_names;std::vector<BackupIdentity> remove;
+        for(const auto& name:selected) {
+            const auto candidate=absolutePath(name).lexically_normal();
+            if(candidate!=canonicalFileLocation(candidate) || candidate.parent_path()!=path.parent_path() || !ownedBackup(path,candidate))
+                fail("storage: cleanup accepts only exact owned backup files in the database directory");
+            rejectReservedBackup(path,candidate);
+            if(selected_names.insert(candidate.u8string()).second) {
+                const auto identity=backupIdentity(candidate);standaloneSidecars(identity.path);remove.push_back(identity);
+            }
+        }
+        // Initialize nothing: validate the current application and committed WAL.
+        readIndexStorage(path.u8string());Work work{cancel};auto current=openDatabase(path,true);work.attach(current.get());
+        verifyApplicationRecovery(current.get(),cancel);
+        std::unique_ptr<BackupIdentity> retained;
+        for(const auto& candidate:listIndexStorageBackups(path.u8string())) {
+            cancelled(cancel);if(selected_names.count(candidate.path))continue;
+            try {
+                const auto identity=backupIdentity(fs::path(candidate.path));standaloneSidecars(identity.path);
+                auto recovery=openStandaloneBackup(identity.path);work.attach(recovery.get());
+                verifyApplicationRecovery(recovery.get(),cancel);unchangedBackup(identity);
+                if(!backupProvenanceMatches(path,identity.path))continue;
+                retained=std::make_unique<BackupIdentity>(identity);break;
+            }catch(const std::exception&) {cancelled(cancel);}
+        }
+        if(!retained)fail("storage: keep at least one verified standalone application recovery backup");
+        for(const auto& identity:remove) {
+            cancelled(cancel);unchangedBackup(*retained);standaloneSidecars(retained->path);unchangedBackup(identity);
+            if(!backupProvenanceMatches(path,retained->path))fail("storage: retained backup provenance changed; cleanup stopped");
+            const auto receipt=provenancePath(identity.path);std::unique_ptr<BackupIdentity> receipt_identity;
+            std::error_code ec;const auto receipt_status=fs::symlink_status(receipt,ec);
+            if(receipt_status.type()!=fs::file_type::not_found)receipt_identity=std::make_unique<BackupIdentity>(backupIdentity(receipt));
+            else if(ec && ec!=std::errc::no_such_file_or_directory)fail("storage: cannot inspect selected backup receipt");
+            if(!fs::remove(identity.path,ec) || ec)fail("storage: could not remove a selected backup; earlier deletions remain completed");
+            result.removed_paths.push_back(identity.path.u8string());result.removed_bytes=add(result.removed_bytes,identity.bytes);
+            if(receipt_identity) {
+                try {
+                    unchangedBackup(*receipt_identity);ec.clear();
+                    if(!fs::remove(receipt,ec) || ec)fail("storage: provenance receipt removal failed");
+                    result.removed_bytes=add(result.removed_bytes,receipt_identity->bytes);
+                }catch(const std::exception&) {
+                    result.orphan_receipts.push_back(receipt.u8string());
+                    fail("storage: backup was removed but its orphan provenance receipt remains; earlier deletions remain completed");
+                }
+            }
+            if(removed_progress)removed_progress(result.removed_paths.size());
+        }
+    }catch(const std::exception& error) {result.error=error.what();result.cancelled=cancel && cancel->load();}
     return result;
 }
 } // namespace everything_lite

@@ -15,6 +15,10 @@ struct sqlite3;
 
 namespace everything_lite {
 
+// Read-only source-catalog readiness used by normal initialization and recovery
+// validation. Does not initialize, repair, or scan application records.
+bool sourceCatalogSchemaReady(sqlite3* db);
+
 struct SourceOwnershipSnapshot {
     ExclusionPolicy policy;
     std::vector<SourceRecord> descendants;

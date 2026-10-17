@@ -4,6 +4,7 @@
 #include "platform/file_watcher.h"
 
 #include <QMainWindow>
+#include <QPointer>
 #include <QSet>
 #include <QHash>
 #include <QDeadlineTimer>
@@ -38,6 +39,7 @@ namespace everything_lite {
 class DesktopActions;
 class SearchResultModel;
 class SearchWorker;
+class IndexStorageDialog;
 
 
 struct SearchBookmark {
@@ -100,6 +102,14 @@ private:
     QTimer* retry_timer_ = nullptr;
     QTimer* filesystem_refresh_timer_ = nullptr;
     QThread* worker_thread_ = nullptr;
+    QPointer<IndexStorageDialog> storage_dialog_;
+    bool storage_maintenance_=false;
+    bool storage_optimize_=false;
+    std::vector<std::string> storage_cleanup_selection_;
+    std::shared_ptr<std::atomic_bool> storage_cancellation_;
+    void showIndexStorage();
+    void requestStorageMaintenance(bool optimize,const std::vector<std::string>& cleanup_selection={});
+    void tryStartStorageMaintenance();
 
     QMenu* bookmarks_menu_ = nullptr;
     QAction* match_path_action_ = nullptr;

@@ -793,6 +793,10 @@ std::vector<SearchResult> runSearch(sqlite3* db,
 
 } // namespace
 
+bool sourceCatalogSchemaReady(sqlite3* db) {
+    try {return schemaReady(db);}catch(const std::exception&) {return false;}
+}
+
 Database::Database(std::string db_path) : db_path_(std::move(db_path)) {}
 
 void Database::initialize() const {

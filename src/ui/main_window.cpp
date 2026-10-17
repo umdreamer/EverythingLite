@@ -1,4 +1,7 @@
 #include "ui/main_window.h"
+#include "ui/index_storage_dialog.h"
+#include "core/index_storage.h"
+#include <QDateTime>
 
 #include "core/app_paths.h"
 #include "core/database.h"
@@ -333,6 +336,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
 MainWindow::~MainWindow() {
     closing_ = true;
+    if (storage_cancellation_) storage_cancellation_->store(true);
     cancelActiveSearch();
     if (watcher_) watcher_->stop();
     if (search_thread_) {
@@ -351,6 +355,7 @@ MainWindow::~MainWindow() {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     closing_ = true;
+    if (storage_cancellation_) storage_cancellation_->store(true);
     cancelActiveSearch();
     search_timer_->stop();
     filesystem_refresh_timer_->stop();
@@ -603,6 +608,9 @@ void MainWindow::buildMenus() {
     auto* roots_action = tools_menu->addAction(QStringLiteral("索引目录…"));
     connect(roots_action, &QAction::triggered, this, &MainWindow::editRoots);
 
+    auto* storage_action = tools_menu->addAction(QStringLiteral("索引存储…"));
+    connect(storage_action, &QAction::triggered, this, &MainWindow::showIndexStorage);
+
     auto* status_action = tools_menu->addAction(QStringLiteral("索引状态…"));
     connect(status_action, &QAction::triggered, this, &MainWindow::showIndexStatus);
 
@@ -781,6 +789,7 @@ QString MainWindow::currentSearchSignature() const {
 }
 
 void MainWindow::runSearch() {
+    if(storage_maintenance_) {search_pending_=true;pending_search_query_=normalizeGuiQuery(search_edit_->text());return;}
     if (closing_ || search_ime_composing_ || (indexing_.load() && indexed_count_ == 0)) return;
     search_timer_->stop();
     cancelActiveSearch();
@@ -798,7 +807,7 @@ void MainWindow::resetPaging() {
 }
 
 void MainWindow::loadMoreResults() {
-    if (closing_ || !results_have_more_ || search_in_flight_ || search_pending_
+    if (closing_ || storage_maintenance_ || !results_have_more_ || search_in_flight_ || search_pending_
         || search_ime_composing_ || search_timer_->isActive()) return;
     if (pagination_signature_ != currentSearchSignature() || !search_revision_) {
         resetPaging();
@@ -888,6 +897,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             self->search_in_flight_ = false;
             self->active_search_cancellation_.reset();
             if (self->closing_) return;
+            if (self->storage_maintenance_) {self->tryStartStorageMaintenance();return;}
 
             // textEdited/scope changes invalidate request_id immediately. Old
             // queries may finish, but are never allowed to flash stale results.
@@ -976,7 +986,7 @@ void MainWindow::cancelActiveSearch() {
 }
 
 void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish) {
-    if (worker_thread_ || closing_) return;
+    if (worker_thread_ || storage_maintenance_ || closing_) return;
     setBusy(true, start_message);
     struct Stats {
         std::uint64_t count = 0;
@@ -1021,6 +1031,7 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
             sync_error_label_->setText(QStringLiteral("同步失败（保留缓存）：%1").arg(stats->error));
             sync_error_label_->show();
         }
+        if(storage_maintenance_) {tryStartStorageMaintenance();return;}
         updateCachedStatus();
         Q_UNUSED(refresh_search_on_finish)
         // Manual rebuilds and event batches share the same user-query protection.
@@ -1034,6 +1045,93 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
     worker_thread_->start();
 }
 
+void MainWindow::showIndexStorage() {
+    if(storage_dialog_) {storage_dialog_->show();storage_dialog_->raise();return;}
+    auto* dialog=new IndexStorageDialog(db_path_,this);storage_dialog_=dialog;
+    dialog->maintenanceRequested=[this](bool optimize){requestStorageMaintenance(optimize);};
+    dialog->cleanupRequested=[this](const std::vector<std::string>& selected){requestStorageMaintenance(false,selected);};
+    dialog->cancellationRequested=[this]{if(storage_cancellation_)storage_cancellation_->store(true);};
+    dialog->show();
+}
+
+void MainWindow::requestStorageMaintenance(bool optimize,const std::vector<std::string>& cleanup_selection) {
+    if(closing_ || storage_maintenance_)return;
+    storage_maintenance_=true;storage_optimize_=optimize;storage_cleanup_selection_=cleanup_selection;
+    storage_cancellation_=std::make_shared<std::atomic_bool>(false);
+    cancelActiveSearch();++search_request_id_;resetPaging();
+    search_timer_->stop();filesystem_refresh_timer_->stop();
+    search_pending_=true;pending_search_query_=normalizeGuiQuery(search_edit_->text());
+    if(storage_dialog_)storage_dialog_->beginOperation();
+    tryStartStorageMaintenance();
+}
+
+void MainWindow::tryStartStorageMaintenance() {
+    if(closing_ || !storage_maintenance_ || worker_thread_ || search_in_flight_)return;
+    struct Outcome {IndexStorage before,after;QString message;bool sizes=false,backup_verified=false,vacuum_completed=false;};
+    auto result=std::make_shared<Outcome>();
+    const auto path=toUtf8(db_path_);
+    const auto backup=path+".pre-storage-"+std::to_string(QDateTime::currentMSecsSinceEpoch())+".backup.sqlite";
+    const auto cancellation=storage_cancellation_;const bool optimize=storage_optimize_;const auto cleanup_selection=storage_cleanup_selection_;
+    QPointer<MainWindow> window(this);
+    worker_thread_=QThread::create([window,result,path,backup,cancellation,optimize,cleanup_selection]{
+        const bool compact_operation=!optimize && cleanup_selection.empty();
+        auto phase=[window,result,compact_operation](IndexStoragePhase phase){
+            // These facts are captured synchronously on the maintenance worker.
+            // Queued labels are presentation only and cannot determine results.
+            if(compact_operation && phase==IndexStoragePhase::BackupVerified)result->backup_verified=true;
+            if(compact_operation && phase==IndexStoragePhase::Verify)result->vacuum_completed=true;
+            if(window)QMetaObject::invokeMethod(window.data(),[window,phase]{if(window && window->storage_dialog_)window->storage_dialog_->setPhase(phase);},Qt::QueuedConnection);
+        };
+        try {
+            if(cancellation->load())throw std::runtime_error("storage: cancelled before maintenance");
+            result->before=readIndexStorage(path);
+            if(!cleanup_selection.empty()) {
+                phase(IndexStoragePhase::Verify);
+                const auto report=removeIndexStorageBackups(path,cleanup_selection,cancellation.get(),[window](std::size_t count){
+                    if(window)QMetaObject::invokeMethod(window.data(),[window,count]{if(window && window->storage_dialog_)window->storage_dialog_->setWindowTitle(QStringLiteral("索引存储 — 已删除 %1 份备份").arg(count));},Qt::QueuedConnection);
+                });
+                result->message=QStringLiteral("已删除 %1 份备份，释放 %2 字节。").arg(report.removed_paths.size()).arg(report.removed_bytes);
+                for(const auto& removed:report.removed_paths)result->message+=QLatin1Char('\n')+QFileInfo(fromUtf8(removed)).fileName();
+                for(const auto& orphan:report.orphan_receipts)result->message+=QStringLiteral("\n遗留来源凭证：%1").arg(QFileInfo(fromUtf8(orphan)).fileName());
+                if(!report.error.empty())result->message+=QStringLiteral("\n%1：%2；此前完成的删除已保留。").arg(report.cancelled?QStringLiteral("清理已取消"):QStringLiteral("清理未完成"),fromUtf8(report.error));
+                else result->message+=QStringLiteral("\n清理完成，至少一份已验证恢复备份已保留。");
+                result->after=readIndexStorage(path);result->sizes=true;
+            }else if(optimize){
+                const auto report=migrateIndexStorageToDirectory(path,backup,true,cancellation.get(),phase);
+                result->before=report.before;result->after=report.after;result->sizes=report.before.page_size>0 && report.after.page_size>0;
+                if(!report.error.empty())result->message=report.migration_committed
+                    ?QStringLiteral("格式已迁移；空间整理或后续验证未完成：%1。保留恢复备份。").arg(fromUtf8(report.error))
+                    :QStringLiteral("格式优化失败：%1。保留已有备份。").arg(fromUtf8(report.error));
+                else if(report.already_compact)result->message=QStringLiteral("已经使用紧凑格式；本次未迁移、未新增备份。可用“仅整理空间”回收空闲页。");
+                else result->message=QStringLiteral("格式迁移与空间整理完成。恢复备份已保留；总空间包含备份。");
+                result->message+=QStringLiteral("\n迁移已提交：%1；VACUUM 已完成：%2。").arg(report.migration_committed?QStringLiteral("是"):QStringLiteral("否"),report.vacuum_completed?QStringLiteral("是"):QStringLiteral("否"));
+            }else{
+                phase(IndexStoragePhase::Backup);
+                const auto report=compactIndexStorage(path,backup,cancellation.get(),phase);
+                result->before=report.before;result->after=report.after;result->sizes=true;
+                result->message=QStringLiteral("空间整理完成。恢复备份已保留；总空间包含备份。");
+            }
+        }catch(const std::exception& e){
+            result->message+=QStringLiteral("\n索引维护未完成：%1。保留已有备份。").arg(QString::fromUtf8(e.what()));
+            try{result->after=readIndexStorage(path);result->sizes=result->before.page_size>0 && result->after.page_size>0;}catch(const std::exception&){}
+        }
+        if(compact_operation) {
+            result->message+=QStringLiteral("\n恢复备份已验证：%1；VACUUM 已完成：%2。").arg(result->backup_verified?QStringLiteral("是"):QStringLiteral("否"),result->vacuum_completed?QStringLiteral("是"):QStringLiteral("否"));
+            if(QFileInfo::exists(fromUtf8(backup)))result->message+=QStringLiteral("\n本次备份文件：%1").arg(QFileInfo(fromUtf8(backup)).fileName());
+        }
+    });
+    connect(worker_thread_,&QThread::finished,this,[this,result]{
+        worker_thread_->deleteLater();worker_thread_=nullptr;
+        storage_maintenance_=false;storage_cancellation_.reset();storage_cleanup_selection_.clear();
+        if(closing_)return;
+        if(storage_dialog_)storage_dialog_->finishOperation(result->message,result->sizes?&result->before:nullptr,result->sizes?&result->after:nullptr);
+        // Keep the latest controls and watcher/retry queues; never replay an old query.
+        search_pending_=false;resetPaging();
+        if(!search_ime_composing_)search_timer_->start(kSearchIdleDelayMs);
+        if(normal_events_due_ || !ready_sync_retries_.isEmpty())QTimer::singleShot(0,this,&MainWindow::dispatchSyncJobs);
+    });worker_thread_->start();
+}
+
 void MainWindow::scheduleFilesystemResultRefresh() {
     if (!filesystem_refresh_timer_ || closing_) return;
     filesystem_results_dirty_ = true;
@@ -1041,7 +1139,7 @@ void MainWindow::scheduleFilesystemResultRefresh() {
 }
 
 void MainWindow::rebuildIndex() {
-    if (worker_thread_ || closing_) return;
+    if (worker_thread_ || storage_maintenance_ || closing_) return;
     if (roots_.isEmpty()) {
         editRoots();
         if (roots_.isEmpty()) return;
@@ -1061,10 +1159,18 @@ void MainWindow::rebuildIndex() {
     const auto roots = roots_;
     const auto db_path = db_path_;
     startWorker([this, roots, db_path] {
-        for (const auto& root : roots) {
+        QStringList configured;
+        for(const auto& root:roots) {
+            const auto normalized=fromUtf8(normalizePath(toUtf8(root)));
+            if(!configured.contains(normalized))configured.push_back(normalized);
+        }
+        IndexManager manager(toUtf8(db_path));
+        // Any registration error aborts before traversing a partial topology.
+        for(const auto& root:configured)manager.database().ensureSourceForRoot(toUtf8(root));
+        std::stable_sort(configured.begin(),configured.end(),[](const QString& a,const QString& b){return a.toUtf8().size()>b.toUtf8().size();});
+        for (const auto& root : configured) {
             QString error;
             try {
-                IndexManager manager(toUtf8(db_path));
                 const auto stats = manager.rebuildRoot(toUtf8(root), [this](const std::string& root, std::uint64_t count) {
                     QMetaObject::invokeMethod(this, [this, root, count] {
                         if (!closing_ && !userSearchOwnsStatus()) status_label_->setText(QStringLiteral("正在索引：%1    %2 项").arg(fromUtf8(root)).arg(count));
@@ -1081,6 +1187,7 @@ void MainWindow::rebuildIndex() {
 }
 
 void MainWindow::editRoots() {
+    if(storage_maintenance_){status_label_->setText(QStringLiteral("索引维护进行中；完成后可修改索引目录。"));return;}
     RootSettingsDialog dialog(roots_, this);
     if (dialog.exec() != QDialog::Accepted) return;
     roots_ = dialog.roots();
@@ -1091,6 +1198,7 @@ void MainWindow::editRoots() {
 }
 
 void MainWindow::showIndexStatus() {
+    if(storage_maintenance_){status_label_->setText(QStringLiteral("索引维护进行中；完成后可读取索引状态。"));return;}
     refreshStats();
     try {
         Database db(toUtf8(db_path_));

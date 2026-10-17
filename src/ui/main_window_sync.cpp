@@ -135,7 +135,7 @@ void MainWindow::processDueRetries() {
 }
 
 void MainWindow::dispatchSyncJobs() {
-    if (closing_ || worker_thread_) return;
+    if (closing_ || worker_thread_ || storage_maintenance_) return;
     QSet<QString> paths, rescans;
     if (normal_events_due_) {
         paths = pending_paths_;

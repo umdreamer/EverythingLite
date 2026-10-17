@@ -80,6 +80,8 @@ if(BUILD_GUI)
             src/ui/directory_sync_permissions.cpp
             src/ui/main_window.cpp
             src/ui/main_window_sync.cpp
+            src/ui/index_storage_dialog.cpp
+            src/ui/index_storage_dialog.h
             src/ui/result_presentation.h
             src/ui/main_window.h
             src/ui/desktop_actions.cpp

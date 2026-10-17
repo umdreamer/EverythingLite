@@ -1,4 +1,5 @@
 #include "core/index_storage.h"
+#include "core/database.h"
 #include <sqlite3.h>
 #include <cassert>
 #include <chrono>
@@ -21,6 +22,7 @@ static std::string scalar(sqlite3* db,const char* text) {
 }
 static bool rejected(const std::function<void()>& fn) { try {fn();} catch(const std::exception& e) {assert(std::string(e.what()).find("/private/")==std::string::npos); return true;} return false; }
 static std::string bytes(const fs::path& p) {std::ifstream f(p,std::ios::binary);return {std::istreambuf_iterator<char>(f),{}};}
+static std::uintmax_t receiptBytes(const fs::path& backup) {const fs::path receipt(backup.string()+".provenance");return fs::exists(receipt)?fs::file_size(receipt):0;}
 int main() {
     const auto base=fs::path("/private/tmp")/("everything-storage-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(base);
@@ -80,7 +82,7 @@ int main() {
     const auto result=compactIndexStorage(path.string(),backup.string());
     assert(result.after.main_bytes<result.before.main_bytes && result.after.freelist_bytes==0);
     assert(result.backup_bytes==fs::file_size(backup));
-    assert(result.after.backup_count==3 && result.after.backup_bytes==10+result.backup_bytes);
+    assert(result.after.backup_count==3 && result.after.backup_bytes==10+result.backup_bytes+receiptBytes(backup));
     assert(result.after.total_bytes==result.after.main_bytes+result.after.wal_bytes+result.after.shm_bytes+result.after.backup_bytes);
 #ifndef _WIN32
     struct stat info{}; assert(::stat(backup.c_str(),&info)==0 && (info.st_mode&0777)==0600);
@@ -136,7 +138,7 @@ int main() {
     sqlite3_close(db);
     const auto external=base/"explicit.backup";
     const auto explicit_result=compactIndexStorage(path.string(),external.string());
-    assert(explicit_result.after.backup_bytes==readIndexStorage(path.string()).backup_bytes+fs::file_size(external));
+    assert(explicit_result.after.backup_bytes==readIndexStorage(path.string()).backup_bytes+fs::file_size(external)+receiptBytes(external));
     const auto corrupt=base/"corrupt.sqlite";
     std::ofstream(corrupt)<<"not a database";
     const auto corrupt_before=bytes(corrupt);
@@ -169,6 +171,188 @@ int main() {
     sqlite3_close(db);
     assert(rejected([&]{compactIndexStorage(path.string(),(base/"absent-dir"/"backup").string());}));
     assert(!fs::exists(base/"absent-dir"));
+
+#ifndef _WIN32
+    // Cleanup is explicit, exact, schema-aware, and retains a standalone recovery copy.
+    const auto cleanup_dir=base/"cleanup";fs::create_directory(cleanup_dir);
+    const auto app=cleanup_dir/"app.sqlite";
+    Database(app.string()).initialize();
+    const auto kept=cleanup_dir/"app.sqlite.pre-storage-1.backup.sqlite";
+    const auto deleted=cleanup_dir/"app.sqlite.pre-storage-2.backup.sqlite";
+    compactIndexStorage(app.string(),kept.string());compactIndexStorage(app.string(),deleted.string());
+    const auto deleted_bytes=fs::file_size(deleted)+receiptBytes(deleted);
+    const auto cleanup=removeIndexStorageBackups(app.string(),{deleted.string()});
+    if(!cleanup.error.empty())std::cerr<<cleanup.error<<"\n";
+    assert(cleanup.error.empty() && cleanup.removed_paths==std::vector<std::string>{deleted.string()});
+    assert(cleanup.removed_bytes==deleted_bytes && !fs::exists(deleted) && fs::exists(kept));
+    const auto last=removeIndexStorageBackups(app.string(),{kept.string()});
+    assert(!last.error.empty() && last.removed_paths.empty() && fs::exists(kept));
+    // A valid, unrelated index renamed to the exact backup convention has no
+    // creation receipt tying it to this source and must not authorize cleanup.
+    const auto provenance_dir=base/"provenance";fs::create_directory(provenance_dir);
+    const auto provenance_app=provenance_dir/"index.sqlite";
+    Database(provenance_app.string()).initialize();
+    const auto trusted=provenance_dir/"index.sqlite.pre-storage-1.backup.sqlite";
+    compactIndexStorage(provenance_app.string(),trusted.string());
+    const auto other=provenance_dir/"unrelated.sqlite";Database(other.string()).initialize();
+    const auto renamed=provenance_dir/"index.sqlite.pre-storage-2.backup.sqlite";
+    fs::copy_file(other,renamed);
+    const auto unrelated_guard=removeIndexStorageBackups(provenance_app.string(),{trusted.string()});
+    assert(!unrelated_guard.error.empty() && unrelated_guard.removed_paths.empty() && fs::exists(trusted) && "a same-name unrelated valid index is not this source's recovery copy");
+    const auto receipt=fs::path(trusted.string()+".provenance"),saved_receipt=fs::path(receipt.string()+".saved");
+    const auto valid_receipt=bytes(receipt);
+#ifndef _WIN32
+    struct stat receipt_mode{};assert(::stat(receipt.c_str(),&receipt_mode)==0 && (receipt_mode.st_mode&0777)==0600);
+#endif
+    const auto provenance_refuses=[&]{const auto refusal=removeIndexStorageBackups(provenance_app.string(),{renamed.string()});assert(!refusal.error.empty() && refusal.removed_paths.empty() && fs::exists(renamed));};
+    std::ofstream(receipt,std::ios::trunc)<<"damaged receipt";provenance_refuses();
+    std::ofstream(receipt,std::ios::trunc)<<valid_receipt;
+    fs::rename(receipt,saved_receipt);fs::create_symlink(saved_receipt,receipt);provenance_refuses();fs::remove(receipt);fs::rename(saved_receipt,receipt);
+    fs::rename(receipt,saved_receipt);fs::create_hard_link(saved_receipt,receipt);provenance_refuses();fs::remove(receipt);fs::rename(saved_receipt,receipt);
+    fs::rename(receipt,saved_receipt);provenance_refuses();fs::rename(saved_receipt,receipt);
+    // Reusing a real receipt for a different source or backup identity fails.
+    std::ofstream(receipt,std::ios::trunc)<<bytes(kept.string()+".provenance");provenance_refuses();
+    std::ofstream(receipt,std::ios::trunc)<<valid_receipt;
+    const auto saved_backup=fs::path(trusted.string()+".saved");fs::rename(trusted,saved_backup);fs::copy_file(other,trusted);provenance_refuses();fs::remove(trusted);fs::rename(saved_backup,trusted);
+    const auto saved_main=fs::path(provenance_app.string()+".saved");fs::rename(provenance_app,saved_main);fs::copy_file(trusted,provenance_app);provenance_refuses();fs::remove(provenance_app);fs::rename(saved_main,provenance_app);
+    // Receipt creation must stop before VACUUM or migration can commit.
+    const auto blocked=provenance_dir/"index.sqlite.pre-storage-9.backup.sqlite";
+    std::ofstream(blocked.string()+".provenance")<<"existing unrelated file";
+    const auto before_blocked=bytes(provenance_app);
+    std::vector<IndexStoragePhase> receipt_failure_phases;
+    assert(rejected([&]{compactIndexStorage(provenance_app.string(),blocked.string(),nullptr,[&](IndexStoragePhase phase){receipt_failure_phases.push_back(phase);});}));
+    assert((receipt_failure_phases==std::vector<IndexStoragePhase>{IndexStoragePhase::Backup,IndexStoragePhase::BackupVerified}) && "verified backup completion must be observable before provenance creation can fail");
+    assert(bytes(provenance_app)==before_blocked && fs::exists(blocked));
+    assert(bytes(blocked.string()+".provenance")=="existing unrelated file");
+    const auto blocked_migration=provenance_dir/"index.sqlite.pre-storage-10.backup.sqlite";
+    fs::create_symlink(receipt,blocked_migration.string()+".provenance");
+    const auto stopped_migration=migrateIndexStorageToDirectory(provenance_app.string(),blocked_migration.string());
+    assert(!stopped_migration.error.empty() && !stopped_migration.migration_committed && fs::exists(blocked_migration));
+    db=open(provenance_app);assert(scalar(db,"PRAGMA user_version")=="413");sqlite3_close(db);
+    // Newline paths round-trip as safe hex fields, without receipt parsing ambiguity.
+    const auto newline_app=base/"newline-source\n.sqlite";Database(newline_app.string()).initialize();
+    const auto newline_backup=fs::path(newline_app.string()+".pre-storage-1.backup.sqlite");
+    compactIndexStorage(newline_app.string(),newline_backup.string());
+    const auto newline_extra=fs::path(newline_app.string()+".pre-storage-2.backup.sqlite");
+    compactIndexStorage(newline_app.string(),newline_extra.string());
+    const auto newline_cleanup=removeIndexStorageBackups(newline_app.string(),{newline_extra.string()});
+    assert(newline_cleanup.error.empty() && !fs::exists(newline_extra) && !fs::exists(newline_extra.string()+".provenance"));
+    // Orphan receipts are excluded from normal stats once their paired DB is absent.
+    const auto receipt_stats=readIndexStorage(provenance_app.string());
+    std::ofstream(provenance_dir/"index.sqlite.pre-storage-999.backup.sqlite.provenance")<<"orphan";
+    assert(readIndexStorage(provenance_app.string()).backup_bytes==receipt_stats.backup_bytes);
+    // Replacing the source pathname after the old SQLite connection opens
+    // cannot bind that old snapshot to the replacement database's identity.
+    for(const bool migrate:{false,true}) {
+        const auto race_dir=base/(migrate?"migration-source-race":"compact-source-race");fs::create_directory(race_dir);
+        const auto live=race_dir/"index.sqlite",old_live=race_dir/"old-index.sqlite",fresh=race_dir/"replacement.sqlite";
+        Database(live.string()).initialize();Database(fresh.string()).initialize();
+        db=open(fresh);sql(db,"INSERT INTO app_metadata VALUES('synthetic_marker','replacement')");sqlite3_close(db);
+        const auto replacement_bytes=bytes(fresh);const auto race_backup=race_dir/"index.sqlite.pre-storage-1.backup.sqlite";
+        bool replaced=false;
+        const auto replace_source=[&](IndexStoragePhase phase){if(phase==IndexStoragePhase::Backup){fs::rename(live,old_live);fs::copy_file(fresh,live);replaced=true;}};
+        if(migrate){const auto failure=migrateIndexStorageToDirectory(live.string(),race_backup.string(),true,nullptr,replace_source);assert(!failure.error.empty() && !failure.migration_committed);}
+        else assert(rejected([&]{compactIndexStorage(live.string(),race_backup.string(),nullptr,replace_source);}));
+        assert(replaced && fs::exists(race_backup) && !fs::exists(race_backup.string()+".provenance") && "a changed source identity must never receive a trusted receipt");
+        assert(bytes(live)==replacement_bytes && "maintenance must preserve the replacement database");
+    }
+    // Generic SQLite integrity is insufficient: an empty or unrelated database
+    // cannot replace the last verified application recovery backup.
+    const auto empty=cleanup_dir/"app.sqlite.pre-storage-3.backup.sqlite";
+    db=open(empty);sql(db,"CREATE TABLE unrelated(value TEXT)");sqlite3_close(db);
+    const auto no_recovery=removeIndexStorageBackups(app.string(),{kept.string()});
+    assert(!no_recovery.error.empty() && no_recovery.removed_paths.empty() && fs::exists(kept));
+    const auto same_prefix=cleanup_dir/"app.sqlite.pre-storage-9.backup.sqlite.extra";
+    std::ofstream(same_prefix)<<"unrelated";
+    assert(!removeIndexStorageBackups(app.string(),{same_prefix.string()}).error.empty());
+    assert(fs::exists(same_prefix));
+    const auto cleanup_link=cleanup_dir/"app.sqlite.pre-storage-4.backup.sqlite";
+    fs::create_symlink(kept,cleanup_link);
+    assert(!removeIndexStorageBackups(app.string(),{cleanup_link.string()}).error.empty());
+    fs::remove(cleanup_link);fs::create_hard_link(kept,cleanup_link);
+    assert(!removeIndexStorageBackups(app.string(),{cleanup_link.string()}).error.empty());
+    fs::remove(cleanup_link);
+    const auto list=listIndexStorageBackups(app.string());
+    assert(list.size()==2 && "listing excludes arbitrary same-prefix files and aliases");
+    fs::create_directory_symlink(cleanup_dir,base/"cleanup-alias");
+    assert(!removeIndexStorageBackups(app.string(),{(base/"cleanup-alias"/kept.filename()).string()}).error.empty());
+    assert(!removeIndexStorageBackups(app.string(),{app.string()}).error.empty());
+    assert(!removeIndexStorageBackups(app.string(),{(app.string()+"-wal")}).error.empty());
+    std::atomic_bool cleanup_cancel{true};
+    const auto cancelled_cleanup=removeIndexStorageBackups(app.string(),{empty.string()},&cleanup_cancel);
+    assert(cancelled_cleanup.cancelled && cancelled_cleanup.removed_paths.empty() && fs::exists(empty));
+    {
+        IndexMaintenanceLock locked(app.string());
+        const auto busy_cleanup=removeIndexStorageBackups(app.string(),{empty.string()});
+        assert(!busy_cleanup.error.empty() && busy_cleanup.removed_paths.empty() && fs::exists(empty));
+    }
+    // Integrity can remain ok while initialize would still repair required
+    // indexes or FTS readiness. Such a copy cannot be the sole recovery guard.
+    const std::vector<std::string> recovery_damage={
+        "DROP INDEX idx_files_search_name",
+        "UPDATE app_metadata SET value='0' WHERE key='schema_413_fts_available'",
+        "UPDATE app_metadata SET value='1' WHERE key='name_fts_ready'; DROP TRIGGER IF EXISTS files_name_fts_ai"
+    };
+    for(std::size_t i=0;i<recovery_damage.size();++i) {
+        const auto check_dir=cleanup_dir/("readiness-"+std::to_string(i));fs::create_directory(check_dir);
+        const auto check_app=check_dir/"index.sqlite";
+        const auto healthy=check_dir/"index.sqlite.pre-storage-1.backup.sqlite";
+        const auto damaged=check_dir/"index.sqlite.pre-storage-2.backup.sqlite";
+        for(const auto& target:{check_app,healthy,damaged})fs::copy_file(kept,target);
+        db=open(damaged);sql(db,recovery_damage[i].c_str());
+        assert(scalar(db,"PRAGMA integrity_check")=="ok");sqlite3_close(db);
+        const auto healthy_content=bytes(healthy),damaged_content=bytes(damaged);
+        const auto refused=removeIndexStorageBackups(check_app.string(),{healthy.string()});
+        assert(!refused.error.empty() && refused.removed_paths.empty() && fs::exists(healthy) && "an incomplete retained application backup must not authorize deleting the last ready copy");
+        assert(bytes(healthy)==healthy_content && bytes(damaged)==damaged_content && "recovery verification must not initialize or repair backups");
+    }
+    // A damaged current application database also refuses every deletion.
+    db=open(app);sql(db,"DROP TABLE exclusion_policy");sqlite3_close(db);
+    const auto bad_current=removeIndexStorageBackups(app.string(),{empty.string()});
+    assert(!bad_current.error.empty() && bad_current.removed_paths.empty() && fs::exists(empty));
+    fs::copy_file(kept,app,fs::copy_options::overwrite_existing);
+    // Cancellation after one real removal returns that removal, never a fake rollback.
+    const auto extra=cleanup_dir/"app.sqlite.pre-storage-5.backup.sqlite";
+    compactIndexStorage(app.string(),extra.string());cleanup_cancel=false;
+    const auto partial=removeIndexStorageBackups(app.string(),{empty.string(),extra.string()},&cleanup_cancel,
+        [&](std::size_t removed){assert(removed==1);cleanup_cancel=true;});
+    assert(partial.cancelled && partial.removed_paths==std::vector<std::string>{empty.string()});
+    assert(partial.removed_bytes>0 && !fs::exists(empty) && fs::exists(extra) && fs::exists(kept));
+    // The same cleanup guard accepts the new format and preserves its legacy recovery copy.
+    const auto optimized=migrateIndexStorageToDirectory(app.string(),(cleanup_dir/"app.sqlite.pre-storage-6.backup.sqlite").string());
+    assert(optimized.error.empty() && optimized.migration_committed);
+    const auto compact_cleanup=removeIndexStorageBackups(app.string(),{extra.string()});
+    assert(compact_cleanup.error.empty() && compact_cleanup.removed_paths.size()==1 && fs::exists(kept));
+    std::vector<IndexStoragePhase> compact_phases;
+    compactIndexStorage(app.string(),(cleanup_dir/"app.sqlite.pre-storage-7.backup.sqlite").string(),nullptr,
+        [&](IndexStoragePhase phase){compact_phases.push_back(phase);});
+    assert((compact_phases==std::vector<IndexStoragePhase>{IndexStoragePhase::Backup,IndexStoragePhase::BackupVerified,IndexStoragePhase::Vacuum,IndexStoragePhase::Verify}));
+    // The compact-format guard is the same predicate used by initialize.
+    for(const std::string damage:{"DROP INDEX idx_entries_search_name","DROP TRIGGER directory_guard_file_entries_update","DROP TRIGGER files_name_fts_ai"}) {
+        const auto check_dir=cleanup_dir/("directory-readiness-"+std::to_string(std::hash<std::string>{}(damage)));fs::create_directory(check_dir);
+        const auto check_app=check_dir/"index.sqlite",healthy=check_dir/"index.sqlite.pre-storage-1.backup.sqlite",damaged=check_dir/"index.sqlite.pre-storage-2.backup.sqlite";
+        for(const auto& target:{check_app,healthy,damaged})fs::copy_file(cleanup_dir/"app.sqlite.pre-storage-7.backup.sqlite",target);
+        db=open(damaged);sql(db,damage.c_str());assert(scalar(db,"PRAGMA integrity_check")=="ok");sqlite3_close(db);
+        const auto damaged_content=bytes(damaged);
+        const auto refused=removeIndexStorageBackups(check_app.string(),{healthy.string()});
+        assert(!refused.error.empty() && refused.removed_paths.empty() && fs::exists(healthy));
+        assert(bytes(damaged)==damaged_content);
+    }
+    // The successful-VACUUM phase is observable even when cancellation lands
+    // exactly before final verification. No rollback is claimed for this case.
+    std::atomic_bool cancel_verification{false};bool reached_vacuum=false,reached_verify=false;
+    const auto partial_backup=cleanup_dir/"app.sqlite.pre-storage-8.backup.sqlite";
+    assert(rejected([&]{compactIndexStorage(app.string(),partial_backup.string(),&cancel_verification,[&](IndexStoragePhase phase){
+        if(phase==IndexStoragePhase::Vacuum)reached_vacuum=true;
+        if(phase==IndexStoragePhase::Verify){reached_verify=true;cancel_verification=true;}
+    });}));
+    assert(reached_vacuum && reached_verify && fs::exists(partial_backup) && fs::exists(partial_backup.string()+".provenance"));
+    assert(readIndexStorage(app.string()).freelist_bytes==0);
+
+#else
+    const auto unsupported_cleanup=removeIndexStorageBackups(path.string(),{backup.string()});
+    assert(!unsupported_cleanup.error.empty() && unsupported_cleanup.removed_paths.empty());
+#endif
     fs::remove_all(base);
     std::cout<<"index storage tests passed\n";
 }

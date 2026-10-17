@@ -1,6 +1,7 @@
 #include "ui/main_window.h"
 #include "ui/search_result_model.h"
 #include "ui/search_worker.h"
+#include "ui/index_storage_dialog.h"
 #include "core/index_manager.h"
 #include <QAction>
 #include <QApplication>
@@ -21,6 +22,10 @@
 #include <sqlite3.h>
 #include <QFile>
 #include <QFileDialog>
+#include <QDialog>
+#include <QListWidget>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QInputMethodEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -82,6 +87,147 @@ class UiTest : public QObject {
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
+    }
+    void storageMenuOpensAsyncReport() {
+        MainWindow window; window.watcher_->stop();
+        QAction* action=nullptr;
+        for (auto* candidate:window.findChildren<QAction*>())
+            if(candidate->text()==QStringLiteral("索引存储…")) action=candidate;
+        QVERIFY2(action,"Tools must expose explicit index storage maintenance");
+        action->trigger();
+        auto* dialog=window.findChild<QDialog*>(QStringLiteral("indexStorageDialog"));
+        QVERIFY(dialog);
+        auto* report=dialog->findChild<QLabel*>(QStringLiteral("storageReport"));
+        QVERIFY(report);
+        QTRY_VERIFY_WITH_TIMEOUT(report->text().contains(QStringLiteral("主库")),3000);
+        QVERIFY(report->text().contains(QStringLiteral("备份")));
+        QVERIFY(report->text().contains(QStringLiteral("总空间")));
+        dialog->close();
+    }
+    void storageWaitsForSearchPreservesEventsAndLatestQuery() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto saved=qgetenv("EVERYTHING_LITE_DB");
+        qputenv("EVERYTHING_LITE_DB",(dir.path()+"/index.db").toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",saved);
+        window.watcher_->stop(); window.roots_={fixture_root};
+        window.rebuildIndex();QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        WorkerGate gate;QVERIFY(gate.block(window.search_worker_));
+        window.search_edit_->setText("alpha");window.runSearch();
+        QVERIFY(window.search_in_flight_);
+        window.showIndexStorage();window.requestStorageMaintenance(false);
+        QVERIFY(window.storage_maintenance_);QVERIFY(!window.worker_thread_);
+        window.scheduleFileEvent(FileEvent{fixture_root.toStdString(),true,{}});
+        window.processPendingEvents();
+        QVERIFY(window.pending_rescan_roots_.contains(fixture_root));
+        QVERIFY(window.normal_events_due_);
+        window.search_edit_->setText("beta");window.runSearch();
+        QVERIFY(window.search_pending_);QVERIFY(!window.worker_thread_);
+        gate.release->release();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1,10000);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("beta.txt"));
+        QVERIFY(window.pending_rescan_roots_.isEmpty());
+        QVERIFY(window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text().contains(QStringLiteral("整理完成")));
+    }
+    void storageWaitsForScanAndCloseCancelsPendingMaintenance() {
+        MainWindow window;window.watcher_->stop();
+        auto release=std::make_shared<QSemaphore>();auto started=std::make_shared<QSemaphore>();
+        window.startWorker([started,release]{started->release();release->acquire();},QStringLiteral("synthetic job"));
+        QVERIFY(started->tryAcquire(1,3000));
+        window.showIndexStorage();window.requestStorageMaintenance(true);
+        QVERIFY(window.storage_maintenance_);QVERIFY(window.worker_thread_);
+        auto token=window.storage_cancellation_;
+        window.close();QVERIFY(token->load());release->release();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,5000);
+    }
+    void storageReadOnlyReportDoesNotCreateMissingDatabase() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=dir.path()+"/absent.db";
+        auto* dialog=new IndexStorageDialog(path);dialog->show();
+        auto* report=dialog->findChild<QLabel*>(QStringLiteral("storageReport"));
+        QTRY_VERIFY_WITH_TIMEOUT(report->text().contains(QStringLiteral("失败")),3000);
+        QVERIFY(!QFile::exists(path));dialog->close();
+    }
+    void storageOptimizeReportsRepeatWithoutNewBackup() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
+        qputenv("EVERYTHING_LITE_DB",(dir.path()+"/index.db").toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
+        window.showIndexStorage();window.requestStorageMaintenance(true);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
+        const auto first=readIndexStorage(window.db_path_.toStdString());QCOMPARE(first.backup_count,std::uint64_t(1));
+        window.requestStorageMaintenance(true);QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
+        QCOMPARE(readIndexStorage(window.db_path_.toStdString()).backup_count,first.backup_count);
+        QVERIFY(window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text().contains(QStringLiteral("未新增备份")));
+        auto* outcome=window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"));
+        const auto finished=outcome->text();window.storage_dialog_->setPhase(IndexStoragePhase::Backup);
+        QCOMPARE(outcome->text(),finished);
+    }
+    void manualRebuildRegistersNestedRootsBeforeScanning() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto root=dir.path()+"/parent", child=root+"/child";
+        QVERIFY(QDir().mkpath(child));QFile file(child+"/nested.txt");QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");file.close();
+        const auto saved=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",(dir.path()+"/index.db").toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();window.roots_={root,child,child+"/"};
+        window.rebuildIndex();QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        Database db(window.db_path_.toStdString());const auto rows=db.search("nested.txt");
+        QCOMPARE(rows.size(),std::size_t(1));QCOMPARE(QString::fromStdString(rows[0].file.root),child);
+    }
+    void storageCleanupRequiresExactSelectionAndKeepsRecovery() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
+        const auto path=dir.path()+"/index.db";qputenv("EVERYTHING_LITE_DB",path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
+        const auto first=path+".pre-storage-1.backup.sqlite",second=path+".pre-storage-2.backup.sqlite";
+        compactIndexStorage(path.toStdString(),first.toStdString());compactIndexStorage(path.toStdString(),second.toStdString());
+        window.showIndexStorage();auto* dialog=window.storage_dialog_.data();
+        auto* list=dialog->findChild<QListWidget*>(QStringLiteral("storageBackups"));
+        auto* cleanup=dialog->findChild<QPushButton*>(QStringLiteral("storageCleanup"));
+        QVERIFY(list && cleanup);QVERIFY(!cleanup->isEnabled());
+        QVERIFY(!dialog->findChild<QPushButton*>(QStringLiteral("storageOptimize"))->isEnabled());
+        QTRY_COMPARE_WITH_TIMEOUT(list->count(),2,3000);QVERIFY(cleanup->isEnabled());
+        cleanup->click();QVERIFY(!window.storage_maintenance_);QVERIFY(QFile::exists(first) && QFile::exists(second));
+        for(int row=0;row<list->count();++row)if(list->item(row)->data(Qt::UserRole).toString()==QFileInfo(second).canonicalFilePath())list->item(row)->setSelected(true);
+        QCOMPARE(list->selectedItems().size(),1);
+        QTimer::singleShot(0,[]{if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))box->button(QMessageBox::Yes)->click();});
+        cleanup->click();QVERIFY(window.storage_maintenance_);QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
+        QVERIFY(QFile::exists(first));QVERIFY(!QFile::exists(second));
+        QVERIFY(dialog->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text().contains(QStringLiteral("已删除 1 份备份")));
+        QTRY_COMPARE_WITH_TIMEOUT(list->count(),1,3000);
+    }
+    void storageDialogCloseCancelsAndDefersDestruction() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
+        qputenv("EVERYTHING_LITE_DB",(dir.path()+"/index.db").toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
+        window.showIndexStorage();window.requestStorageMaintenance(false);
+        QVERIFY(window.worker_thread_);auto cancellation=window.storage_cancellation_;
+        window.storage_dialog_->close();QVERIFY(cancellation->load());
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_ && !window.storage_dialog_,10000);
+    }
+    void storageCompactionReportsVerifiedBackupWhenVacuumIsBusy() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
+        const auto path=dir.path()+"/index.db";qputenv("EVERYTHING_LITE_DB",path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
+        sqlite3* writer=nullptr;QCOMPARE(sqlite3_open(path.toUtf8().constData(),&writer),SQLITE_OK);
+        QCOMPARE(sqlite3_exec(writer,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr),SQLITE_OK);
+        window.showIndexStorage();window.requestStorageMaintenance(false);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
+        sqlite3_exec(writer,"ROLLBACK",nullptr,nullptr,nullptr);sqlite3_close(writer);
+        const auto outcome=window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text();
+        QVERIFY(outcome.contains(QStringLiteral("未完成")));
+        QVERIFY2(outcome.contains(QStringLiteral("恢复备份已验证：是；VACUUM 已完成：否")),qPrintable(outcome));
+        QVERIFY(outcome.contains(QStringLiteral(".backup.sqlite")));
+    }
+    void storageMaintenanceBlocksDatabaseMenus_data() {
+        QTest::addColumn<bool>("edit_roots");
+        QTest::newRow("status")<<false;QTest::newRow("roots")<<true;
+    }
+    void storageMaintenanceBlocksDatabaseMenus() {
+        QFETCH(bool,edit_roots);
+        MainWindow window;window.watcher_->stop();window.storage_maintenance_=true;
+        bool opened=false;QTimer closer;closer.setSingleShot(true);
+        connect(&closer,&QTimer::timeout,&window,[&]{if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())){opened=true;dialog->reject();}});
+        closer.start(0);if(edit_roots)window.editRoots();else window.showIndexStatus();closer.stop();
+        window.storage_maintenance_=false;
+        QVERIFY2(!opened,"Database menus must not open synchronous dialogs during maintenance");
+        QVERIFY(window.status_label_->text().contains(QStringLiteral("维护")));
     }
     void paginationDeduplicatesStructuredIdentity() {
         SearchResultModel model;

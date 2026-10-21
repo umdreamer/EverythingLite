@@ -1,5 +1,6 @@
 #include "ui/main_window.h"
 #include "ui/index_storage_dialog.h"
+#include "ui/exclusion_settings_dialog.h"
 #include "core/index_storage.h"
 #include <QDateTime>
 
@@ -608,6 +609,9 @@ void MainWindow::buildMenus() {
     auto* roots_action = tools_menu->addAction(QStringLiteral("索引目录…"));
     connect(roots_action, &QAction::triggered, this, &MainWindow::editRoots);
 
+    auto* excludes_action = tools_menu->addAction(QStringLiteral("排除规则…"));
+    connect(excludes_action, &QAction::triggered, this, &MainWindow::showExclusionSettings);
+
     auto* storage_action = tools_menu->addAction(QStringLiteral("索引存储…"));
     connect(storage_action, &QAction::triggered, this, &MainWindow::showIndexStorage);
 
@@ -985,7 +989,8 @@ void MainWindow::cancelActiveSearch() {
     if (active_search_cancellation_) active_search_cancellation_->store(true, std::memory_order_relaxed);
 }
 
-void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish) {
+void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish,
+                             std::function<void(const QString&)> on_finished) {
     if (worker_thread_ || storage_maintenance_ || closing_) return;
     setBusy(true, start_message);
     struct Stats {
@@ -1017,7 +1022,7 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
             if (stats->error.isEmpty()) stats->error = QString::fromUtf8(e.what());
         }
     });
-    connect(worker_thread_, &QThread::finished, this, [this, refresh_search_on_finish, stats] {
+    connect(worker_thread_, &QThread::finished, this, [this, refresh_search_on_finish, stats, on_finished=std::move(on_finished)] {
         worker_thread_->deleteLater();
         worker_thread_ = nullptr;
         setBusy(false);
@@ -1031,6 +1036,7 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
             sync_error_label_->setText(QStringLiteral("同步失败（保留缓存）：%1").arg(stats->error));
             sync_error_label_->show();
         }
+        if(on_finished) on_finished(stats->error);
         if(storage_maintenance_) {tryStartStorageMaintenance();return;}
         updateCachedStatus();
         Q_UNUSED(refresh_search_on_finish)
@@ -1043,6 +1049,44 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
         }
     });
     worker_thread_->start();
+}
+
+void MainWindow::showExclusionSettings() {
+    if(worker_thread_ || storage_maintenance_) {
+        statusBar()->showMessage(QStringLiteral("索引任务正在运行，请稍后再修改排除规则。"),8000);
+        return;
+    }
+    try {
+        Database db(toUtf8(db_path_));db.initialize();
+        auto* dialog=new ExclusionSettingsDialog(db.exclusionPolicy().rules(),this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        QPointer<ExclusionSettingsDialog> safe(dialog);
+        dialog->saveRequested=[this,safe](ExclusionRules rules){
+            if(worker_thread_ || storage_maintenance_) {
+                if(safe) safe->showError(QStringLiteral("索引任务正在运行，规则未保存。请稍后重试。"));
+                return;
+            }
+            if(safe) safe->setSaving(true);
+            auto removed=std::make_shared<std::uint64_t>(0);
+            const auto path=toUtf8(db_path_);
+            cancelActiveSearch();++search_request_id_;resetPaging();search_timer_->stop();
+            startWorker([path,rules,removed]{
+                Database db(path);db.initialize();*removed=db.saveExclusionPolicy(rules);
+            },QStringLiteral("正在保存排除规则…"),true,[this,removed,safe](const QString& error){
+                if(!error.isEmpty()) {
+                    if(safe) {safe->setSaving(false);safe->showError(QStringLiteral("保存失败：%1").arg(error));}
+                    statusBar()->showMessage(QStringLiteral("排除规则保存失败：%1").arg(error),15000);
+                    return;
+                }
+                if(safe) safe->finishSaved();
+                statusBar()->showMessage(QStringLiteral("排除规则已保存，清理 %1 项。放宽规则后请重建索引。").arg(*removed),15000);
+                if(model_->rowCount() || !search_edit_->text().isEmpty()) runSearch();
+            });
+        };
+        dialog->show();
+    } catch(const std::exception& error) {
+        statusBar()->showMessage(QStringLiteral("读取排除规则失败：%1").arg(QString::fromUtf8(error.what())),15000);
+    }
 }
 
 void MainWindow::showIndexStorage() {

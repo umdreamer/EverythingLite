@@ -26,6 +26,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPlainTextEdit>
 #include <QInputMethodEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -1331,6 +1332,66 @@ class UiTest : public QObject {
         window.rebuildIndex(); QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
         window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
+    }
+    void exclusionSettingsValidatesAndSavesRegex() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.path()+"/root"; QVERIFY(QDir().mkpath(root));
+        for(const auto& name:{QStringLiteral("alpha.txt"),QStringLiteral("beta.txt")}) {
+            QFile file(root+"/"+name); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("synthetic");
+        }
+        const auto db_path=dir.path()+"/index.db";
+        IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        QAction* action=nullptr;
+        for(auto* candidate:window.findChildren<QAction*>())
+            if(candidate->text()==QStringLiteral("排除规则…")) action=candidate;
+        QVERIFY(action); action->trigger();
+        auto* dialog=window.findChild<QDialog*>(QStringLiteral("exclusionSettingsDialog"));
+        QVERIFY(dialog); QVERIFY(dialog->isVisible());
+        auto* filter=dialog->findChild<QPlainTextEdit*>(QStringLiteral("fileFilterEdit"));
+        QVERIFY(filter); filter->setPlainText(QStringLiteral("regex:^alpha\\.txt$"));
+        QPointer<QDialog> saved(dialog);
+        dialog->accept();
+        QTRY_VERIFY_WITH_TIMEOUT(manager.database().exclusionPolicy().revision>0,10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QTRY_VERIFY(!saved || !saved->isVisible());
+        QCOMPARE(manager.database().search("alpha").size(),std::size_t(0));
+        QCOMPARE(manager.database().search("beta").size(),std::size_t(1));
+        action->trigger();
+        auto* invalid=window.findChild<QDialog*>(QStringLiteral("exclusionSettingsDialog"));
+        QVERIFY(invalid); auto* invalid_filter=invalid->findChild<QPlainTextEdit*>(QStringLiteral("fileFilterEdit"));
+        QVERIFY(invalid_filter); invalid_filter->setPlainText(QStringLiteral("regex:("));
+        const auto revision=manager.database().exclusionPolicy().revision;
+        invalid->accept();
+        QVERIFY(invalid->isVisible());
+        QVERIFY(!invalid->findChild<QLabel*>(QStringLiteral("exclusionError"))->text().isEmpty());
+        QCOMPARE(manager.database().exclusionPolicy().revision,revision);
+        invalid->reject();
+    }
+    void exclusionSettingsKeepsEditsWhenIndexing() {
+        MainWindow window; window.watcher_->stop();
+        QAction* action=nullptr;
+        for(auto* candidate:window.findChildren<QAction*>())
+            if(candidate->text()==QStringLiteral("排除规则…")) action=candidate;
+        QVERIFY(action); action->trigger();
+        auto* dialog=window.findChild<QDialog*>(QStringLiteral("exclusionSettingsDialog"));
+        QVERIFY(dialog);
+        auto* filter=dialog->findChild<QPlainTextEdit*>(QStringLiteral("fileFilterEdit"));
+        QVERIFY(filter);filter->setPlainText(QStringLiteral("*.scratch"));
+        WorkerGate gate;
+        window.startWorker([started=gate.started,release=gate.release]{
+            started->release();release->acquire();
+        },QStringLiteral("synthetic indexing"));
+        QVERIFY(gate.started->tryAcquire(1,3000));
+        dialog->accept();
+        QVERIFY(dialog->isVisible());
+        QCOMPARE(filter->toPlainText(),QStringLiteral("*.scratch"));
+        QVERIFY(!dialog->findChild<QLabel*>(QStringLiteral("exclusionError"))->text().isEmpty());
+        gate.release->release();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,3000);
+        dialog->reject();
     }
 };
 } // namespace everything_lite

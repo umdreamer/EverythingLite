@@ -108,6 +108,7 @@ private:
     std::vector<std::string> storage_cleanup_selection_;
     std::shared_ptr<std::atomic_bool> storage_cancellation_;
     void showIndexStorage();
+    void showExclusionSettings();
     void requestStorageMaintenance(bool optimize,const std::vector<std::string>& cleanup_selection={});
     void tryStartStorageMaintenance();
 
@@ -192,7 +193,8 @@ private:
     void reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error);
     QString rootForPath(const QString& path) const;
     void setBusy(bool busy, const QString& message = {});
-    void startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish = true);
+    void startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish = true,
+                     std::function<void(const QString&)> on_finished = {});
     void scheduleFilesystemResultRefresh();
     void newWindow();
     void resetColumns();

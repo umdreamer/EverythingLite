@@ -84,6 +84,8 @@ if(BUILD_GUI)
             src/ui/main_window_sync.cpp
             src/ui/index_storage_dialog.cpp
             src/ui/index_storage_dialog.h
+            src/ui/exclusion_settings_dialog.cpp
+            src/ui/exclusion_settings_dialog.h
             src/ui/result_presentation.h
             src/ui/main_window.h
             src/ui/desktop_actions.cpp

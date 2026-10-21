@@ -1,4 +1,4 @@
-# 测试范围与验证记录（0.4.12）
+# 测试范围与验证记录（截至 0.4.13）
 
 ## 验证范围
 
@@ -11,6 +11,10 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.4.13 发布核验（2026-10-21）
+
+Mac Debug 在更新版本标识和隔离 GUI 测试排序设置后，Core CTest 20/20、GUI CTest 25/25 通过；此前失败的分页快照用例单独重跑通过。Mac Release 构建生成 `EverythingLite.app/Contents/MacOS/EverythingLite` 和 `everything-lite-cli`，应用包版本号为 0.4.13。Release 仅验证编译；未在本轮重新验证 Linux 构建、独立分发包或真实桌面交互。
 
 ## Mac 索引存储开发分支（2026-10-17）
 

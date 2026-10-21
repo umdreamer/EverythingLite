@@ -87,6 +87,7 @@ class UiTest : public QObject {
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
+        settings.setValue("table/sortOrder", static_cast<int>(Qt::AscendingOrder));
     }
     void storageMenuOpensAsyncReport() {
         MainWindow window; window.watcher_->stop();
@@ -700,8 +701,10 @@ class UiTest : public QObject {
     }
     void paginationRefreshesChangedSnapshot() {
         MainWindow window; window.watcher_->stop();
+        QCOMPARE(window.table_->horizontalHeader()->sortIndicatorOrder(),Qt::AscendingOrder);
         window.search_edit_->setText("item"); window.runSearch();
         QTRY_COMPARE(window.model_->rowCount(),1000); QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("item0000.txt"));
         sqlite3* raw=nullptr; QCOMPARE(sqlite3_open(window.db_path_.toStdString().c_str(),&raw),SQLITE_OK);
         const auto changed=sqlite3_exec(raw,"UPDATE files SET size=size+1 WHERE name='item0000.txt'",nullptr,nullptr,nullptr);
         sqlite3_close(raw); QCOMPARE(changed,SQLITE_OK);

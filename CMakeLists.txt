@@ -20,6 +20,8 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PCRE2 REQUIRED IMPORTED_TARGET libpcre2-8)
 
 # CMake 4.x renamed the imported SQLite target to SQLite3::SQLite3.
 # Keep a fallback for older CMake versions so the project remains portable.
@@ -55,7 +57,7 @@ add_library(everything_core
 )
 
 target_include_directories(everything_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(everything_core PUBLIC ${EVERYTHING_LITE_SQLITE_TARGET} Threads::Threads)
+target_link_libraries(everything_core PUBLIC ${EVERYTHING_LITE_SQLITE_TARGET} Threads::Threads PkgConfig::PCRE2)
 target_compile_definitions(everything_core PUBLIC EVERYTHING_LITE_VERSION="${PROJECT_VERSION}")
 
 if(APPLE)

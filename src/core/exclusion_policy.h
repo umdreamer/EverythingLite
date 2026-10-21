@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,7 +13,7 @@ struct ExclusionRules {
 };
 
 // Shared, validated subset: whole-name/path glob (*, **, Unicode ?) and
-// semicolon-separated filters with quoted terms and doubled quote escaping.
+// PCRE2 regex: filters; semicolon-separated with quoted terms and doubled quotes.
 // No filesystem access is needed to apply a policy to cached records.
 class ExclusionPolicy {
 public:
@@ -21,9 +22,11 @@ public:
     const ExclusionRules& rules() const { return rules_; }
     const std::int64_t revision;
 private:
+    struct CompiledRegex;
     struct Pattern {
         std::vector<std::string> units;
         bool full_path = false;
+        std::shared_ptr<const CompiledRegex> regex;
     };
     ExclusionRules rules_;
     std::vector<Pattern> folder_patterns_;

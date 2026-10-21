@@ -1,7 +1,7 @@
 # Isolated Ubuntu compiler/test environment; production data is never mounted.
 FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential cmake libsqlite3-dev ca-certificates \
+    build-essential cmake pkg-config libsqlite3-dev libpcre2-dev ca-certificates \
     qt6-base-dev qt6-base-dev-tools libgl1-mesa-dev \
     dbus xvfb xauth xdg-utils file dpkg-dev \
     && rm -rf /var/lib/apt/lists/*

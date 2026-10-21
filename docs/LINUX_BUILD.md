@@ -8,7 +8,7 @@
 
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential cmake libsqlite3-dev qt6-base-dev qt6-base-dev-tools libgl1-mesa-dev dbus xdg-utils qt6-wayland
+sudo apt-get install build-essential cmake pkg-config libsqlite3-dev libpcre2-dev qt6-base-dev qt6-base-dev-tools libgl1-mesa-dev dbus xdg-utils qt6-wayland
 ./scripts/build-linux.sh
 ./scripts/run-linux.sh
 ```

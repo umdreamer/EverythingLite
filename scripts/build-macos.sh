@@ -23,6 +23,10 @@ if ! brew --prefix qtbase >/dev/null 2>&1; then
   echo "如果已经执行过 brew install qt，qtbase 通常已经作为依赖安装。" >&2
   exit 1
 fi
+if ! brew --prefix pcre2 >/dev/null 2>&1; then
+  echo "PCRE2 未安装。请执行：brew install pcre2" >&2
+  exit 1
+fi
 
 QTBASE_PREFIX="$(brew --prefix qtbase)"
 BUILD_DIR="${BUILD_DIR:-build-macos}"

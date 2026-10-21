@@ -1,10 +1,17 @@
 #include "core/exclusion_policy.h"
 #include "core/path_utils.h"
 #include <algorithm>
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
 #include <stdexcept>
 #include <utility>
 
 namespace everything_lite {
+struct ExclusionPolicy::CompiledRegex {
+    explicit CompiledRegex(pcre2_code* compiled) : code(compiled) {}
+    ~CompiledRegex() { pcre2_code_free(code); }
+    pcre2_code* code;
+};
 namespace {
 bool asciiSpace(char c) { return c==' ' || (c>='\t' && c<='\r'); }
 std::string trim(std::string s) {
@@ -51,7 +58,7 @@ void rejectPrefix(const std::string& term) {
         const auto c=term[i];
         if(!((c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') || c=='_' || c=='-')) return;
     }
-    throw std::invalid_argument("unsupported exclusion prefix: only exact paths and glob filters (*, **, ?) are supported");
+    throw std::invalid_argument("unsupported exclusion prefix: use exact paths, globs (*, **, ?) or regex: filters");
 }
 bool withinFolded(const std::string& path,const std::string& root) {
     return path==root || (root=="/" && !path.empty() && path.front()=='/') ||
@@ -86,6 +93,25 @@ std::vector<ExclusionPolicy::Pattern> ExclusionPolicy::parseFilters(const std::s
         }
         if(i<text.size()) ++i;
         if(term.empty()) continue;
+        if(term.rfind("regex:",0)==0) {
+            const auto expression=term.substr(6);
+            if(expression.empty()) throw std::invalid_argument("empty regex: exclusion filter");
+            units(expression); // Validate UTF-8 before PCRE2 sees the pattern.
+            int error=0; PCRE2_SIZE offset=0;
+            auto* code=pcre2_compile(reinterpret_cast<PCRE2_SPTR>(expression.data()),
+                expression.size(),PCRE2_UTF|PCRE2_UCP|PCRE2_CASELESS,&error,&offset,nullptr);
+            if(!code) {
+                PCRE2_UCHAR buffer[160]{};
+                pcre2_get_error_message(error,buffer,sizeof(buffer));
+                throw std::invalid_argument("invalid regex: exclusion filter at byte "
+                    +std::to_string(offset)+": "+reinterpret_cast<const char*>(buffer));
+            }
+            std::unique_ptr<pcre2_code,decltype(&pcre2_code_free)> owned(code,pcre2_code_free);
+            auto compiled=std::make_shared<CompiledRegex>(owned.get());
+            owned.release();
+            out.push_back({{},expression.find('/')!=std::string::npos,std::move(compiled)});
+            continue;
+        }
         rejectPrefix(term);
         std::replace(term.begin(),term.end(),'\\','/');
         auto parsed=units(term);
@@ -96,7 +122,7 @@ std::vector<ExclusionPolicy::Pattern> ExclusionPolicy::parseFilters(const std::s
                 compiled.push_back("**"); while(j+1<parsed.size() && parsed[j+1]=="*") ++j;
             } else compiled.push_back(parsed[j]);
         }
-        out.push_back({std::move(compiled),term.find('/')!=std::string::npos});
+        out.push_back({std::move(compiled),term.find('/')!=std::string::npos,{}});
     }
     return out;
 }
@@ -113,6 +139,33 @@ ExclusionPolicy::ExclusionPolicy(ExclusionRules rules,std::int64_t captured_revi
 }
 bool ExclusionPolicy::matches(const Pattern& pattern,const std::string& path) {
     const auto candidate=pattern.full_path ? path : path.substr(path.find_last_of('/')+1);
+    if(pattern.regex) {
+        std::vector<unsigned char> validity;
+        units(candidate,true,&validity);
+        if(std::find(validity.begin(),validity.end(),0)!=validity.end()) return false;
+        struct MatchScratch {
+            MatchScratch() : data(pcre2_match_data_create(1,nullptr)), context(pcre2_match_context_create(nullptr)) {
+                if(!data || !context || pcre2_set_match_limit(context,100000)!=0 ||
+                   pcre2_set_depth_limit(context,1000)!=0) {
+                    pcre2_match_data_free(data);
+                    pcre2_match_context_free(context);
+                    throw std::runtime_error("unable to initialize regex: match limits");
+                }
+            }
+            ~MatchScratch() { pcre2_match_data_free(data); pcre2_match_context_free(context); }
+            pcre2_match_data* data;
+            pcre2_match_context* context;
+        };
+        thread_local MatchScratch scratch;
+        const int rc=pcre2_match(pattern.regex->code,
+            reinterpret_cast<PCRE2_SPTR>(candidate.data()),candidate.size(),0,0,
+            scratch.data,scratch.context);
+        if(rc>=0) return true;
+        if(rc==PCRE2_ERROR_NOMATCH) return false;
+        if(rc==PCRE2_ERROR_MATCHLIMIT || rc==PCRE2_ERROR_DEPTHLIMIT)
+            throw std::runtime_error("regex: exclusion match limit exceeded");
+        throw std::runtime_error("regex: exclusion match failed: "+std::to_string(rc));
+    }
     std::vector<unsigned char> valid;
     const auto text=units(candidate,true,&valid);
     std::vector<unsigned char> previous(text.size()+1,0),current(text.size()+1,0); previous[0]=1;

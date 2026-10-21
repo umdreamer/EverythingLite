@@ -67,7 +67,7 @@ static void regressions(const fs::path& base,const ScanTask& task,const std::str
     r.snapshot_path=r.source.root+"/out";invalid(r,task.lock_path);r.snapshot_path=task.scan.snapshot_path;
     invalid(r,(base/"locks"/"wrong.lock").string());invalid(r,r.source.root+"/source-7.scan.lock");
     r.nonce=std::string("a\0b",3);invalid(r,task.lock_path);
-    rejects([]{ExclusionRules bad;bad.file_filter="regex:bad";ExclusionPolicy policy(bad);});
+    rejects([]{ExclusionRules bad;bad.file_filter="regex:(";ExclusionPolicy policy(bad);});
     {SourceScanLock lock(task);rejects([&]{SourceScanLock second(task);});}
     struct stat st{};assert(lstat(task.lock_path.c_str(),&st)==0 && S_ISREG(st.st_mode) && (st.st_mode&0777)==0600 && st.st_size==0);auto inode=st.st_ino;
     {SourceScanLock again(task);}assert(lstat(task.lock_path.c_str(),&st)==0 && st.st_ino==inode);

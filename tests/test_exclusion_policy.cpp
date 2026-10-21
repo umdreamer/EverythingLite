@@ -42,7 +42,24 @@ int main() {
     rules.file_filter="*"; assert(ExclusionPolicy(rules).excludes(opaque,false));
     rules.file_filter="bad-?.tmp"; assert(!ExclusionPolicy(rules).excludes(opaque,false));
     rules.file_filter="Ä.txt"; assert(!ExclusionPolicy(rules).excludes("/synthetic/ä.txt",false));
-    for(const auto& invalid: {"regex:.*", "ext:tmp", "attrib:hidden", "\"open", "bad\"quote", "\"closed\"tail", "\xc0\xaf"}) {
+    rules.file_filter="*.tmp;regex:^draft_[0-9]+\\.txt$";
+    rules.folder_filter="regex:^cache[0-9]+$";
+    ExclusionPolicy regex_policy(rules);
+    assert(regex_policy.excludes("/synthetic/draft_12.txt",false));
+    assert(regex_policy.excludes("/synthetic/anything.tmp",false));
+    assert(!regex_policy.excludes("/synthetic/draft_x.txt",false));
+    assert(regex_policy.excludes("/synthetic/cache2/nested/file.txt",false));
+    assert(!regex_policy.excludes("/synthetic/cachex/nested/file.txt",false));
+    rules.file_filter="regex:^bad-.*\\.tmp$";
+    assert(!ExclusionPolicy(rules).excludes(opaque,false));
+    rules.folder_filter="";
+    rules.file_filter="regex:^/synthetic/one/.+\\.txt$";
+    assert(ExclusionPolicy(rules).excludes("/synthetic/one/a.txt",false));
+    assert(!ExclusionPolicy(rules).excludes("/synthetic/two/a.txt",false));
+    rules.file_filter="regex:^(a+)+$";
+    ExclusionPolicy bounded_regex(rules);
+    assert(rejected([&]{bounded_regex.excludes("/synthetic/"+std::string(64,'a')+"X",false);}));
+    for(const auto& invalid: {"regex:", "regex:(", "ext:tmp", "attrib:hidden", "\"open", "bad\"quote", "\"closed\"tail", "\xc0\xaf"}) {
         rules.file_filter=invalid; assert(rejected([&]{ ExclusionPolicy invalid_policy(rules); }));
     }
     rules.file_filter=""; rules.directories={"relative"}; assert(rejected([&]{ExclusionPolicy invalid_policy(rules);}));

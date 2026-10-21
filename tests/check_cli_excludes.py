@@ -20,6 +20,11 @@ with tempfile.TemporaryDirectory(prefix="everything-lite-excludes-") as temporar
         assert (result.returncode == 0) == success, (args, result.returncode, result.stdout, result.stderr)
         return result
     run("index", str(root))
+    for command in ("search", "search-safe", "search-correct", "probe-search"):
+        scoped = run(command, "txt", "--in-folder", str(root / "sample"), "--limit", "1").stdout
+        assert "hidden.txt" in scoped and "visible.txt" not in scoped, (command, scoped)
+    run("search", "txt", "--in-folder", "relative", success=False)
+    run("search", "txt", "--in-folder", success=False)
     run("excludes", "show")
     with sqlite3.connect(db) as connection:
         before = connection.execute("SELECT count(*) FROM files").fetchone()[0]

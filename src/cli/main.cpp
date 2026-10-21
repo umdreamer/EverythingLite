@@ -2,6 +2,7 @@
 #include "core/database.h"
 #include "core/index_manager.h"
 #include "core/index_storage.h"
+#include "core/path_utils.h"
 #include "core/search_engine.h"
 #include "core/search_service.h"
 #include "core/search_trace.h"
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -61,10 +63,10 @@ Usage:
   everything-lite-cli [--db PATH] index <root> [root...]
   everything-lite-cli [--db PATH] sources list
   everything-lite-cli [--db PATH] sources verify <positive-source-id>
-  everything-lite-cli [--db PATH] search <query> [--limit N] [--offset N]
-  everything-lite-cli [--db PATH] search-safe <query> [--limit N] [--offset N]
-  everything-lite-cli [--db PATH] search-correct <query> [--limit N] [--offset N]
-  everything-lite-cli [--trace-search] [--db PATH] probe-search <query> [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] search <query> [--in-folder PATH] [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] search-safe <query> [--in-folder PATH] [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] search-correct <query> [--in-folder PATH] [--limit N] [--offset N]
+  everything-lite-cli [--trace-search] [--db PATH] probe-search <query> [--in-folder PATH] [--limit N] [--offset N]
   everything-lite-cli [--db PATH] excludes show
   everything-lite-cli [--db PATH] excludes set [--directory PATH] [--file PATH]
                            [--folder-filter FILTERS] [--file-filter FILTERS]
@@ -84,7 +86,7 @@ Exclusion syntax:
   filters: semicolon-separated whole-name globs, or full-path globs containing /
   * does not cross /; ** crosses /; ? matches one Unicode character except /
   quote a filter containing ; and escape a literal quote with doubled quotes
-  unsupported advanced prefixes (regex:, ext:, attributes, etc.) are rejected
+  regex: uses PCRE2; a / matches full paths, otherwise names; ext:/attributes are unsupported
 
 Search syntax:
   ext:pdf              filter by extension
@@ -93,6 +95,7 @@ Search syntax:
   modified:7d          modified within the last 7 days (h/d/w)
   type:file | type:dir files or directories only
   matchpath:            make ordinary terms match the full path
+  --in-folder PATH      search indexed descendants of an absolute folder only
 
 Plain terms match file/folder names only by default.
 
@@ -304,6 +307,7 @@ int main(int argc, char** argv) {
             }
             std::size_t limit = 50;
             std::size_t offset = 0;
+            std::optional<std::string> folder_scope;
             std::ostringstream query_builder;
             for (std::size_t i = 1; i < args.size(); ++i) {
                 const auto& arg = args[i];
@@ -315,6 +319,15 @@ int main(int argc, char** argv) {
                     offset = static_cast<std::size_t>(std::stoul(args[++i]));
                     continue;
                 }
+                if (arg == "--in-folder") {
+                    if (folder_scope || i + 1 >= args.size())
+                        throw std::invalid_argument("--in-folder requires one absolute folder path");
+                    const auto path=args[++i];
+                    if(path.empty() || !utf8ToPath(path).is_absolute())
+                        throw std::invalid_argument("--in-folder requires an absolute folder path");
+                    folder_scope=normalizePath(path);
+                    continue;
+                }
                 if (query_builder.tellp() > 0) query_builder << ' ';
                 query_builder << arg;
             }
@@ -323,13 +336,16 @@ int main(int argc, char** argv) {
             if (command == "search" || command == "probe-search") {
                 // CLI and GUI share this exact application-level SearchService.
                 SearchService service(db_path);
-                results = service.search(query_text, limit, offset);
+                SearchOptions options; options.folder_scope=folder_scope;
+                results = service.search(query_text, limit, offset, options);
             } else {
                 // Keep the older diagnostic paths available for comparison.
                 SearchEngine engine(db_path);
+                auto parsed=parseSearchQuery(query_text);
+                parsed.folder_scope=folder_scope;
                 results = command == "search-safe"
-                    ? engine.searchReliable(query_text, limit, offset)
-                    : engine.searchCorrect(query_text, limit, offset);
+                    ? engine.searchReliable(parsed, limit, offset)
+                    : engine.searchCorrect(parsed, limit, offset);
             }
 
             if (command == "probe-search") {
@@ -339,6 +355,7 @@ int main(int argc, char** argv) {
                 std::cout << "PROBE_QUERY_HEX=" << bytesToHex(query_text) << "\n";
                 std::cout << "PROBE_LIMIT=" << limit << "\n";
                 std::cout << "PROBE_OFFSET=" << offset << "\n";
+                if(folder_scope) std::cout << "PROBE_FOLDER_SCOPE=" << *folder_scope << "\n";
                 std::cout << "PROBE_RESULT_COUNT=" << results.size() << "\n";
                 const std::size_t preview = std::min<std::size_t>(results.size(), 5);
                 for (std::size_t i = 0; i < preview; ++i) {

@@ -708,6 +708,15 @@ std::vector<SearchResult> runSearch(sqlite3* db,
             ? "instr(files.search_path, ?) > 0"
             : "files.search_path LIKE ? ESCAPE '\\'");
     }
+    std::string folder_lower,folder_upper;
+    if(query.folder_scope) {
+        if(query.folder_scope->empty() || !utf8ToPath(*query.folder_scope).is_absolute())
+            throw std::invalid_argument("folder scope must be an absolute directory path");
+        const auto folder=normalizePath(*query.folder_scope);
+        folder_lower=folder=="/" ? "/" : folder+"/";
+        folder_upper=folder=="/" ? "0" : folder+"0";
+        where.emplace_back("files.path >= ? AND files.path < ?");
+    }
     if (query.min_size) where.emplace_back("files.size >= ?");
     if (query.max_size) where.emplace_back("files.size <= ?");
     if (query.modified_after) where.emplace_back("files.modified_time >= ?");
@@ -751,6 +760,10 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     if (query.path_term) {
         if (force_direct || compact) bindText(stmt.get(), bind_index++, *query.path_term);
         else bindText(stmt.get(), bind_index++, "%" + escapeLike(*query.path_term) + "%");
+    }
+    if(query.folder_scope) {
+        bindText(stmt.get(),bind_index++,folder_lower);
+        bindText(stmt.get(),bind_index++,folder_upper);
     }
     if (query.min_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.min_size));
     if (query.max_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.max_size));

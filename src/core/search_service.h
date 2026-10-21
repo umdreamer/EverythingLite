@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,7 @@ enum class SearchItemScope {
 struct SearchOptions {
     SearchItemScope scope = SearchItemScope::All;
     bool match_path = false;
+    std::optional<std::string> folder_scope;
 };
 
 // The single application-level search entry point used by both CLI and GUI.

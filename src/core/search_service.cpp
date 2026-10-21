@@ -1,9 +1,11 @@
 #include "core/search_service.h"
 
 #include "core/search_query.h"
+#include "core/path_utils.h"
 #include "core/search_trace.h"
 
 #include <sstream>
+#include <stdexcept>
 
 namespace everything_lite {
 
@@ -29,13 +31,18 @@ std::vector<SearchResult> SearchService::search(const std::string& query,
     // The common/default case deliberately calls the exact same SearchEngine
     // string overload used by the CLI historically. This is the reference
     // behavior for GUI/CLI consistency.
-    if (options.scope == SearchItemScope::All && !options.match_path) {
+    if (options.scope == SearchItemScope::All && !options.match_path && !options.folder_scope) {
         auto results = engine_.search(query, limit, offset, cancellation);
         searchTrace("SearchService", "default branch result_count=" + std::to_string(results.size()));
         return results;
     }
 
     auto parsed = parseSearchQuery(query);
+    if (options.folder_scope) {
+        if(options.folder_scope->empty() || !utf8ToPath(*options.folder_scope).is_absolute())
+            throw std::invalid_argument("folder scope must be an absolute directory path");
+        parsed.folder_scope=normalizePath(*options.folder_scope);
+    }
 
     // Explicit type:file/type:dir in the query wins over the GUI filter.
     if (!parsed.files_only && !parsed.directories_only) {

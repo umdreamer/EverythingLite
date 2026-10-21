@@ -1,5 +1,6 @@
 #include "core/database.h"
 #include "core/search_revision.h"
+#include "core/search_service.h"
 #include <sqlite3.h>
 #include <cassert>
 #include <chrono>
@@ -60,11 +61,52 @@ static void revisionLifecycle(const fs::path& directory) {
     assert(frames==0 && checkpointed==0 && "revision reads must not retain a read transaction");
     sqlite3_close(raw);
 }
+static void indexedFolderScope(const fs::path& path) {
+    Database db(path.string()); db.initialize();
+    const auto source=db.ensureSourceForRoot("/synthetic");
+    sqlite3* raw=nullptr; assert(sqlite3_open(path.string().c_str(),&raw)==SQLITE_OK);
+    const auto row=[&](int id,const std::string& relative,const std::string& name,bool directory=false) {
+        const std::string full="/synthetic/"+relative;
+        const auto slash=full.find_last_of('/');
+        const std::string parent=full.substr(0,slash);
+        const std::string sql="INSERT INTO files(id,source_id,relative_path,path,parent_path,name,ext,root,size,is_dir,search_name,search_path) VALUES ("
+            +std::to_string(id)+","+std::to_string(source)+",'"+relative+"','"+full+"','"+parent+"','"+name+"','txt','/synthetic',1,"
+            +(directory?"1":"0")+",'"+name+"','"+full+"')";
+        execute(raw,sql.c_str());
+    };
+    row(1,"docs","docs",true);
+    row(2,"docs/item-a.txt","item-a.txt");
+    row(3,"docs/sub/item-b.txt","item-b.txt");
+    row(4,"docs-old/item-c.txt","item-c.txt");
+    row(5,"docs/space %_文/item-d.txt","item-d.txt");
+    execute(raw,"UPDATE sources SET status=1"); // Offline records remain searchable.
+    sqlite3_close(raw);
+    db.rebuildNameSearchIndex();
+    SearchQuery query; query.terms={"item"}; query.folder_scope="/synthetic/docs";
+    for(bool reliable:{false,true}) {
+        const auto first=reliable?db.searchReliable(query,2,0):db.search(query,2,0);
+        const auto second=reliable?db.searchReliable(query,2,2):db.search(query,2,2);
+        assert(first.size()==2 && second.size()==1);
+        assert(first[0].file.path=="/synthetic/docs/item-a.txt");
+        assert(first[1].file.path=="/synthetic/docs/sub/item-b.txt");
+        assert(second[0].file.path=="/synthetic/docs/space %_文/item-d.txt");
+        assert((reliable?db.searchReliable(query,2,3):db.search(query,2,3)).empty());
+    }
+    query.terms.clear();
+    const auto descendants=db.search(query,10);
+    assert(descendants.size()==3); // Folder itself is outside its contents.
+    query.folder_scope="/";
+    assert(db.search(query,10).size()==5);
+    SearchOptions options; options.folder_scope="/synthetic/docs";
+    const auto service=SearchService(path.string()).search("item",10,0,options);
+    assert(service.size()==3 && service[0].source_status==SourceStatus::Offline);
+}
 int main() {
     const auto dir=fs::temp_directory_path()/("el-search-paging-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(dir);
     stableTies(dir/"ties.db");
     revisionLifecycle(dir);
+    indexedFolderScope(dir/"folder-scope.db");
     fs::remove_all(dir);
     std::cout<<"search paging tests passed\n";
 }

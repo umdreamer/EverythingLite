@@ -14,6 +14,9 @@ struct SearchQuery {
     std::vector<std::string> terms;
     std::optional<std::string> extension;
     std::optional<std::string> path_term;
+    // Absolute folder whose indexed descendants are searched. The folder
+    // itself is outside this scope.
+    std::optional<std::string> folder_scope;
     std::optional<std::uint64_t> min_size;
     std::optional<std::uint64_t> max_size;
     std::optional<std::int64_t> modified_after;

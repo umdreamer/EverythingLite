@@ -1,6 +1,7 @@
 #include "core/database.h"
 #include "core/search_revision.h"
 #include "core/search_service.h"
+#include "core/directory_storage.h"
 #include <sqlite3.h>
 #include <cassert>
 #include <chrono>
@@ -61,9 +62,10 @@ static void revisionLifecycle(const fs::path& directory) {
     assert(frames==0 && checkpointed==0 && "revision reads must not retain a read transaction");
     sqlite3_close(raw);
 }
-static void indexedFolderScope(const fs::path& path) {
+static void indexedFolderScope(const fs::path& path,bool compact=false) {
     Database db(path.string()); db.initialize();
     const auto source=db.ensureSourceForRoot("/synthetic");
+    const auto nested_source=db.ensureSourceForRoot("/synthetic/docs/nested");
     sqlite3* raw=nullptr; assert(sqlite3_open(path.string().c_str(),&raw)==SQLITE_OK);
     const auto row=[&](int id,const std::string& relative,const std::string& name,bool directory=false) {
         const std::string full="/synthetic/"+relative;
@@ -79,27 +81,39 @@ static void indexedFolderScope(const fs::path& path) {
     row(3,"docs/sub/item-b.txt","item-b.txt");
     row(4,"docs-old/item-c.txt","item-c.txt");
     row(5,"docs/space %_文/item-d.txt","item-d.txt");
+    const auto nested_row="INSERT INTO files(id,source_id,relative_path,path,parent_path,name,ext,root,size,is_dir,search_name,search_path) VALUES (7,"
+        +std::to_string(nested_source)+",'item-e.txt','/synthetic/docs/nested/item-e.txt','/synthetic/docs/nested','item-e.txt','txt','/synthetic/docs/nested',1,0,'item-e.txt','/synthetic/docs/nested/item-e.txt')";
+    execute(raw,nested_row.c_str());
+    if(!compact) {
+        const auto root_row="INSERT INTO files(id,source_id,relative_path,path,parent_path,name,ext,root,size,is_dir,search_name,search_path) VALUES (6,"
+            +std::to_string(source)+",'.','/','/','','','/synthetic',0,1,'','/')";
+        execute(raw,root_row.c_str());
+    }
     execute(raw,"UPDATE sources SET status=1"); // Offline records remain searchable.
+    if(compact) migrateDirectorySchema(raw);
     sqlite3_close(raw);
     db.rebuildNameSearchIndex();
     SearchQuery query; query.terms={"item"}; query.folder_scope="/synthetic/docs";
     for(bool reliable:{false,true}) {
         const auto first=reliable?db.searchReliable(query,2,0):db.search(query,2,0);
         const auto second=reliable?db.searchReliable(query,2,2):db.search(query,2,2);
-        assert(first.size()==2 && second.size()==1);
+        assert(first.size()==2 && second.size()==2);
         assert(first[0].file.path=="/synthetic/docs/item-a.txt");
         assert(first[1].file.path=="/synthetic/docs/sub/item-b.txt");
         assert(second[0].file.path=="/synthetic/docs/space %_文/item-d.txt");
-        assert((reliable?db.searchReliable(query,2,3):db.search(query,2,3)).empty());
+        assert(second[1].file.path=="/synthetic/docs/nested/item-e.txt");
+        assert((reliable?db.searchReliable(query,2,4):db.search(query,2,4)).empty());
     }
     query.terms.clear();
     const auto descendants=db.search(query,10);
-    assert(descendants.size()==3); // Folder itself is outside its contents.
+    assert(descendants.size()==4); // Folder itself is outside its contents.
     query.folder_scope="/";
-    assert(db.search(query,10).size()==5);
+    assert(db.search(query,10).size()==6);
+    query.folder_scope="/synthetic/docs/nested";
+    assert(db.search(query,10).size()==1);
     SearchOptions options; options.folder_scope="/synthetic/docs";
     const auto service=SearchService(path.string()).search("item",10,0,options);
-    assert(service.size()==3 && service[0].source_status==SourceStatus::Offline);
+    assert(service.size()==4 && service[0].source_status==SourceStatus::Offline);
 }
 int main() {
     const auto dir=fs::temp_directory_path()/("el-search-paging-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -107,6 +121,7 @@ int main() {
     stableTies(dir/"ties.db");
     revisionLifecycle(dir);
     indexedFolderScope(dir/"folder-scope.db");
+    indexedFolderScope(dir/"folder-scope-compact.db",true);
     fs::remove_all(dir);
     std::cout<<"search paging tests passed\n";
 }

@@ -1639,7 +1639,7 @@ void MainWindow::showSearchSyntax() {
     box.setWindowTitle(QStringLiteral("搜索语法"));
     box.setIcon(QMessageBox::Information);
     box.setText(QStringLiteral(
-        "Everything Lite v0.4 搜索语法\n\n"
+        "Everything Lite 搜索语法\n\n"
         "report                 名称包含 report\n"
         "ext:pdf                PDF 文件/文件夹名后缀过滤\n"
         "path:sample            完整路径包含 sample\n"
@@ -1649,7 +1649,8 @@ void MainWindow::showSearchSyntax() {
         "modified:7d            最近 7 天修改\n"
         "\"Example Collection\"   短语\n\n"
         "多个条件可组合。普通关键词默认只匹配名称；“搜索 → 匹配路径”开启后才匹配完整路径。\n"
-        "Match Case / Whole Word / Regex 将在 v0.6 搜索兼容版实现。"));
+        "“指定文件夹…”只搜索该目录下已有索引；排除规则在“工具”菜单设置。\n"
+        "搜索框不支持通用正则；regex: 仅用于排除过滤器。"));
     box.exec();
 }
 
@@ -1657,8 +1658,8 @@ void MainWindow::showAbout() {
     QMessageBox::about(this, QStringLiteral("关于 Everything Lite"),
         QStringLiteral("<b>Everything Lite %1</b><br><br>"
                        "跨平台本地文件名搜索工具。<br>"
-                       "核心：C++17 + SQLite；界面：Qt 6；macOS 实时更新：FSEvents。<br><br>"
-                       "v0.4 的目标是对齐 Everything 的主窗口、菜单和常用操作，同时保留 macOS 的 Finder 与 Quick Look 体验。")
+                       "核心：C++17 + SQLite + PCRE2；界面：Qt 6；macOS 实时更新：FSEvents。<br><br>"
+                       "Vibe Coding 项目；源码采用 MIT License。")
             .arg(QString::fromLatin1(EVERYTHING_LITE_VERSION)));
 }
 

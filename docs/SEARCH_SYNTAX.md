@@ -1,4 +1,4 @@
-# 搜索语法（0.4.13）
+# 搜索语法（0.4.14）
 
 ## 名称与路径
 
@@ -46,17 +46,20 @@ ASCII 大小写折叠保留非 ASCII UTF-8 字节。拆词只识别 ASCII 空白
 ./build/core-debug/everything-lite-cli --db ./sample.db search '砀例甲' --limit 50
 ./build/core-debug/everything-lite-cli --db ./sample.db search-safe '示例工匠' --limit 50
 ./build/core-debug/everything-lite-cli --db ./sample.db search-correct 'sample' --limit 50
+./build/core-debug/everything-lite-cli --db ./sample.db search 'sample' --in-folder /absolute/indexed/folder
 ```
 
 使用前应按 [开发指南](DEVELOPMENT.md) 建立合成数据索引。性能与输出边界见 [性能测量](BENCHMARK.md) 和 [隐私说明](PRIVACY.md)。
 
+`--in-folder PATH` 可用于 `search`、`search-safe`、`search-correct` 和 `probe-search`。`PATH` 必须是绝对路径，只匹配该文件夹的后代，不包括该文件夹自身。范围在 SQL 分页前生效，`/docs` 不会匹配 `/docs-old`。它只查已有索引，不扫描磁盘；已卸载来源的保留记录仍可搜索。GUI 使用搜索栏下方的“指定文件夹…”和“清除范围”，书签保存该范围。
+
 ## 索引排除 CLI
 
-排除策略与搜索条件分开保存。`ext:pdf` 等搜索条件继续用于查询已经保留的索引记录；排除规则决定哪些文件、目录进入索引。GUI 的重建和增量处理与 CLI 使用同一个数据库策略。当前排除规则编辑入口是 CLI，图形设置页的排除编辑在后续阶段实现。项目通过 Vibe Coding 迭代，本阶段的验收范围是共享核心、CLI 和 Qt 自动回归，不能据此认定真实网络挂载或大目录性能已验收。阶段设计见 [来源、排除、NAS 与存储实施计划](superpowers/plans/2026-10-03-index-policy-nas-storage.md)。
+排除策略与搜索条件分开保存。`ext:pdf` 等搜索条件继续用于查询已经保留的索引记录；排除规则决定哪些文件、目录进入索引。GUI 的重建和增量处理与 CLI 使用同一个数据库策略。Mac GUI 可从“工具→排除规则…”编辑四类规则。项目通过 Vibe Coding 迭代，自动回归不能代替真实网络挂载或大目录性能验收。
 
 `excludes show` 显示规则与版本，`excludes set` 一次替换完整策略，`excludes clear` 将策略置空。`--directory` 和 `--file` 可重复，值必须是绝对路径。目录排除覆盖目录本身及全部后代，并在遍历进入目录前剪枝；文件排除只匹配该文件。目录通配还检查所有祖先目录，因此排除目录内部的单项文件事件也不能将记录重新写入索引。
 
-文件、目录过滤器以分号拆分。每条模式匹配完整名称，含路径分隔符时匹配完整路径：`*` 匹配零个或多个字符但不跨 `/`，`**` 可跨 `/`，`?` 匹配一个有效 Unicode 码点且不跨 `/`。只折叠 ASCII 大小写，其余 UTF-8 字节保留。模式含分号时用双引号包裹；模式中的字面双引号用两个双引号转义。规则要求有效 UTF-8；文件系统暴露的非法 UTF-8 字节仍可被 `*`、`**` 排除，`?` 不匹配非法字节。未关闭或位置错误的引号、`regex:`、`ext:`、属性等未支持的高级前缀会明确报错，退出码非零，旧规则和旧记录保持不变。
+文件、目录过滤器以分号拆分。通配模式匹配完整名称，含路径分隔符时匹配完整路径：`*` 匹配零个或多个字符但不跨 `/`，`**` 可跨 `/`，`?` 匹配一个有效 Unicode 码点且不跨 `/`。通配模式只折叠 ASCII 大小写。`regex:` 后接 PCRE2 表达式，含 `/` 时匹配规范化完整路径，否则匹配名称；按 UTF-8、不区分大小写模式执行，并保留 `\d` 等反斜杠转义。PCRE2 与 Everything 使用的 PCRE 版本可能存在语法差异。模式含分号时用双引号包裹；模式中的字面双引号用两个双引号转义。无效正则、无效 UTF-8、未关闭引号或未支持的前缀会报错，旧规则保持不变。文件系统中的非法 UTF-8 名称不匹配正则。
 
 下面的示例继续使用 [开发指南](DEVELOPMENT.md) 中的独立合成样例数据库。shell 外层单引号保证过滤器列表作为一个参数传入，内层双引号属于过滤器语法；实际路径由示例变量展开。
 
@@ -65,8 +68,8 @@ ASCII 大小写折叠保留非 ASCII UTF-8 字节。拆词只识别 ASCII 空白
 ./build/core-debug/everything-lite-cli --db "$EL_CHECK_DIR/sample.db" excludes set \
   --directory "$EL_CHECK_DIR/sample/砀例甲" \
   --file "$EL_CHECK_DIR/sample/sample.txt" \
-  --folder-filter 'cache*;temporary*' \
-  --file-filter '*.tmp;"a;b.txt";"a""b.txt"'
+  --folder-filter 'cache*;regex:^temporary[0-9]+$' \
+  --file-filter '*.tmp;regex:^draft_[0-9]+\.txt$;"a;b.txt"'
 ./build/core-debug/everything-lite-cli --db "$EL_CHECK_DIR/sample.db" excludes clear
 ./build/core-debug/everything-lite-cli --db "$EL_CHECK_DIR/sample.db" index "$EL_CHECK_DIR/sample"
 ```

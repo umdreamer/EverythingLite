@@ -708,6 +708,8 @@ std::vector<SearchResult> runSearch(sqlite3* db,
             ? "instr(files.search_path, ?) > 0"
             : "files.search_path LIKE ? ESCAPE '\\'");
     }
+    struct ScopeBinding { bool integer; std::int64_t id; std::string value; };
+    std::vector<ScopeBinding> scope_bindings;
     std::string folder_lower,folder_upper;
     if(query.folder_scope) {
         if(query.folder_scope->empty() || !utf8ToPath(*query.folder_scope).is_absolute())
@@ -715,7 +717,53 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         const auto folder=normalizePath(*query.folder_scope);
         folder_lower=folder=="/" ? "/" : folder+"/";
         folder_upper=folder=="/" ? "0" : folder+"0";
-        where.emplace_back("files.path >= ? AND files.path < ?");
+        where.emplace_back(folder=="/" ? "files.path > ? AND files.path < ?"
+                                      : "files.path >= ? AND files.path < ?");
+        if(compact) {
+            // The compact files view reconstructs path across three tables, so
+            // files.path has no usable index. Select candidate IDs through the
+            // indexed directory dictionary before applying the exact path bound.
+            auto source_stmt=prepare(db,"SELECT id,root FROM sources");
+            std::string candidates;
+            bool all_sources_inside=true;
+            std::size_t candidate_parts=0;
+            int source_rc=SQLITE_OK;
+            while((source_rc=sqlite3_step(source_stmt.get()))==SQLITE_ROW) {
+                const auto id=sqlite3_column_int64(source_stmt.get(),0);
+                const auto root=columnText(source_stmt.get(),1);
+                if(!pathIsWithin(root,folder)) all_sources_inside=false;
+                std::string part;
+                if(folder==root) {
+                    part="SELECT id FROM file_entries WHERE source_id=? AND leaf<>''";
+                    scope_bindings.push_back({true,id,{}});
+                } else if(pathIsWithin(root,folder)) {
+                    part="SELECT id FROM file_entries WHERE source_id=?";
+                    scope_bindings.push_back({true,id,{}});
+                } else if(pathIsWithin(folder,root)) {
+                    const auto relative=relativeTo(folder,root);
+                    part="SELECT e.id FROM file_entries e WHERE e.directory_id IN ("
+                         "SELECT id FROM directories WHERE source_id=? AND relative_path=? "
+                         "UNION ALL SELECT id FROM directories WHERE source_id=? AND relative_path>=? AND relative_path<?)";
+                    scope_bindings.push_back({true,id,{}});
+                    scope_bindings.push_back({false,0,relative});
+                    scope_bindings.push_back({true,id,{}});
+                    scope_bindings.push_back({false,0,relative+"/"});
+                    scope_bindings.push_back({false,0,relative+"0"});
+                }
+                if(!part.empty()) {
+                    if(!candidates.empty()) candidates+=" UNION ALL ";
+                    candidates+=part;
+                    ++candidate_parts;
+                }
+            }
+            if(source_rc!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
+            // Whole-index scopes need no ID materialization. A very large
+            // source catalog may exceed SQLite's compound-select term limit;
+            // retain the exact path predicate as a safe fallback in that case.
+            if(!all_sources_inside && candidate_parts<=250)
+                where.emplace_back(candidates.empty() ? "1=0" : "files.id IN ("+candidates+")");
+            else scope_bindings.clear();
+        }
     }
     if (query.min_size) where.emplace_back("files.size >= ?");
     if (query.max_size) where.emplace_back("files.size <= ?");
@@ -764,6 +812,10 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     if(query.folder_scope) {
         bindText(stmt.get(),bind_index++,folder_lower);
         bindText(stmt.get(),bind_index++,folder_upper);
+        for(const auto& binding:scope_bindings) {
+            if(binding.integer) sqlite3_bind_int64(stmt.get(),bind_index++,binding.id);
+            else bindText(stmt.get(),bind_index++,binding.value);
+        }
     }
     if (query.min_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.min_size));
     if (query.max_size) sqlite3_bind_int64(stmt.get(), bind_index++, static_cast<sqlite3_int64>(*query.max_size));

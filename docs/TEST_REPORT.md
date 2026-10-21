@@ -1,4 +1,4 @@
-# 测试范围与验证记录（截至 0.4.13）
+# 测试范围与验证记录（截至 0.4.14）
 
 ## 验证范围
 
@@ -11,6 +11,12 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.4.14 发布核验（2026-10-21）
+
+Mac Core Debug 全量 CTest 20/20、GUI Debug 全量 CTest 25/25 通过。新增测试覆盖 PCRE2 排除校验、通配混用、文件夹路径边界、特殊字符、离线记录、分页、CLI 四种搜索入口，以及 GUI 范围恢复、书签、未索引提示和切换期间旧结果抑制。Mac Release 成功生成 `EverythingLite.app/Contents/MacOS/EverythingLite` 与 `everything-lite-cli`；Info.plist 中 `CFBundleShortVersionString` 为 0.4.14。Release 只验证编译，未验证独立部署、签名、公证或真实桌面交互。本轮未运行 Linux 构建与测试，也未以真实 NAS 或日常索引测量性能。
+
+紧凑索引格式的范围查询先通过目录字典索引选取候选记录，再校验完整路径边界；测试覆盖单来源、嵌套来源及 `/`。当相交来源超过 250 个时，为避免 SQLite 复合查询项上限，查询回退到完整路径条件；该边界的结果正确性保留，但大来源数量下的性能未实测。
 
 ## Mac 0.4.13 发布核验（2026-10-21）
 

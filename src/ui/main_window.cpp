@@ -47,6 +47,7 @@
 #include <QMetaObject>
 #include <QProcess>
 #include <QPointer>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QSettings>
 #include <QStringConverter>
@@ -104,7 +105,8 @@ QString cliProbePath() {
 #endif
 }
 
-void runCliProbe(const QString& db_path, const QString& query, std::size_t limit, std::size_t offset) {
+void runCliProbe(const QString& db_path, const QString& query, const QString& folder_scope,
+                 std::size_t limit, std::size_t offset) {
     if (!searchTraceEnabled() || query.isEmpty()) return;
     const auto cli = cliProbePath();
     searchTrace("GUI-PROBE", "candidate_cli=\"" + toUtf8(cli) + "\"");
@@ -119,6 +121,7 @@ void runCliProbe(const QString& db_path, const QString& query, std::size_t limit
          << QStringLiteral("probe-search") << query
          << QStringLiteral("--limit") << QString::number(static_cast<qulonglong>(limit))
          << QStringLiteral("--offset") << QString::number(static_cast<qulonglong>(offset));
+    if (!folder_scope.isEmpty()) args << QStringLiteral("--in-folder") << folder_scope;
 
     QProcess process;
     process.setProcessChannelMode(QProcess::SeparateChannels);
@@ -433,6 +436,29 @@ void MainWindow::buildUi() {
     search_row->addWidget(match_path_check_);
     layout->addLayout(search_row);
 
+    auto* folder_row = new QHBoxLayout();
+    auto* choose_folder = new QPushButton(QStringLiteral("指定文件夹…"), this);
+    choose_folder->setObjectName(QStringLiteral("chooseFolderScope"));
+    clear_folder_scope_ = new QPushButton(QStringLiteral("清除范围"), this);
+    clear_folder_scope_->setObjectName(QStringLiteral("clearFolderScope"));
+    folder_scope_label_ = new QLabel(this);
+    folder_scope_label_->setObjectName(QStringLiteral("folderScopeLabel"));
+    folder_scope_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    folder_scope_status_ = new QLabel(this);
+    folder_scope_status_->setObjectName(QStringLiteral("folderScopeStatus"));
+    folder_scope_status_->setStyleSheet(QStringLiteral("color: #b33"));
+    folder_row->addWidget(choose_folder);
+    folder_row->addWidget(clear_folder_scope_);
+    folder_row->addWidget(folder_scope_label_, 1);
+    folder_row->addWidget(folder_scope_status_);
+    layout->addLayout(folder_row);
+    connect(choose_folder, &QPushButton::clicked, this, [this] {
+        const auto initial = folder_scope_.isEmpty() ? QDir::homePath() : folder_scope_;
+        const auto chosen = QFileDialog::getExistingDirectory(this, QStringLiteral("选择搜索文件夹"), initial);
+        if (!chosen.isEmpty()) setFolderScope(chosen);
+    });
+    connect(clear_folder_scope_, &QPushButton::clicked, this, [this] { setFolderScope({}); });
+
     scope_label_ = new QLabel(this);
     scope_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     auto scope_font = scope_label_->font();
@@ -643,6 +669,10 @@ void MainWindow::loadSettings() {
     if (roots_.isEmpty()) roots_ = defaultRoots();
     scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
     match_path_check_->setChecked(settings.value(QStringLiteral("search/matchPath"), false).toBool());
+    folder_scope_ = settings.value(QStringLiteral("search/folderScope")).toString();
+    if (!folder_scope_.isEmpty() && !QDir::isAbsolutePath(folder_scope_)) folder_scope_.clear();
+    if (!folder_scope_.isEmpty()) folder_scope_ = QDir::cleanPath(folder_scope_);
+    updateFolderScopeLabel();
 
     const bool show_status = settings.value(QStringLiteral("view/statusBar"), true).toBool();
     const bool show_scope = settings.value(QStringLiteral("view/scopeBar"), true).toBool();
@@ -669,6 +699,7 @@ void MainWindow::saveSettings() {
     settings.setValue(QStringLiteral("index/roots"), roots_);
     settings.setValue(QStringLiteral("search/itemScope"), scope_combo_->currentIndex());
     settings.setValue(QStringLiteral("search/matchPath"), match_path_check_->isChecked());
+    settings.setValue(QStringLiteral("search/folderScope"), folder_scope_);
     settings.setValue(QStringLiteral("view/statusBar"), statusBar()->isVisible());
     settings.setValue(QStringLiteral("view/scopeBar"), scope_label_->isVisible());
     settings.setValue(QStringLiteral("view/filterBar"), scope_combo_->isVisible());
@@ -687,6 +718,7 @@ void MainWindow::loadBookmarks() {
         SearchBookmark bookmark;
         bookmark.name = settings.value(QStringLiteral("name")).toString();
         bookmark.query = settings.value(QStringLiteral("query")).toString();
+        bookmark.folder_scope = settings.value(QStringLiteral("folderScope")).toString();
         bookmark.scope = settings.value(QStringLiteral("scope"), 0).toInt();
         bookmark.match_path = settings.value(QStringLiteral("matchPath"), false).toBool();
         bookmark.sort_column = settings.value(QStringLiteral("sortColumn"), 0).toInt();
@@ -705,6 +737,7 @@ void MainWindow::saveBookmarks() {
         const auto& bookmark = bookmarks_[static_cast<std::size_t>(i)];
         settings.setValue(QStringLiteral("name"), bookmark.name);
         settings.setValue(QStringLiteral("query"), bookmark.query);
+        settings.setValue(QStringLiteral("folderScope"), bookmark.folder_scope);
         settings.setValue(QStringLiteral("scope"), bookmark.scope);
         settings.setValue(QStringLiteral("matchPath"), bookmark.match_path);
         settings.setValue(QStringLiteral("sortColumn"), bookmark.sort_column);
@@ -743,12 +776,57 @@ void MainWindow::updateScopeLabel() {
     scope_label_->setText(QStringLiteral("索引范围（%1 个目录）：%2").arg(roots_.size()).arg(preview));
 }
 
+void MainWindow::updateFolderScopeLabel() {
+    if (folder_scope_.isEmpty()) {
+        folder_scope_label_->setText(QStringLiteral("搜索范围：全部已索引目录"));
+        folder_scope_status_->clear();
+        clear_folder_scope_->setEnabled(false);
+        return;
+    }
+    folder_scope_label_->setText(QStringLiteral("搜索范围：%1").arg(folder_scope_));
+    clear_folder_scope_->setEnabled(true);
+    bool indexed = false;
+    try {
+        Database db(toUtf8(db_path_));
+        const auto scope = toUtf8(folder_scope_);
+        for (const auto& source : db.sources()) {
+            if (pathIsWithin(scope, source.root) || pathIsWithin(source.root, scope)) {
+                indexed = true;
+                break;
+            }
+        }
+        folder_scope_status_->setText(indexed ? QString{} : QStringLiteral("该目录未索引；只搜索已有索引"));
+    } catch (const std::exception& error) {
+        folder_scope_status_->setText(QStringLiteral("索引状态读取失败：%1").arg(fromUtf8(error.what())));
+    }
+}
+
+void MainWindow::setFolderScope(const QString& path) {
+    if (!path.isEmpty() && !QDir::isAbsolutePath(path)) {
+        folder_scope_status_->setText(QStringLiteral("请选择绝对路径"));
+        return;
+    }
+    const auto normalized = path.isEmpty() ? QString{} : QDir::cleanPath(path);
+    if (normalized == folder_scope_) return;
+    folder_scope_ = normalized;
+    cancelActiveSearch();
+    search_pending_ = false;
+    ++search_request_id_;
+    resetPaging();
+    model_->setResults({});
+    updateCachedStatus();
+    updateFolderScopeLabel();
+    updateSearchStateLabel();
+    search_timer_->start(kSearchIdleDelayMs);
+}
+
 void MainWindow::updateSearchStateLabel() {
     QStringList states;
     if (match_path_check_->isChecked()) states << QStringLiteral("匹配路径");
     if (scope_combo_->currentIndex() == 1) states << QStringLiteral("文件");
     else if (scope_combo_->currentIndex() == 2) states << QStringLiteral("文件夹");
     else states << QStringLiteral("全部");
+    if (!folder_scope_.isEmpty()) states << QStringLiteral("指定文件夹");
     search_state_label_->setText(states.join(QStringLiteral(" · ")));
 }
 
@@ -759,6 +837,7 @@ void MainWindow::refreshStats() {
         indexed_count_ = db.totalFileCount();
         name_search_available_ = db.nameSearchIndexAvailable();
         name_search_ready_ = db.nameSearchIndexReady();
+        if (!folder_scope_.isEmpty()) updateFolderScopeLabel();
         searchTrace("GUI", "refreshStats indexed_count=" + std::to_string(indexed_count_)
             + " fts_available=" + std::to_string(name_search_available_ ? 1 : 0)
             + " fts_ready=" + std::to_string(name_search_ready_ ? 1 : 0));
@@ -789,7 +868,8 @@ void MainWindow::updateCachedStatus() {
 QString MainWindow::currentSearchSignature() const {
     return normalizeGuiQuery(search_edit_->text())
         + QLatin1Char('\x1f') + QString::number(scope_combo_->currentIndex())
-        + QLatin1Char('\x1f') + QString::number(match_path_check_->isChecked() ? 1 : 0);
+        + QLatin1Char('\x1f') + QString::number(match_path_check_->isChecked() ? 1 : 0)
+        + QLatin1Char('\x1f') + folder_scope_;
 }
 
 void MainWindow::runSearch() {
@@ -827,6 +907,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     const auto normalized_query = normalizeGuiQuery(query);
     const int item_scope = scope_combo_->currentIndex();
     const bool match_path = match_path_check_->isChecked();
+    const auto folder_scope = folder_scope_;
     const auto request_id = search_request_id_;
     const auto effective_limit = kPageSize + 1;
     const auto signature = currentSearchSignature();
@@ -875,6 +956,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     else if (item_scope == 2) options.scope = SearchItemScope::Folders;
     else options.scope = SearchItemScope::All;
     options.match_path = match_path;
+    if (!folder_scope.isEmpty()) options.folder_scope = toUtf8(folder_scope);
 
     active_search_cancellation_ = std::make_shared<std::atomic_bool>(false);
     const auto cancellation = active_search_cancellation_;
@@ -889,13 +971,13 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     QPointer<MainWindow> window(this);
 
     QMetaObject::invokeMethod(worker, [window, worker, query_utf8, effective_limit, offset, options,
-                                       request_id, append, normalized_query, db_path, cancellation, signature, expected_revision] {
+                                       request_id, append, normalized_query, db_path, cancellation, signature, expected_revision, folder_scope] {
         auto outcome = std::make_shared<BackgroundSearchResult>(
             worker->search(query_utf8, effective_limit, offset, options, cancellation.get(), expected_revision));
         if (!window) return;
 
         QMetaObject::invokeMethod(window.data(), [window, outcome, request_id, append,
-                                                   normalized_query, effective_limit, offset, db_path, signature] {
+                                                   normalized_query, effective_limit, offset, db_path, signature, folder_scope] {
             if (!window) return;
             auto* self = window.data();
             self->search_in_flight_ = false;
@@ -968,7 +1050,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
 
                 // Search trace mode intentionally keeps the independent CLI
                 // comparison. Normal builds never execute this branch.
-                runCliProbe(db_path, normalized_query, effective_limit, offset);
+                runCliProbe(db_path, normalized_query, folder_scope, effective_limit, offset);
                 searchTrace("GUI-SEARCH", "END request_id=" + std::to_string(request_id));
             }
 
@@ -1511,6 +1593,7 @@ void MainWindow::addCurrentBookmark() {
     SearchBookmark bookmark;
     bookmark.name = name;
     bookmark.query = search_edit_->text();
+    bookmark.folder_scope = folder_scope_;
     bookmark.scope = scope_combo_->currentIndex();
     bookmark.match_path = match_path_check_->isChecked();
     bookmark.sort_column = table_->horizontalHeader()->sortIndicatorSection();
@@ -1544,6 +1627,7 @@ void MainWindow::applyBookmark(const SearchBookmark& bookmark) {
     search_edit_->setText(bookmark.query);
     scope_combo_->setCurrentIndex(std::clamp(bookmark.scope, 0, 2));
     match_path_check_->setChecked(bookmark.match_path);
+    setFolderScope(bookmark.folder_scope);
     table_->sortByColumn(std::clamp(bookmark.sort_column, 0, model_->columnCount() - 1), bookmark.sort_order);
     search_timer_->stop();
     updateSearchStateLabel();

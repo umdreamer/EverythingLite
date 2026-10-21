@@ -88,6 +88,7 @@ class UiTest : public QObject {
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
+        settings.setValue("search/folderScope", QString{});
         settings.setValue("table/sortOrder", static_cast<int>(Qt::AscendingOrder));
     }
     void storageMenuOpensAsyncReport() {
@@ -699,6 +700,52 @@ class UiTest : public QObject {
         QCOMPARE(window.model_->rowCount(),6);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("item1004.txt"));
         QVERIFY(!window.results_have_more_);
+    }
+    void folderScopeSearchPersistsAndRejectsUnindexedFolder() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root");
+        QVERIFY(QDir().mkpath(root+"/docs/sub"));
+        QVERIFY(QDir().mkpath(root+"/docs-old"));
+        for (const auto& path : {root+"/docs/item-a.txt",root+"/docs/sub/item-b.txt",root+"/docs-old/item-c.txt"}) {
+            QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("test");
+        }
+        const auto db_path=dir.filePath("index.db");
+        IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        QVERIFY(window.findChild<QPushButton*>(QStringLiteral("chooseFolderScope")));
+        auto* clear=window.findChild<QPushButton*>(QStringLiteral("clearFolderScope")); QVERIFY(clear);
+        window.setFolderScope(root+"/docs");
+        window.search_edit_->setText("item"); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),2);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("item-a.txt"));
+        QCOMPARE(window.model_->nameAt(1),QStringLiteral("item-b.txt"));
+        window.saveSettings();
+        QCOMPARE(settings.value("search/folderScope").toString(),root+"/docs");
+        window.bookmarks_.push_back(SearchBookmark{QStringLiteral("docs"),QStringLiteral("item"),root+"/docs"});
+        window.saveBookmarks();
+        qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow restored; qputenv("EVERYTHING_LITE_DB",old); restored.watcher_->stop();
+        QCOMPARE(restored.folder_scope_,root+"/docs");
+        QCOMPARE(restored.bookmarks_.back().folder_scope,root+"/docs");
+        SearchBookmark bookmark; bookmark.folder_scope=root+"/docs-old";
+        bookmark.query="item"; window.applyBookmark(bookmark);
+        QTRY_COMPARE(window.model_->rowCount(),1);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("item-c.txt"));
+        window.setFolderScope(dir.filePath("unindexed"));
+        QCOMPARE(window.model_->rowCount(),0);
+        QVERIFY(window.findChild<QLabel*>(QStringLiteral("folderScopeStatus"))->text().contains(QStringLiteral("未索引")));
+        window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),0);
+        clear->click(); QTRY_COMPARE(window.model_->rowCount(),3);
+        QCOMPARE(window.folder_scope_,QString{});
+        WorkerGate gate; QVERIFY(gate.block(window.search_worker_));
+        window.setFolderScope(root+"/docs"); window.runSearch();
+        QVERIFY(window.search_in_flight_);
+        window.setFolderScope(root+"/docs-old");
+        gate.release->release();
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1,3000);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("item-c.txt"));
     }
     void paginationRefreshesChangedSnapshot() {
         MainWindow window; window.watcher_->stop();

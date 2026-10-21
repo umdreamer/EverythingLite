@@ -27,6 +27,7 @@ class QObject;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QPushButton;
 class QMenu;
 class QPoint;
 class QTableView;
@@ -45,6 +46,7 @@ class IndexStorageDialog;
 struct SearchBookmark {
     QString name;
     QString query;
+    QString folder_scope;
     int scope = 0;
     bool match_path = false;
     int sort_column = 0;
@@ -73,6 +75,10 @@ private:
     QThread* search_thread_ = nullptr;
 
     QLineEdit* search_edit_ = nullptr;
+    QString folder_scope_;
+    QLabel* folder_scope_label_ = nullptr;
+    QLabel* folder_scope_status_ = nullptr;
+    QPushButton* clear_folder_scope_ = nullptr;
     QComboBox* scope_combo_ = nullptr;
     QCheckBox* match_path_check_ = nullptr;
     QLabel* scope_label_ = nullptr;
@@ -161,6 +167,8 @@ private:
     void saveBookmarks();
     void rebuildBookmarksMenu();
     void updateScopeLabel();
+    void setFolderScope(const QString& path);
+    void updateFolderScopeLabel();
     void updateSearchStateLabel();
     void refreshStats();
     void updateCachedStatus();

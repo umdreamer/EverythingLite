@@ -37,7 +37,7 @@ struct IndexCompaction {
 };
 // No initialization, schema migration, row scans, or source-root access.
 IndexStorage readIndexStorage(const std::string& path);
-// Keeps the verified backup. Failure never restores over an active database.
+// An empty backup_path keeps only the live database. Failure never restores over an active database.
 // after includes the explicit backup even when outside the report naming rule.
 // Source/backup names must not end in -journal/-wal/-shm (ASCII case-insensitive).
 IndexCompaction compactIndexStorage(const std::string& path, const std::string& backup_path,
@@ -53,9 +53,9 @@ struct IndexBackupCleanup {
 // Lists only exact owned, independent regular files in the database directory.
 // Listing does not imply that a backup is recoverable.
 std::vector<IndexStorageBackup> listIndexStorageBackups(const std::string& path);
-// Requires a healthy application database and at least one verified, unselected
-// standalone recovery backup. Partial results are retained on failure/cancel.
+// Requires a healthy application database. By default, at least one verified,
+// unselected recovery backup must remain. Partial results survive failure/cancel.
 IndexBackupCleanup removeIndexStorageBackups(const std::string& path,
     const std::vector<std::string>& selected,std::atomic_bool* cancel=nullptr,
-    const std::function<void(std::size_t)>& removed_progress={});
+    const std::function<void(std::size_t)>& removed_progress={},bool allow_last_backup=false);
 } // namespace everything_lite

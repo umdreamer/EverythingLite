@@ -390,17 +390,20 @@ IndexStorage readIndexStorage(const std::string& value) {
 
 IndexCompaction compactIndexStorage(const std::string& value,const std::string& backup_value,std::atomic_bool* cancel,const IndexStorageProgress& progress) {
     cancelled(cancel);
-    const auto path=absolutePath(value),backup_path=absolutePath(backup_value);
+    const auto path=absolutePath(value),backup_path=backup_value.empty()?fs::path{}:absolutePath(backup_value);
     regular(path);
-    rejectReservedBackup(path,backup_path);
+    if(!backup_value.empty())rejectReservedBackup(path,backup_path);
     std::error_code ec;
-    const auto status=fs::symlink_status(backup_path,ec);
-    if((ec && ec!=std::errc::no_such_file_or_directory) || status.type()!=fs::file_type::not_found)
-        fail("storage: backup must be a new writable regular file");
+    if(!backup_value.empty()) {
+        const auto status=fs::symlink_status(backup_path,ec);
+        if((ec && ec!=std::errc::no_such_file_or_directory) || status.type()!=fs::file_type::not_found)
+            fail("storage: backup must be a new writable regular file");
+    }
     IndexCompaction result;
     result.before=readIndexStorage(path.u8string());
     const auto current=add(result.before.main_bytes,result.before.wal_bytes);
-    checkSpace(path.parent_path(),backup_path.parent_path(),current);
+    if(backup_value.empty())enoughSpace(path.parent_path(),current);
+    else checkSpace(path.parent_path(),backup_path.parent_path(),current);
     IndexMaintenanceLock maintenance(path.u8string());
     Work work{cancel};
     const auto source_identity=sourceIdentity(path);
@@ -408,17 +411,19 @@ IndexCompaction compactIndexStorage(const std::string& value,const std::string& 
     unchangedSource(source_identity,path);
     work.attach(connection.get());
     cancelled(cancel);
-    if(progress)progress(IndexStoragePhase::Backup);
-    cancelled(cancel);reserveBackup(backup_path);
-    {
-        auto backup=openDatabase(backup_path,false);
-        work.attach(backup.get());
-        copyDatabase(connection.get(),backup.get(),cancel);
-        verifyIntegrity(backup.get(),cancel,"storage: backup integrity check failed");
+    if(!backup_value.empty()) {
+        if(progress)progress(IndexStoragePhase::Backup);
+        cancelled(cancel);reserveBackup(backup_path);
+        {
+            auto backup=openDatabase(backup_path,false);
+            work.attach(backup.get());
+            copyDatabase(connection.get(),backup.get(),cancel);
+            verifyIntegrity(backup.get(),cancel,"storage: backup integrity check failed");
+        }
+        if(progress)progress(IndexStoragePhase::BackupVerified);
+        result.backup_bytes=fileBytes(backup_path);
+        writeBackupProvenance(path,backup_path,source_identity);
     }
-    if(progress)progress(IndexStoragePhase::BackupVerified);
-    result.backup_bytes=fileBytes(backup_path);
-    writeBackupProvenance(path,backup_path,source_identity);
     cancelled(cancel);
     // VACUUM runs on the live database. SQLite owns the atomic transaction;
     // never rename a stale backup or replacement over other writers' commits.
@@ -429,14 +434,15 @@ IndexCompaction compactIndexStorage(const std::string& value,const std::string& 
     // interrupted final verification. The GUI uses Verify as this boundary.
     if(vacuum_result==SQLITE_OK && progress)progress(IndexStoragePhase::Verify);
     check(vacuum_result,cancel);
-    verifyIntegrity(connection.get(),cancel,"storage: database integrity check failed; keep the verified backup");
+    verifyIntegrity(connection.get(),cancel,"storage: database integrity check failed");
     // No journal_mode changes or unconditional WAL checkpoint claims. A WAL
     // retained by another reader is included at its actual size in the report.
     connection.reset();
     // SQLite owns its sidecar lifecycle. Success requires the independent
     // verified backup to still exist and be readable after live maintenance.
-    result.backup_bytes=readableFileBytes(backup_path);
+    if(!backup_value.empty())result.backup_bytes=readableFileBytes(backup_path);
     result.after=readIndexStorage(path.u8string());
+    if(backup_value.empty())return result;
     const auto source_parent=fs::canonical(path.parent_path(),ec);
     if(ec) fail("storage: cannot inspect backup directory");
     const auto backup_parent=fs::canonical(backup_path.parent_path(),ec);
@@ -491,14 +497,17 @@ IndexOptimization migrateIndexStorageToDirectory(const std::string& value,const 
             }
             legacyOptimizationInput(input.get());
         }
-        backup_path=absolutePath(backup_value);rejectReservedBackup(path,backup_path);
-        std::error_code ec;const auto status=fs::symlink_status(backup_path,ec);
-        if((ec && ec!=std::errc::no_such_file_or_directory)||status.type()!=fs::file_type::not_found)fail("storage: backup must be a new writable regular file");
+        if(!backup_value.empty()) {
+            backup_path=absolutePath(backup_value);rejectReservedBackup(path,backup_path);
+            std::error_code ec;const auto status=fs::symlink_status(backup_path,ec);
+            if((ec && ec!=std::errc::no_such_file_or_directory)||status.type()!=fs::file_type::not_found)fail("storage: backup must be a new writable regular file");
+        }
         maintenance=std::make_unique<IndexMaintenanceLock>(path.u8string());
         result.before=readIndexStorage(path.u8string());
         // New and old tables coexist transactionally, and WAL/VACUUM need workspace.
         // Reuse the conservative compaction budget with double the live size.
-        checkSpace(path.parent_path(),backup_path.parent_path(),multiply(2,add(result.before.main_bytes,result.before.wal_bytes)));
+        if(backup_value.empty())enoughSpace(path.parent_path(),multiply(2,add(result.before.main_bytes,result.before.wal_bytes)));
+        else checkSpace(path.parent_path(),backup_path.parent_path(),multiply(2,add(result.before.main_bytes,result.before.wal_bytes)));
         const auto source_identity=sourceIdentity(path);
         connection=openDatabase(path,false);unchangedSource(source_identity,path);
         work.attach(connection.get());registerDirectoryWriter(connection.get());
@@ -509,17 +518,19 @@ IndexOptimization migrateIndexStorageToDirectory(const std::string& value,const 
             result.already_compact=true;result.after=readIndexStorage(path.u8string());return result;
         }
         legacyOptimizationInput(connection.get());
-        if(progress)progress(IndexStoragePhase::Backup);cancelled(cancel);
-        reserveBackup(backup_path);result.backup_path=backup_path.u8string();
-        {
-            auto source=openDatabase(path,true),backup=openDatabase(backup_path,false);
-            work.attach(source.get());work.attach(backup.get());
-            copyDatabase(source.get(),backup.get(),cancel);
-            verifyIntegrity(backup.get(),cancel,"storage: backup integrity check failed");
+        if(!backup_value.empty()) {
+            if(progress)progress(IndexStoragePhase::Backup);cancelled(cancel);
+            reserveBackup(backup_path);result.backup_path=backup_path.u8string();
+            {
+                auto source=openDatabase(path,true),backup=openDatabase(backup_path,false);
+                work.attach(source.get());work.attach(backup.get());
+                copyDatabase(source.get(),backup.get(),cancel);
+                verifyIntegrity(backup.get(),cancel,"storage: backup integrity check failed");
+            }
+            if(progress)progress(IndexStoragePhase::BackupVerified);
+            result.backup_bytes=readableFileBytes(backup_path);
+            writeBackupProvenance(path,backup_path,source_identity);
         }
-        if(progress)progress(IndexStoragePhase::BackupVerified);
-        result.backup_bytes=readableFileBytes(backup_path);
-        writeBackupProvenance(path,backup_path,source_identity);
         if(progress)progress(IndexStoragePhase::Migrate);cancelled(cancel);
         migrateDirectorySchema(connection.get());
         verifyIntegrity(connection.get(),cancel,"storage: migrated database integrity check failed");
@@ -535,7 +546,7 @@ IndexOptimization migrateIndexStorageToDirectory(const std::string& value,const 
             check(vacuum_result,cancel);
         }
         if(progress)progress(IndexStoragePhase::Verify);
-        verifyIntegrity(connection.get(),cancel,"storage: migrated database integrity check failed; keep recovery backup");
+        verifyIntegrity(connection.get(),cancel,"storage: migrated database integrity check failed");
         connection.reset();optimizationReport(result,path,backup_path);
     }catch(const std::exception& error) {
         result.error=error.what();
@@ -713,7 +724,7 @@ std::vector<IndexStorageBackup> listIndexStorageBackups(const std::string& value
     std::sort(result.begin(),result.end(),[](const auto& a,const auto& b){return a.path<b.path;});
     return result;
 }
-IndexBackupCleanup removeIndexStorageBackups(const std::string& value,const std::vector<std::string>& selected,std::atomic_bool* cancel,const std::function<void(std::size_t)>& removed_progress) {
+IndexBackupCleanup removeIndexStorageBackups(const std::string& value,const std::vector<std::string>& selected,std::atomic_bool* cancel,const std::function<void(std::size_t)>& removed_progress,bool allow_last_backup) {
     IndexBackupCleanup result;
     try {
         cancelled(cancel);
@@ -737,20 +748,25 @@ IndexBackupCleanup removeIndexStorageBackups(const std::string& value,const std:
         readIndexStorage(path.u8string());Work work{cancel};auto current=openDatabase(path,true);work.attach(current.get());
         verifyApplicationRecovery(current.get(),cancel);
         std::unique_ptr<BackupIdentity> retained;
-        for(const auto& candidate:listIndexStorageBackups(path.u8string())) {
-            cancelled(cancel);if(selected_names.count(candidate.path))continue;
-            try {
-                const auto identity=backupIdentity(fs::path(candidate.path));standaloneSidecars(identity.path);
-                auto recovery=openStandaloneBackup(identity.path);work.attach(recovery.get());
-                verifyApplicationRecovery(recovery.get(),cancel);unchangedBackup(identity);
-                if(!backupProvenanceMatches(path,identity.path))continue;
-                retained=std::make_unique<BackupIdentity>(identity);break;
-            }catch(const std::exception&) {cancelled(cancel);}
+        if(!allow_last_backup) {
+            for(const auto& candidate:listIndexStorageBackups(path.u8string())) {
+                cancelled(cancel);if(selected_names.count(candidate.path))continue;
+                try {
+                    const auto identity=backupIdentity(fs::path(candidate.path));standaloneSidecars(identity.path);
+                    auto recovery=openStandaloneBackup(identity.path);work.attach(recovery.get());
+                    verifyApplicationRecovery(recovery.get(),cancel);unchangedBackup(identity);
+                    if(!backupProvenanceMatches(path,identity.path))continue;
+                    retained=std::make_unique<BackupIdentity>(identity);break;
+                }catch(const std::exception&) {cancelled(cancel);}
+            }
+            if(!retained)fail("storage: keep at least one verified standalone application recovery backup");
         }
-        if(!retained)fail("storage: keep at least one verified standalone application recovery backup");
         for(const auto& identity:remove) {
-            cancelled(cancel);unchangedBackup(*retained);standaloneSidecars(retained->path);unchangedBackup(identity);
-            if(!backupProvenanceMatches(path,retained->path))fail("storage: retained backup provenance changed; cleanup stopped");
+            cancelled(cancel);unchangedBackup(identity);
+            if(retained) {
+                unchangedBackup(*retained);standaloneSidecars(retained->path);
+                if(!backupProvenanceMatches(path,retained->path))fail("storage: retained backup provenance changed; cleanup stopped");
+            }
             const auto receipt=provenancePath(identity.path);std::unique_ptr<BackupIdentity> receipt_identity;
             std::error_code ec;const auto receipt_status=fs::symlink_status(receipt,ec);
             if(receipt_status.type()!=fs::file_type::not_found)receipt_identity=std::make_unique<BackupIdentity>(backupIdentity(receipt));

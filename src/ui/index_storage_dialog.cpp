@@ -30,7 +30,7 @@ IndexStorageDialog::IndexStorageDialog(QString database_path,QWidget* parent)
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle(QStringLiteral("索引存储")); resize(620,500);
     auto* layout=new QVBoxLayout(this);
-    auto* explanation=new QLabel(QStringLiteral("优化格式会保留恢复备份，旧版本程序将不能写入新格式。仅整理空间保留当前格式。备份可能使总占用增加；不会删除真实文件。"),this);
+    auto* explanation=new QLabel(QStringLiteral("优化格式使用目录字典减少重复路径，旧版本程序将不能写入新格式。整理空间回收 SQLite 空闲页。两项操作均不创建备份；已有备份可单独删除。"),this);
     explanation->setWordWrap(true); layout->addWidget(explanation);
     report_=new QLabel(QStringLiteral("正在读取存储统计…"),this); report_->setObjectName(QStringLiteral("storageReport"));
     report_->setTextFormat(Qt::PlainText); report_->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(report_);
@@ -74,8 +74,8 @@ void IndexStorageDialog::refreshReport(bool update_summary) {
 void IndexStorageDialog::requestMaintenance(bool optimize) {
     if(operation_running_ || !maintenanceRequested)return;
     const auto explanation=optimize
-        ?QStringLiteral("将先创建并验证恢复备份，再迁移存储格式并整理空间。旧版本程序不能写入新格式。迁移提交后取消整理，不会撤销格式迁移。继续？")
-        :QStringLiteral("将先创建并验证恢复备份，再整理 SQLite 空闲页。备份会保留，总占用可能增加。继续？");
+        ?QStringLiteral("将迁移到紧凑格式并整理空间，不创建备份。旧版本程序不能写入新格式。迁移提交后取消整理，不会撤销格式迁移。继续？")
+        :QStringLiteral("将整理 SQLite 空闲页，不创建备份。操作前请关闭其他索引任务。继续？");
     if(QMessageBox::question(this,QStringLiteral("确认索引维护"),explanation)!=QMessageBox::Yes)return;
     maintenanceRequested(optimize);
 }
@@ -84,7 +84,7 @@ void IndexStorageDialog::requestCleanup() {
     std::vector<std::string> selected;QStringList names;
     for(auto* item:backups_->selectedItems()){const auto path=item->data(Qt::UserRole).toString();selected.push_back(path.toUtf8().toStdString());names.push_back(QFileInfo(path).fileName());}
     if(selected.empty()){outcome_->setText(QStringLiteral("请选择要删除的备份文件。"));return;}
-    const auto message=QStringLiteral("仅删除以下 %1 份备份。删除前会验证当前索引及至少一份未选中的独立恢复备份；不会删除最后一份已验证恢复备份。已完成的删除不能撤销。\n\n%2\n\n继续？").arg(selected.size()).arg(names.join(QLatin1Char('\n')));
+    const auto message=QStringLiteral("将删除以下 %1 份备份，包括最后一份备份。删除前会验证当前索引。已完成的删除不能撤销。\n\n%2\n\n继续？").arg(selected.size()).arg(names.join(QLatin1Char('\n')));
     if(QMessageBox::question(this,QStringLiteral("确认删除所选备份"),message)!=QMessageBox::Yes)return;
     cleanupRequested(selected);
 }

@@ -84,6 +84,9 @@ int main() {
     assert(result.backup_bytes==fs::file_size(backup));
     assert(result.after.backup_count==3 && result.after.backup_bytes==10+result.backup_bytes+receiptBytes(backup));
     assert(result.after.total_bytes==result.after.main_bytes+result.after.wal_bytes+result.after.shm_bytes+result.after.backup_bytes);
+    const auto without_backup=compactIndexStorage(path.string(),"");
+    assert(without_backup.backup_bytes==0);
+    assert(without_backup.after.backup_count==result.after.backup_count);
 #ifndef _WIN32
     struct stat info{}; assert(::stat(backup.c_str(),&info)==0 && (info.st_mode&0777)==0600);
 #endif
@@ -319,8 +322,21 @@ int main() {
     assert(partial.cancelled && partial.removed_paths==std::vector<std::string>{empty.string()});
     assert(partial.removed_bytes>0 && !fs::exists(empty) && fs::exists(extra) && fs::exists(kept));
     // The same cleanup guard accepts the new format and preserves its legacy recovery copy.
+    const auto single_copy=cleanup_dir/"single-copy.sqlite";
+    Database(single_copy.string()).initialize();
+    const auto single_optimized=migrateIndexStorageToDirectory(single_copy.string(),"");
+    assert(single_optimized.error.empty() && single_optimized.migration_committed);
+    assert(single_optimized.after.backup_count==0 && single_optimized.backup_bytes==0);
+    Database(single_copy.string()).initialize();
+    const auto removable=cleanup_dir/"single-copy.sqlite.pre-storage-1.backup.sqlite";
+    compactIndexStorage(single_copy.string(),removable.string());
+    const auto removed_last=removeIndexStorageBackups(single_copy.string(),{removable.string()},nullptr,{},true);
+    assert(removed_last.error.empty() && removed_last.removed_paths.size()==1);
+    assert(readIndexStorage(single_copy.string()).backup_count==0);
     const auto optimized=migrateIndexStorageToDirectory(app.string(),(cleanup_dir/"app.sqlite.pre-storage-6.backup.sqlite").string());
     assert(optimized.error.empty() && optimized.migration_committed);
+    const auto no_backup_optimize=migrateIndexStorageToDirectory(app.string(),"");
+    assert(no_backup_optimize.error.empty() && no_backup_optimize.already_compact && no_backup_optimize.backup_bytes==0);
     const auto compact_cleanup=removeIndexStorageBackups(app.string(),{extra.string()});
     assert(compact_cleanup.error.empty() && compact_cleanup.removed_paths.size()==1 && fs::exists(kept));
     std::vector<IndexStoragePhase> compact_phases;

@@ -157,10 +157,10 @@ class UiTest : public QObject {
         MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
         window.showIndexStorage();window.requestStorageMaintenance(true);
         QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
-        const auto first=readIndexStorage(window.db_path_.toStdString());QCOMPARE(first.backup_count,std::uint64_t(1));
+        const auto first=readIndexStorage(window.db_path_.toStdString());QCOMPARE(first.backup_count,std::uint64_t(0));
         window.requestStorageMaintenance(true);QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
         QCOMPARE(readIndexStorage(window.db_path_.toStdString()).backup_count,first.backup_count);
-        QVERIFY(window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text().contains(QStringLiteral("未新增备份")));
+        QVERIFY(window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text().contains(QStringLiteral("本次未迁移")));
         auto* outcome=window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"));
         const auto finished=outcome->text();window.storage_dialog_->setPhase(IndexStoragePhase::Backup);
         QCOMPARE(outcome->text(),finished);
@@ -174,7 +174,7 @@ class UiTest : public QObject {
         Database db(window.db_path_.toStdString());const auto rows=db.search("nested.txt");
         QCOMPARE(rows.size(),std::size_t(1));QCOMPARE(QString::fromStdString(rows[0].file.root),child);
     }
-    void storageCleanupRequiresExactSelectionAndKeepsRecovery() {
+    void storageCleanupRequiresExactSelectionAndAllowsLastBackup() {
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
         const auto path=dir.path()+"/index.db";qputenv("EVERYTHING_LITE_DB",path.toUtf8());
         MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
@@ -194,6 +194,10 @@ class UiTest : public QObject {
         QVERIFY(QFile::exists(first));QVERIFY(!QFile::exists(second));
         QVERIFY(dialog->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text().contains(QStringLiteral("已删除 1 份备份")));
         QTRY_COMPARE_WITH_TIMEOUT(list->count(),1,3000);
+        list->item(0)->setSelected(true);
+        QTimer::singleShot(0,[]{if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))box->button(QMessageBox::Yes)->click();});
+        cleanup->click();QTRY_VERIFY_WITH_TIMEOUT(!window.storage_maintenance_,10000);
+        QVERIFY(!QFile::exists(first));QTRY_COMPARE_WITH_TIMEOUT(list->count(),0,3000);
     }
     void storageDialogCloseCancelsAndDefersDestruction() {
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
@@ -204,7 +208,7 @@ class UiTest : public QObject {
         window.storage_dialog_->close();QVERIFY(cancellation->load());
         QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_ && !window.storage_dialog_,10000);
     }
-    void storageCompactionReportsVerifiedBackupWhenVacuumIsBusy() {
+    void storageCompactionReportsFailureWithoutBackupWhenVacuumIsBusy() {
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
         const auto path=dir.path()+"/index.db";qputenv("EVERYTHING_LITE_DB",path.toUtf8());
         MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
@@ -215,8 +219,8 @@ class UiTest : public QObject {
         sqlite3_exec(writer,"ROLLBACK",nullptr,nullptr,nullptr);sqlite3_close(writer);
         const auto outcome=window.storage_dialog_->findChild<QLabel*>(QStringLiteral("storageOutcome"))->text();
         QVERIFY(outcome.contains(QStringLiteral("未完成")));
-        QVERIFY2(outcome.contains(QStringLiteral("恢复备份已验证：是；VACUUM 已完成：否")),qPrintable(outcome));
-        QVERIFY(outcome.contains(QStringLiteral(".backup.sqlite")));
+        QVERIFY2(outcome.contains(QStringLiteral("VACUUM 已完成：否")),qPrintable(outcome));
+        QCOMPARE(readIndexStorage(path.toStdString()).backup_count,std::uint64_t(0));
     }
     void storageMaintenanceBlocksDatabaseMenus_data() {
         QTest::addColumn<bool>("edit_roots");

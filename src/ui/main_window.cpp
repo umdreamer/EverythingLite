@@ -1193,18 +1193,16 @@ void MainWindow::requestStorageMaintenance(bool optimize,const std::vector<std::
 
 void MainWindow::tryStartStorageMaintenance() {
     if(closing_ || !storage_maintenance_ || worker_thread_ || search_in_flight_)return;
-    struct Outcome {IndexStorage before,after;QString message;bool sizes=false,backup_verified=false,vacuum_completed=false;};
+    struct Outcome {IndexStorage before,after;QString message;bool sizes=false,vacuum_completed=false;};
     auto result=std::make_shared<Outcome>();
     const auto path=toUtf8(db_path_);
-    const auto backup=path+".pre-storage-"+std::to_string(QDateTime::currentMSecsSinceEpoch())+".backup.sqlite";
     const auto cancellation=storage_cancellation_;const bool optimize=storage_optimize_;const auto cleanup_selection=storage_cleanup_selection_;
     QPointer<MainWindow> window(this);
-    worker_thread_=QThread::create([window,result,path,backup,cancellation,optimize,cleanup_selection]{
+    worker_thread_=QThread::create([window,result,path,cancellation,optimize,cleanup_selection]{
         const bool compact_operation=!optimize && cleanup_selection.empty();
         auto phase=[window,result,compact_operation](IndexStoragePhase phase){
             // These facts are captured synchronously on the maintenance worker.
             // Queued labels are presentation only and cannot determine results.
-            if(compact_operation && phase==IndexStoragePhase::BackupVerified)result->backup_verified=true;
             if(compact_operation && phase==IndexStoragePhase::Verify)result->vacuum_completed=true;
             if(window)QMetaObject::invokeMethod(window.data(),[window,phase]{if(window && window->storage_dialog_)window->storage_dialog_->setPhase(phase);},Qt::QueuedConnection);
         };
@@ -1215,35 +1213,33 @@ void MainWindow::tryStartStorageMaintenance() {
                 phase(IndexStoragePhase::Verify);
                 const auto report=removeIndexStorageBackups(path,cleanup_selection,cancellation.get(),[window](std::size_t count){
                     if(window)QMetaObject::invokeMethod(window.data(),[window,count]{if(window && window->storage_dialog_)window->storage_dialog_->setWindowTitle(QStringLiteral("索引存储 — 已删除 %1 份备份").arg(count));},Qt::QueuedConnection);
-                });
+                },true);
                 result->message=QStringLiteral("已删除 %1 份备份，释放 %2 字节。").arg(report.removed_paths.size()).arg(report.removed_bytes);
                 for(const auto& removed:report.removed_paths)result->message+=QLatin1Char('\n')+QFileInfo(fromUtf8(removed)).fileName();
                 for(const auto& orphan:report.orphan_receipts)result->message+=QStringLiteral("\n遗留来源凭证：%1").arg(QFileInfo(fromUtf8(orphan)).fileName());
                 if(!report.error.empty())result->message+=QStringLiteral("\n%1：%2；此前完成的删除已保留。").arg(report.cancelled?QStringLiteral("清理已取消"):QStringLiteral("清理未完成"),fromUtf8(report.error));
-                else result->message+=QStringLiteral("\n清理完成，至少一份已验证恢复备份已保留。");
+                else result->message+=QStringLiteral("\n清理完成。当前索引仍可用；已删除的备份不可恢复。");
                 result->after=readIndexStorage(path);result->sizes=true;
             }else if(optimize){
-                const auto report=migrateIndexStorageToDirectory(path,backup,true,cancellation.get(),phase);
+                const auto report=migrateIndexStorageToDirectory(path,"",true,cancellation.get(),phase);
                 result->before=report.before;result->after=report.after;result->sizes=report.before.page_size>0 && report.after.page_size>0;
                 if(!report.error.empty())result->message=report.migration_committed
-                    ?QStringLiteral("格式已迁移；空间整理或后续验证未完成：%1。保留恢复备份。").arg(fromUtf8(report.error))
-                    :QStringLiteral("格式优化失败：%1。保留已有备份。").arg(fromUtf8(report.error));
-                else if(report.already_compact)result->message=QStringLiteral("已经使用紧凑格式；本次未迁移、未新增备份。可用“仅整理空间”回收空闲页。");
-                else result->message=QStringLiteral("格式迁移与空间整理完成。恢复备份已保留；总空间包含备份。");
+                    ?QStringLiteral("格式已迁移；空间整理或后续验证未完成：%1。").arg(fromUtf8(report.error))
+                    :QStringLiteral("格式优化失败：%1。").arg(fromUtf8(report.error));
+                else if(report.already_compact)result->message=QStringLiteral("已经使用紧凑格式；本次未迁移。可用“仅整理空间”回收空闲页。");
+                else result->message=QStringLiteral("格式迁移与空间整理完成；本次未创建备份。");
                 result->message+=QStringLiteral("\n迁移已提交：%1；VACUUM 已完成：%2。").arg(report.migration_committed?QStringLiteral("是"):QStringLiteral("否"),report.vacuum_completed?QStringLiteral("是"):QStringLiteral("否"));
             }else{
-                phase(IndexStoragePhase::Backup);
-                const auto report=compactIndexStorage(path,backup,cancellation.get(),phase);
+                const auto report=compactIndexStorage(path,"",cancellation.get(),phase);
                 result->before=report.before;result->after=report.after;result->sizes=true;
-                result->message=QStringLiteral("空间整理完成。恢复备份已保留；总空间包含备份。");
+                result->message=QStringLiteral("空间整理完成；本次未创建备份。");
             }
         }catch(const std::exception& e){
-            result->message+=QStringLiteral("\n索引维护未完成：%1。保留已有备份。").arg(QString::fromUtf8(e.what()));
+            result->message+=QStringLiteral("\n索引维护未完成：%1。").arg(QString::fromUtf8(e.what()));
             try{result->after=readIndexStorage(path);result->sizes=result->before.page_size>0 && result->after.page_size>0;}catch(const std::exception&){}
         }
         if(compact_operation) {
-            result->message+=QStringLiteral("\n恢复备份已验证：%1；VACUUM 已完成：%2。").arg(result->backup_verified?QStringLiteral("是"):QStringLiteral("否"),result->vacuum_completed?QStringLiteral("是"):QStringLiteral("否"));
-            if(QFileInfo::exists(fromUtf8(backup)))result->message+=QStringLiteral("\n本次备份文件：%1").arg(QFileInfo(fromUtf8(backup)).fileName());
+            result->message+=QStringLiteral("\nVACUUM 已完成：%1。").arg(result->vacuum_completed?QStringLiteral("是"):QStringLiteral("否"));
         }
     });
     connect(worker_thread_,&QThread::finished,this,[this,result]{

@@ -5,6 +5,7 @@
 #include <QString>
 
 #include <algorithm>
+#include <tuple>
 
 namespace everything_lite {
 
@@ -80,6 +81,7 @@ void SearchResultModel::setResults(std::vector<SearchResult> results) {
     beginResetModel();
     results_.clear();
     membership_.clear();
+    path_membership_.clear();
     appendUniqueResults(std::move(results));
     applySort();
     endResetModel();
@@ -100,15 +102,35 @@ void SearchResultModel::clearResults() {
     beginResetModel();
     results_.clear();
     membership_.clear();
+    path_membership_.clear();
     endResetModel();
 }
 
 void SearchResultModel::appendUniqueResults(std::vector<SearchResult> results) {
+    auto priority=[](const SearchResult& row) {
+        int status=0;
+        switch(row.source_status) {
+            case SourceStatus::Accessible: status=3; break;
+            case SourceStatus::Unverified: status=2; break;
+            case SourceStatus::Failed: status=1; break;
+            case SourceStatus::Offline: break;
+        }
+        return std::make_tuple(status,row.file.cloud_copy!=CloudCopy::RemoteOnly,
+                               row.source_last_success,row.file.source_id);
+    };
     for (auto& row : results) {
         const auto& file = row.file;
         // Legacy/manual rows without a complete identity remain independent.
         if (file.source_id > 0 && !file.relative_path.empty()
             && !membership_.emplace(file.source_id, file.relative_path).second) continue;
+        if(file.source_id>0 && !file.relative_path.empty() && !file.path.empty()) {
+            const auto found=path_membership_.find(file.path);
+            if(found!=path_membership_.end()) {
+                if(priority(row)>priority(results_[found->second]))results_[found->second]=std::move(row);
+                continue;
+            }
+            path_membership_.emplace(file.path,results_.size());
+        }
         results_.push_back(std::move(row));
     }
 }
@@ -151,6 +173,11 @@ void SearchResultModel::applySort() {
         if (cmp == 0) cmp = a.file.path.compare(b.file.path);
         return order == Qt::AscendingOrder ? cmp < 0 : cmp > 0;
     });
+    path_membership_.clear();
+    for(std::size_t i=0;i<results_.size();++i) {
+        const auto& file=results_[i].file;
+        if(file.source_id>0 && !file.relative_path.empty() && !file.path.empty())path_membership_.emplace(file.path,i);
+    }
 }
 
 QString SearchResultModel::formatSize(std::uint64_t bytes) {

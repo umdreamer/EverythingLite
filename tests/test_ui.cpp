@@ -256,7 +256,7 @@ class UiTest : public QObject {
         SearchResultModel model;
         auto row=[](std::int64_t source,const std::string& relative,const std::string& name) {
             SearchResult result; result.file.source_id=source; result.file.relative_path=relative;
-            result.file.name=name; result.file.path="/synthetic/shared/"+relative;
+            result.file.name=name; result.file.path="/synthetic/source"+std::to_string(source)+"/"+relative;
             return result;
         };
         const auto first=row(1,"same.txt","first"), second=row(2,"same.txt","second");
@@ -279,6 +279,21 @@ class UiTest : public QObject {
         model.appendResults({second}); QCOMPARE(model.rowCount(),2);
         model.clearResults(); model.appendResults({first,first,second});
         QCOMPARE(model.rowCount(),2);
+    }
+    void searchResultsShowOnePathAndPreferAccessibleSource() {
+        SearchResult offline,live;
+        offline.file.source_id=1;offline.file.relative_path="shared.txt";
+        offline.file.path="/synthetic/shared.txt";offline.file.parent_path="/synthetic";
+        offline.file.name="shared.txt";offline.source_status=SourceStatus::Offline;
+        live=offline;live.file.source_id=2;live.source_status=SourceStatus::Accessible;
+        SearchResultModel model;model.setResults({offline,live});
+        QCOMPARE(model.rowCount(),1);
+        QCOMPARE(model.pathAt(0),QStringLiteral("/synthetic/shared.txt"));
+        QCOMPARE(model.data(model.index(0,5)).toString(),QStringLiteral("上次可用"));
+        model.appendResults({offline,live});QCOMPARE(model.rowCount(),1);
+        model.setResults({offline});model.sort(0,Qt::AscendingOrder);
+        model.appendResults({live});QCOMPARE(model.rowCount(),1);
+        QCOMPARE(model.data(model.index(0,5)).toString(),QStringLiteral("上次可用"));
     }
     void workerRejectsChangedPageRevision() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); const auto path=dir.filePath("paging.db").toStdString();

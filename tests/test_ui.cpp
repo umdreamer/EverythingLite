@@ -1468,6 +1468,15 @@ class UiTest : public QObject {
         QCOMPARE(rules.directories,std::vector<std::string>{"/synthetic/offline-folder"});
         QCOMPARE(rules.files,std::vector<std::string>{"/synthetic/offline-file.txt"});
     }
+    void exclusionSettingsShowsSaveProgress() {
+        ExclusionSettingsDialog dialog({}); dialog.show();
+        dialog.setSaving(true);
+        auto* progress=dialog.findChild<QLabel*>(QStringLiteral("exclusionSaving"));
+        QVERIFY(progress && progress->isVisible());
+        QVERIFY(progress->text().contains(QStringLiteral("正在保存")));
+        dialog.setSaving(false);
+        QVERIFY(progress->isHidden());
+    }
     void exclusionSettingsKeepsEditsWhenIndexing() {
         MainWindow window; window.watcher_->stop();
         QAction* action=nullptr;

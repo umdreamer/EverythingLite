@@ -26,6 +26,7 @@ private:
     QPlainTextEdit* folder_filter_ = nullptr;
     QPlainTextEdit* file_filter_ = nullptr;
     QLabel* error_ = nullptr;
+    QLabel* saving_ = nullptr;
 };
 
 } // namespace everything_lite

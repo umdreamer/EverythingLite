@@ -72,6 +72,8 @@ ExclusionSettingsDialog::ExclusionSettingsDialog(const ExclusionRules& rules,QWi
     addFilter(QStringLiteral("排除文件过滤器（分号分隔，可用 *、**、?、regex:）"),rules.file_filter,file_filter_,QStringLiteral("fileFilterEdit"));
     error_=new QLabel(this);error_->setObjectName(QStringLiteral("exclusionError"));
     error_->setWordWrap(true);error_->setStyleSheet(QStringLiteral("color: #b00020;"));layout->addWidget(error_);
+    saving_=new QLabel(QStringLiteral("正在保存排除规则并清理索引…"),this);
+    saving_->setObjectName(QStringLiteral("exclusionSaving"));saving_->hide();layout->addWidget(saving_);
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel,this);
     connect(buttons,&QDialogButtonBox::accepted,this,&ExclusionSettingsDialog::accept);
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);
@@ -103,6 +105,7 @@ void ExclusionSettingsDialog::showError(const QString& message) {
 }
 
 void ExclusionSettingsDialog::setSaving(bool saving) {
+    saving_->setVisible(saving);
     setEnabled(!saving);
 }
 

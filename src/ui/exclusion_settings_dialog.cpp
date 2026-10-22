@@ -5,6 +5,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -37,10 +38,17 @@ ExclusionSettingsDialog::ExclusionSettingsDialog(const ExclusionRules& rules,QWi
         for(const auto& path:initial) addUnique(list,QString::fromUtf8(path.c_str()));
         group_layout->addWidget(list);
         auto* row=new QHBoxLayout();
-        auto* add=new QPushButton(directory?QStringLiteral("添加目录…"):QStringLiteral("添加文件…"),group);
+        auto* input=new QLineEdit(group);
+        input->setObjectName(directory?QStringLiteral("excludedDirectoryInput"):QStringLiteral("excludedFileInput"));
+        input->setPlaceholderText(QStringLiteral("输入绝对路径，也可选择…"));
+        auto* add=new QPushButton(QStringLiteral("添加"),group);
+        auto* choose=new QPushButton(QStringLiteral("选择…"),group);
         auto* remove=new QPushButton(QStringLiteral("移除所选"),group);
-        row->addWidget(add);row->addWidget(remove);row->addStretch();group_layout->addLayout(row);
-        connect(add,&QPushButton::clicked,this,[this,list,directory]{
+        row->addWidget(input,1);row->addWidget(add);row->addWidget(choose);row->addWidget(remove);group_layout->addLayout(row);
+        auto addTyped=[list,input]{addUnique(list,input->text());input->clear();};
+        connect(add,&QPushButton::clicked,this,addTyped);
+        connect(input,&QLineEdit::returnPressed,this,addTyped);
+        connect(choose,&QPushButton::clicked,this,[this,list,directory]{
             const auto path=directory
                 ? QFileDialog::getExistingDirectory(this,QStringLiteral("选择排除目录"))
                 : QFileDialog::getOpenFileName(this,QStringLiteral("选择排除文件"));

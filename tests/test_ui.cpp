@@ -2,6 +2,7 @@
 #include "ui/search_result_model.h"
 #include "ui/search_worker.h"
 #include "ui/index_storage_dialog.h"
+#include "ui/exclusion_settings_dialog.h"
 #include "core/index_manager.h"
 #include <QAction>
 #include <QApplication>
@@ -1453,6 +1454,19 @@ class UiTest : public QObject {
         QVERIFY(!invalid->findChild<QLabel*>(QStringLiteral("exclusionError"))->text().isEmpty());
         QCOMPARE(manager.database().exclusionPolicy().revision,revision);
         invalid->reject();
+    }
+    void exclusionSettingsAcceptsTypedPathsWithoutFilesystemPicker() {
+        ExclusionSettingsDialog dialog({});
+        auto* directory=dialog.findChild<QLineEdit*>(QStringLiteral("excludedDirectoryInput"));
+        auto* file=dialog.findChild<QLineEdit*>(QStringLiteral("excludedFileInput"));
+        QVERIFY(directory && file);
+        directory->setText(QStringLiteral("/synthetic/offline-folder"));
+        QTest::keyClick(directory,Qt::Key_Return);
+        file->setText(QStringLiteral("/synthetic/offline-file.txt"));
+        QTest::keyClick(file,Qt::Key_Return);
+        const auto rules=dialog.rules();
+        QCOMPARE(rules.directories,std::vector<std::string>{"/synthetic/offline-folder"});
+        QCOMPARE(rules.files,std::vector<std::string>{"/synthetic/offline-file.txt"});
     }
     void exclusionSettingsKeepsEditsWhenIndexing() {
         MainWindow window; window.watcher_->stop();

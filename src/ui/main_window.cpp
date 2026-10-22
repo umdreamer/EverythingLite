@@ -1265,7 +1265,11 @@ void MainWindow::scheduleFilesystemResultRefresh() {
 }
 
 void MainWindow::rebuildIndex() {
-    if (worker_thread_ || storage_maintenance_ || closing_) return;
+    if (closing_) return;
+    if (worker_thread_ || storage_maintenance_) {
+        statusBar()->showMessage(QStringLiteral("索引任务正在运行，请稍后重建。"),8000);
+        return;
+    }
     if (roots_.isEmpty()) {
         editRoots();
         if (roots_.isEmpty()) return;
@@ -1284,7 +1288,9 @@ void MainWindow::rebuildIndex() {
     armRetryTimer();
     const auto roots = roots_;
     const auto db_path = db_path_;
-    startWorker([this, roots, db_path] {
+    auto errors=std::make_shared<QStringList>();
+    statusBar()->showMessage(QStringLiteral("正在重建索引：%1 个目录…").arg(roots.size()));
+    startWorker([this, roots, db_path, errors] {
         QStringList configured;
         for(const auto& root:roots) {
             const auto normalized=fromUtf8(normalizePath(toUtf8(root)));
@@ -1306,10 +1312,16 @@ void MainWindow::rebuildIndex() {
                     : stats.error.empty() ? QStringLiteral("扫描未完整完成") : fromUtf8(stats.error);
             } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); }
             catch (...) { error = QStringLiteral("未知同步错误"); }
+            if(!error.isEmpty())errors->push_back(QStringLiteral("%1：%2").arg(root,error));
             QMetaObject::invokeMethod(this, [this, root, error] { if (!closing_) reportSyncOutcome(root, root, true, error); }, Qt::QueuedConnection);
         }
     }, name_search_ready_ ? QStringLiteral("正在准备索引…")
-                          : QStringLiteral("正在准备索引；完成后将一次性建立名称加速索引…"));
+                          : QStringLiteral("正在准备索引；完成后将一次性建立名称加速索引…"),true,
+        [this,errors](const QString& error){
+            if(!error.isEmpty() || !errors->isEmpty())
+                statusBar()->showMessage(QStringLiteral("重建未完成：%1").arg(!error.isEmpty()?error:errors->join(QStringLiteral("；"))),15000);
+            else statusBar()->showMessage(QStringLiteral("重建完成：索引现有 %1 项。").arg(indexed_count_),15000);
+        });
 }
 
 void MainWindow::editRoots() {

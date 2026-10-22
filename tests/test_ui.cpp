@@ -551,6 +551,24 @@ class UiTest : public QObject {
         QVERIFY(!window.sync_errors_.isEmpty()); QVERIFY(!window.sync_error_label_->isHidden());
         QVERIFY(window.sync_error_label_->text().contains(QStringLiteral("保留缓存")));
     }
+    void manualRebuildShowsBusyAndCompletionFeedback() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto saved=qgetenv("EVERYTHING_LITE_DB");
+        qputenv("EVERYTHING_LITE_DB",dir.filePath("index.db").toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",saved); window.watcher_->stop();
+        window.roots_={dir.path()};
+        auto release=std::make_shared<QSemaphore>();
+        window.startWorker([release]{release->acquire();},QStringLiteral("busy"));
+        window.rebuildIndex();
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("正在运行")));
+        release->release(); QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,5000);
+        QFile file(dir.filePath("new.txt")); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        window.rebuildIndex();
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("正在重建")));
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        Database db(window.db_path_.toStdString()); QVERIFY(!db.search("new.txt").empty());
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("重建完成")));
+    }
     void manualRetryRenewsExhaustedSourceBudget() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.filePath("paused");
         QVERIFY(QDir().mkpath(root));

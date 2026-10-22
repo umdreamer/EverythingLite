@@ -1333,19 +1333,10 @@ void MainWindow::editRoots() {
 
 void MainWindow::showIndexStatus() {
     if(storage_maintenance_){status_label_->setText(QStringLiteral("索引维护进行中；完成后可读取索引状态。"));return;}
-    refreshStats();
-    try {
-        Database db(toUtf8(db_path_));
-        db.initialize();
-        name_search_count_ = name_search_available_ ? db.nameSearchIndexCount() : 0;
-    } catch (...) {
-        name_search_count_ = 0;
-    }
     QStringList details;
     details << QStringLiteral("版本：%1").arg(QString::fromLatin1(EVERYTHING_LITE_VERSION));
     details << QStringLiteral("数据库：%1").arg(db_path_);
-    details << QStringLiteral("文件记录：%1").arg(indexed_count_);
-    details << QStringLiteral("名称 FTS 记录：%1").arg(name_search_count_);
+    details << QStringLiteral("文件记录（最近统计）：%1").arg(indexed_count_);
     details << QStringLiteral("名称索引状态：%1").arg(
         !name_search_available_ ? QStringLiteral("unavailable") :
         !name_search_ready_ ? QStringLiteral("not ready") : QStringLiteral("ready"));

@@ -236,6 +236,21 @@ class UiTest : public QObject {
         QVERIFY2(!opened,"Database menus must not open synchronous dialogs during maintenance");
         QVERIFY(window.status_label_->text().contains(QStringLiteral("维护")));
     }
+    void indexStatusUsesCachedCountsWithoutOpeningDatabase() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto path=dir.filePath("status.db");
+        const auto saved=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",saved); window.watcher_->stop();
+        QVERIFY(QFile::remove(path));
+        QString text;
+        QTimer::singleShot(0,[&]{
+            if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                text=box->text();box->accept();
+            }
+        });
+        window.showIndexStatus();
+        QVERIFY(!QFile::exists(path));
+        QVERIFY(text.contains(QStringLiteral("最近统计")));
+    }
     void paginationDeduplicatesStructuredIdentity() {
         SearchResultModel model;
         auto row=[](std::int64_t source,const std::string& relative,const std::string& name) {

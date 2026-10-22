@@ -149,7 +149,6 @@ private:
     bool name_search_ready_ = false;
     std::atomic_bool indexing_{false};
     std::uint64_t indexed_count_ = 0;
-    std::uint64_t name_search_count_ = 0;
     std::uint64_t search_request_id_ = 0;
     QString last_search_query_;
     double last_search_elapsed_ms_ = 0.0;

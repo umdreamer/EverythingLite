@@ -689,7 +689,7 @@ void MainWindow::loadSettings() {
 
     // Restore controls once after the 0.4.15 UI regression. Later user toggles
     // in the View menu remain persistent.
-    const bool restore_controls = !settings.value(QStringLiteral("view/restoredControls0415Fixbug"), false).toBool();
+    const bool restore_controls = !settings.value(QStringLiteral("view/restoredControls0415Fixbug2"), false).toBool();
     const bool show_status = restore_controls || settings.value(QStringLiteral("view/statusBar"), true).toBool();
     const bool show_scope = restore_controls || settings.value(QStringLiteral("view/scopeBar"), true).toBool();
     const bool show_filter = restore_controls || settings.value(QStringLiteral("view/filterBar"), true).toBool();
@@ -699,7 +699,7 @@ void MainWindow::loadSettings() {
     statusBar()->setVisible(show_status);
     scope_label_->setVisible(show_scope);
     scope_combo_->setVisible(show_filter);
-    if (restore_controls) settings.setValue(QStringLiteral("view/restoredControls0415Fixbug"), true);
+    if (restore_controls) settings.setValue(QStringLiteral("view/restoredControls0415Fixbug2"), true);
 
     const auto geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
     if (!geometry.isEmpty()) restoreGeometry(geometry);

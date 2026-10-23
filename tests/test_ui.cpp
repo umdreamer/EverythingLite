@@ -92,6 +92,7 @@ class UiTest : public QObject {
         settings.setValue("view/filterBar", false);
         settings.setValue("view/scopeBar", false);
         settings.remove("view/restoredControls0415Fixbug");
+        settings.remove("view/restoredControls0415Fixbug2");
         MainWindow window;
         window.show();
         QVERIFY(window.statusBar()->isVisible());

@@ -31,8 +31,9 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
         : watcher_ ? QString::fromUtf8(watcher_->lastError().c_str()) : QString{};
     if (!error.isEmpty()) {
         watcher_error_ = error;
-        watcher_error_label_->setText(error);
-        watcher_error_label_->show();
+        watcher_error_label_->setText(QStringLiteral("监听异常"));
+        watcher_error_label_->setToolTip(error);
+        watcher_error_label_->setStyleSheet(QStringLiteral("color: #b33"));
     }
     if (event.path.empty()) return;
     const auto path = QString::fromUtf8(event.path.c_str());
@@ -40,8 +41,9 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     if (root.isEmpty()) return;
     if (event.needs_full_rescan && error.isEmpty()) {
         watcher_error_.clear();
-        watcher_error_label_->clear();
-        watcher_error_label_->hide();
+        watcher_error_label_->setText(QStringLiteral("监听正常"));
+        watcher_error_label_->setToolTip(QString{});
+        watcher_error_label_->setStyleSheet(QString{});
     }
 
     const auto queuePath = [this, &root](const QString& candidate) {
@@ -253,10 +255,12 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
     const auto message = sync_errors_.isEmpty() ? QString{}
         : QStringLiteral("同步失败（保留缓存；最多自动重试两次，新事件可重试）：%1")
             .arg(sync_errors_.values().join(QStringLiteral("；")));
-    sync_error_label_->setText(message);
-    sync_error_label_->setVisible(!message.isEmpty());
-    if (!message.isEmpty()) statusBar()->showMessage(message);
-    else statusBar()->clearMessage();
+    sync_error_label_->setText(sync_errors_.isEmpty()
+        ? QStringLiteral("同步正常") : QStringLiteral("同步失败 %1").arg(sync_errors_.size()));
+    sync_error_label_->setToolTip(message);
+    sync_error_label_->setStyleSheet(sync_errors_.isEmpty() ? QString{} : QStringLiteral("color: #b33"));
+    if (!message.isEmpty()) statusBar()->showMessage(QStringLiteral("索引同步失败；详情见“工具 → 索引状态”"), 10000);
+    else if (statusBar()->currentMessage().startsWith(QStringLiteral("索引同步失败"))) statusBar()->clearMessage();
 }
 
 QString MainWindow::rootForPath(const QString& path) const {

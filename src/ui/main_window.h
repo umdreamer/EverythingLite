@@ -4,6 +4,7 @@
 #include "platform/file_watcher.h"
 
 #include <QMainWindow>
+#include <QLabel>
 #include <QPointer>
 #include <QSet>
 #include <QHash>
@@ -34,8 +35,21 @@ class QTableView;
 class QThread;
 class QTimer;
 class QWidget;
+class QPaintEvent;
 
 namespace everything_lite {
+
+class ElidedLabel final : public QLabel {
+public:
+    using QLabel::QLabel;
+    void setText(const QString& value) {
+        QLabel::setText(value);
+        setToolTip(value);
+    }
+    QString displayText() const;
+protected:
+    void paintEvent(QPaintEvent* event) override;
+};
 
 class DesktopActions;
 class SearchResultModel;
@@ -85,7 +99,8 @@ private:
     QCheckBox* match_path_check_ = nullptr;
     QCheckBox* include_hidden_check_ = nullptr;
     QLabel* scope_label_ = nullptr;
-    QLabel* status_label_ = nullptr;
+    ElidedLabel* status_label_ = nullptr;
+    QLabel* search_metrics_label_ = nullptr;
     QLabel* watcher_error_label_ = nullptr;
     QString watcher_error_;
     QLabel* sync_error_label_ = nullptr;
@@ -103,7 +118,7 @@ private:
     QSet<QString> dormant_rescan_roots_;
     std::uint64_t watcher_generation_ = 0;
     DesktopActions* desktop_actions_ = nullptr;
-    QLabel* search_state_label_ = nullptr;
+    ElidedLabel* search_state_label_ = nullptr;
     QTableView* table_ = nullptr;
     SearchResultModel* model_ = nullptr;
     QTimer* search_timer_ = nullptr;

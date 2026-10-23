@@ -103,8 +103,8 @@ class UiTest : public QObject {
         window.search_edit_->setText("item");
         window.runSearch();
         QTRY_VERIFY(!window.search_in_flight_);
-        QVERIFY(window.status_label_->text().contains(QStringLiteral("ms")));
-        QVERIFY(window.status_label_->text().contains(QStringLiteral("已加载")));
+        QVERIFY(window.search_metrics_label_->text().contains(QStringLiteral("ms")));
+        QVERIFY(window.search_metrics_label_->text().contains(QStringLiteral("结果")));
     }
     void previousRestoreMarkerDoesNotKeepControlsHidden() {
         auto settings = makeAppSettings();
@@ -143,6 +143,9 @@ class UiTest : public QObject {
         settings.setValue("search/includeHidden", true);
         settings.setValue("search/folderScope", QString{});
         settings.setValue("table/sortOrder", static_cast<int>(Qt::AscendingOrder));
+        settings.setValue("view/statusBar", true);
+        settings.setValue("view/scopeBar", true);
+        settings.setValue("view/filterBar", true);
     }
     void storageMenuOpensAsyncReport() {
         MainWindow window; window.watcher_->stop();
@@ -636,7 +639,31 @@ class UiTest : public QObject {
         MainWindow window; window.watcher_->stop(); window.roots_={dir.filePath("absent")};
         window.rebuildIndex(); QTRY_VERIFY(!window.worker_thread_);
         QVERIFY(!window.sync_errors_.isEmpty()); QVERIFY(!window.sync_error_label_->isHidden());
-        QVERIFY(window.sync_error_label_->text().contains(QStringLiteral("保留缓存")));
+        QVERIFY(window.sync_error_label_->toolTip().contains(QStringLiteral("保留缓存")));
+    }
+    void syncFailureKeepsFixedSingleLineStatusSections() {
+        MainWindow window;
+        window.show();
+        window.watcher_->stop();
+        QVERIFY(window.search_metrics_label_);
+        window.search_metrics_label_->setText(QStringLiteral("结果 7 · 12.3 ms"));
+        const auto metrics = window.search_metrics_label_->text();
+        const auto path = QStringLiteral("/synthetic/very/long/directory/name/that/should/not/stretch/the/status/bar");
+        window.reportSyncOutcome(path, path, true, QStringLiteral("synthetic synchronization failure"));
+        QCOMPARE(window.search_metrics_label_->text(), metrics);
+        QVERIFY(window.search_metrics_label_->isVisible());
+        QVERIFY(!window.sync_error_label_->wordWrap());
+        QVERIFY(window.sync_error_label_->maximumWidth() <= 140);
+        QVERIFY(!window.sync_error_label_->text().contains(path));
+        QVERIFY(window.sync_error_label_->toolTip().contains(path));
+        window.scheduleFileEvent({{}, false, "synthetic watcher failure with a long path"});
+        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("监听异常"));
+        QVERIFY(window.watcher_error_label_->toolTip().contains(QStringLiteral("long path")));
+        QVERIFY(!window.watcher_error_label_->wordWrap());
+        window.status_label_->resize(110, window.status_label_->height());
+        window.status_label_->setText(path);
+        QVERIFY(window.status_label_->displayText().endsWith(QChar(0x2026)));
+        QVERIFY(window.statusBar()->height() <= window.fontMetrics().height() * 2 + 16);
     }
     void manualRebuildShowsBusyAndCompletionFeedback() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -886,7 +913,7 @@ class UiTest : public QObject {
         window.selectFolderScope(new_root);
         QVERIFY(window.roots_.contains(new_root));
         QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
-        QVERIFY2(window.sync_error_label_->text().isEmpty(),qPrintable(window.sync_error_label_->text()));
+        QCOMPARE(window.sync_error_label_->text(), QStringLiteral("同步正常"));
         Database indexed(db_path.toStdString());
         QVERIFY2(indexed.totalFileCount()>=2,qPrintable(window.status_label_->text()));
         QTRY_VERIFY_WITH_TIMEOUT(window.search_request_id_>0,5000);
@@ -1507,7 +1534,7 @@ class UiTest : public QObject {
         QVERIFY(!window.watcher_error_.isEmpty());
         window.scheduleFileEvent(FileEvent{fixture_root.toStdString(), true, {}});
         QVERIFY(window.watcher_error_.isEmpty());
-        QVERIFY(window.watcher_error_label_->isHidden());
+        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("监听正常"));
     }
     void watcherErrorSurvivesStatisticsAndSearch() {
         MainWindow window;
@@ -1522,7 +1549,8 @@ class UiTest : public QObject {
         window.search_edit_->setText("alpha");
         window.runSearch();
         QTRY_COMPARE(window.model_->rowCount(), 1);
-        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("synthetic watcher failure"));
+        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("监听异常"));
+        QCOMPARE(window.watcher_error_label_->toolTip(), QStringLiteral("synthetic watcher failure"));
         QVERIFY(!window.watcher_error_label_->isHidden());
     }
     void cliAndGuiShareExclusionPolicy() {

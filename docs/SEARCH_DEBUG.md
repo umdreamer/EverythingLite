@@ -25,13 +25,13 @@ Everything Lite 0.4.9 [SEARCH TRACE]
 在 GUI 中依次输入，并等待结果稳定：
 
 ```text
-砀例甲
-示例工匠
-示例乙
+研究生
+机器学习
+微流控
 pdf
 ```
 
-其中前两个是已知问题词，`示例乙` 或已确认能正常找到的词用于对照，`pdf` 用于 ASCII/FTS 对照。
+其中前两个是已知问题词，`微流控` 或你确认能正常找到的词用于对照，`pdf` 用于 ASCII/FTS 对照。
 
 每个关键词输入完成后可再按一次 Enter，强制重查一次当前关键词。
 
@@ -43,7 +43,7 @@ pdf
 debug-logs/search-trace-YYYYMMDD-HHMMSS.log
 ```
 
-测试完成后关闭 GUI，仅使用合成数据复现；日志在分享前必须脱敏。
+测试完成后关闭 GUI，把最新的 `.log` 文件发给 ChatGPT 即可。
 
 ## 5. 最重要的日志标记
 
@@ -66,8 +66,8 @@ debug-logs/search-trace-YYYYMMDD-HHMMSS.log
 ```bash
 ./build-macos/everything-lite-cli \
   --trace-search \
-  --db "$HOME/Library/Application Support/CICHI/Everything Lite/everything-lite.db" \
-  probe-search '砀例甲' --limit 1001
+  --db "/Users/example/Library/Application Support/Everything Lite/everything-lite.db" \
+  probe-search '研究生' --limit 1001
 ```
 
 这个命令只输出摘要和前 5 个结果，适合直接粘贴日志。

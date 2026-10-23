@@ -19,8 +19,8 @@ mkdir -p "$LOG_DIR"
 echo "Everything Lite 搜索调试模式"
 echo "程序：$BIN"
 echo "日志：$LOG_FILE"
-echo "请在 GUI 中输入出现问题的关键词（例如：砀例甲、示例工匠）。"
-echo "终端会实时显示搜索全过程；测试完后关闭 GUI，分享前检查并脱敏日志。"
+echo "请在 GUI 中输入出现问题的关键词（例如：研究生、机器学习）。"
+echo "终端会实时显示搜索全过程；测试完后关闭 GUI，再把日志文件发给我。"
 echo
 
 set +e

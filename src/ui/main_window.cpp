@@ -166,6 +166,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     searchTrace("GUI", "MainWindow db=\"" + toUtf8(db_path_) + "\"");
 
     buildUi();
+
+    // v0.4.10: pay the one-time database/SearchEngine initialization cost
+    // before the window becomes interactive, then reuse the same service for
+    // every search. Previously every query rebuilt SearchService, which in
+    // turn reran Database::initialize() and made the first search feel much
+    // heavier than later searches. Keep startup robust: if initialization
+    // fails here, launchSearch() will retry inside its normal exception path.
+    try {
+        search_service_ = std::make_unique<SearchService>(toUtf8(db_path_));
+    } catch (const std::exception& e) {
+        searchTrace("GUI", std::string("SearchService startup init failed: ") + e.what());
+    }
+
     buildMenus();
     loadSettings();
     if (searchTraceEnabled()) {
@@ -240,9 +253,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     filesystem_refresh_timer_->setSingleShot(true);
     filesystem_refresh_timer_->setInterval(1800);
     connect(filesystem_refresh_timer_, &QTimer::timeout, this, [this] {
-        // v0.4.6: search is deliberately synchronous and uses the exact same
-        // SearchService as the CLI. File-system refreshes therefore cannot
-        // cancel, replace, or reinterpret a foreground query.
+        // v0.4.10: filesystem refresh must never compete with typing. Do not
+        // issue an expensive empty query and do not refresh while the user's
+        // debounce timer or IME composition is active.
+        if (search_ime_composing_ || (search_timer_ && search_timer_->isActive())) {
+            filesystem_refresh_timer_->start(1800);
+            return;
+        }
+        if (normalizeGuiQuery(search_edit_->text()).isEmpty()) return;
         runSearch();
     });
 
@@ -270,8 +288,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         }, QStringLiteral("首次升级：正在从现有数据库建立名称加速索引（无需重新扫描磁盘）…"));
     }
 
+    // v0.4.10: do not synchronously run an empty 1001-row search at startup.
+    // That query used to overlap with the user's first keystrokes and was the
+    // main source of the "first input" hitch. The first real query is started
+    // only after the user finishes typing (or presses Enter).
     search_edit_->setFocus();
-    runSearch();
+    model_->setResults({});
+    status_label_->setText(QStringLiteral("%1 个对象    ·    输入关键词开始搜索    ·    %2")
+        .arg(indexed_count_)
+        .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未监听")));
 }
 
 MainWindow::~MainWindow() {
@@ -331,7 +356,7 @@ void MainWindow::buildUi() {
     search_row->setSpacing(6);
 
     search_edit_ = new QLineEdit(this);
-    search_edit_->setPlaceholderText(QStringLiteral("搜索文件和文件夹…  例：report  ext:pdf  path:sample  size:>10m  modified:7d"));
+    search_edit_->setPlaceholderText(QStringLiteral("搜索文件和文件夹…  例：report  ext:pdf  path:research  size:>10m  modified:7d"));
     search_edit_->setClearButtonEnabled(true);
     search_edit_->setMinimumHeight(34);
 
@@ -730,14 +755,20 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
         QElapsedTimer timer;
         timer.start();
 
-        SearchService service(toUtf8(db_path_));
+        // v0.4.10: reuse the service initialized once in the constructor.
+        // Database searches still open their own short-lived SQLite read
+        // connection, but schema/FTS initialization is no longer repeated for
+        // every keystroke-triggered query.
+        if (!search_service_) {
+            search_service_ = std::make_unique<SearchService>(toUtf8(db_path_));
+        }
         SearchOptions options;
         if (item_scope == 1) options.scope = SearchItemScope::Files;
         else if (item_scope == 2) options.scope = SearchItemScope::Folders;
         else options.scope = SearchItemScope::All;
         options.match_path = match_path;
 
-        auto results = service.search(toUtf8(normalized_query), effective_limit, offset, options);
+        auto results = search_service_->search(toUtf8(normalized_query), effective_limit, offset, options);
         last_search_raw_result_count_ = static_cast<int>(results.size());
         searchTrace("GUI-SEARCH", "SearchService returned=" + std::to_string(results.size()));
         if (searchTraceEnabled()) {
@@ -883,7 +914,7 @@ void MainWindow::showIndexStatus() {
         !name_search_available_ ? QStringLiteral("unavailable") :
         !name_search_ready_ ? QStringLiteral("not ready") : QStringLiteral("ready"));
     if (name_search_ready_) {
-        details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（对 large项可能需要一些时间）");
+        details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（对 262 万项可能需要一些时间）");
     }
     details << QStringLiteral("监听后端：%1").arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未启动"));
     if (!last_search_query_.isNull()) {
@@ -914,7 +945,7 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("模型当前行数：%1").arg(model_ ? model_->rowCount() : 0);
     details << QStringLiteral("查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);
     details << QStringLiteral("待处理搜索：否");
-    details << QStringLiteral("搜索执行方式：输入完成后延迟搜索（800 ms）+ IME 组词保护 + GUI 主线程同步（v0.4.9）");
+    details << QStringLiteral("搜索执行方式：输入完成后延迟搜索（800 ms）+ IME 组词保护 + 启动不空查 + SearchService 复用（v0.4.10）");
     details << QStringLiteral("终端 Trace：%1").arg(searchTraceEnabled() ? QStringLiteral("已启用") : QStringLiteral("未启用"));
     details << QStringLiteral("CLI 探针：%1").arg(cliProbePath());
     QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));
@@ -1204,12 +1235,12 @@ void MainWindow::showSearchSyntax() {
         "Everything Lite v0.4 搜索语法\n\n"
         "report                 名称包含 report\n"
         "ext:pdf                PDF 文件/文件夹名后缀过滤\n"
-        "path:sample          完整路径包含 sample\n"
+        "path:research          完整路径包含 research\n"
         "type:file              仅文件\n"
         "type:dir               仅文件夹\n"
         "size:>100m             大于 100 MB\n"
         "modified:7d            最近 7 天修改\n"
-        "\"Example Collection\"   短语\n\n"
+        "\"Analytical Chemistry\"   短语\n\n"
         "多个条件可组合。普通关键词默认只匹配名称；“搜索 → 匹配路径”开启后才匹配完整路径。\n"
         "Match Case / Whole Word / Regex 将在 v0.6 搜索兼容版实现。"));
     box.exec();

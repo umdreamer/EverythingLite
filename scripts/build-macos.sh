@@ -20,7 +20,7 @@ fi
 # Widgets application.
 if ! brew --prefix qtbase >/dev/null 2>&1; then
   echo "Qt Base（含 Widgets/Concurrent）未安装。请执行：brew install qtbase" >&2
-  echo "如果已经执行过 brew install qt，qtbase 通常已经作为依赖安装。" >&2
+  echo "如果你已经执行过 brew install qt，qtbase 通常已经作为依赖安装。" >&2
   exit 1
 fi
 

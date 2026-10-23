@@ -2,7 +2,7 @@
 
 ## 版本定位
 
-v0.4.6 是一个“GUI / CLI 搜索一致性”修复版。真实 macOS 数据已经证明：同一数据库、同一关键词（例如“砀例甲”“示例工匠”），CLI 可以返回结果，但 GUI 曾出现 0 条结果。此版本暂时把性能放在第二位，优先保证 GUI 与 CLI 使用完全相同的搜索语义和核心入口。
+v0.4.6 是一个“GUI / CLI 搜索一致性”修复版。真实 macOS 数据已经证明：同一数据库、同一关键词（例如“研究生”“机器学习”），CLI 可以返回结果，但 GUI 曾出现 0 条结果。此版本暂时把性能放在第二位，优先保证 GUI 与 CLI 使用完全相同的搜索语义和核心入口。
 
 ## 核心改动
 
@@ -49,9 +49,9 @@ All / Files / Folders 与 Match Path 仍保留，但过滤条件由 SearchServic
 
 新增 SearchService 一致性回归：
 
-- `砀例甲`
-- `示例工匠`
-- `sample`
+- `研究生`
+- `机器学习`
+- `research`
 - `pdf`
 
 测试要求：
@@ -78,13 +78,13 @@ v0.4.6 明确采用“正确性优先”策略。若某些查询暂时需要数�
 GUI 测试：
 
 ```text
-砀例甲
-示例工匠
-深度工匠
+研究生
+机器学习
+深度学习
 人工智能
 软件工程
-示例乙
-示例丙
+微流控
+赛艇
 pdf
 2026
 ```
@@ -92,8 +92,8 @@ pdf
 CLI 对照：
 
 ```bash
-./build-macos/everything-lite-cli search '砀例甲' --limit 1001
-./build-macos/everything-lite-cli search '示例工匠' --limit 1001
+./build-macos/everything-lite-cli search '研究生' --limit 1001
+./build-macos/everything-lite-cli search '机器学习' --limit 1001
 ```
 
 GUI 默认第一页应与 CLI `--limit 1001` 的前 1000 条具有相同搜索语义；第 1001 条只用于判断是否还有下一页。

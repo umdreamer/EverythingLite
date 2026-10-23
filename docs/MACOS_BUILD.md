@@ -61,5 +61,5 @@ open build-macos/everything-lite.app
 或使用 CLI 自定义查询：
 
 ```bash
-./build-macos/everything-lite-cli benchmark "$HOME" 'ext:pdf' 'path:sample'
+./build-macos/everything-lite-cli benchmark "$HOME" 'ext:pdf' 'path:research'
 ```

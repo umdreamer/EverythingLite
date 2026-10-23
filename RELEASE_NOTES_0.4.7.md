@@ -2,7 +2,7 @@
 
 ## 目标
 
-0.4.7 不继续猜测“砀例甲”“示例工匠”等关键词为什么在 GUI 中漏搜，而是把 GUI 搜索全过程变成可观察日志。当前核心事实是：同一数据库、同一关键词，CLI 能返回结果，GUI 仍可能返回 0。这个版本的首要任务是取得足够证据，精确定位分叉发生在哪一层。
+0.4.7 不继续猜测“研究生”“机器学习”等关键词为什么在 GUI 中漏搜，而是把 GUI 搜索全过程变成可观察日志。当前核心事实是：同一数据库、同一关键词，CLI 能返回结果，GUI 仍可能返回 0。这个版本的首要任务是取得足够证据，精确定位分叉发生在哪一层。
 
 ## 新增：终端实时搜索日志
 
@@ -73,8 +73,8 @@ CLI 通过新的 `probe-search` 命令只输出摘要，不打印 1000 条完整
 ```bash
 ./build-macos/everything-lite-cli \
   --trace-search \
-  --db "$HOME/Library/Application Support/CICHI/Everything Lite/everything-lite.db" \
-  probe-search '砀例甲' --limit 1001
+  --db "/Users/example/Library/Application Support/Everything Lite/everything-lite.db" \
+  probe-search '研究生' --limit 1001
 ```
 
 输出包括：
@@ -82,8 +82,8 @@ CLI 通过新的 `probe-search` 命令只输出摘要，不打印 1000 条完整
 ```text
 PROBE_VERSION=0.4.7
 PROBE_DB=...
-PROBE_QUERY=砀例甲
-PROBE_QUERY_HEX=e7 a0 80 e4 be 8b e7 94 b2
+PROBE_QUERY=研究生
+PROBE_QUERY_HEX=e7 a0 94 e7 a9 b6 e7 94 9f
 PROBE_RESULT_COUNT=...
 ```
 

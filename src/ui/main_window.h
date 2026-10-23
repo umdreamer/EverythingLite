@@ -33,6 +33,7 @@ class QWidget;
 namespace everything_lite {
 
 class SearchResultModel;
+class SearchService;
 
 
 struct SearchBookmark {
@@ -61,6 +62,7 @@ private:
     QString db_path_;
     QStringList roots_;
     std::unique_ptr<FileWatcher> watcher_;
+    std::unique_ptr<SearchService> search_service_;
 
     QLineEdit* search_edit_ = nullptr;
     QComboBox* scope_combo_ = nullptr;

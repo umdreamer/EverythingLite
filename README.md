@@ -2,13 +2,17 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.9`（输入完成后搜索 / IME 防提前搜索版）
+当前版本：`0.4.10`（首输入卡顿修复 / SearchService 复用版）
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
 
 
-## 1. v0.4.9 输入完成后再搜索
+## 1. v0.4.10 首输入卡顿修复
+
+0.4.10 保留 0.4.8 的 UTF-8 查询修复和 0.4.9 的 800 ms/IME 输入保护。本版针对“程序刚启动后第一次输入明显卡顿、后续反而很快”的问题做两项调整：启动时不再同步执行空关键词的 1001 条查询；GUI 在启动阶段只初始化一次 SearchService，后续查询复用同一服务，不再每次重复执行 Database::initialize()。文件系统后台刷新在搜索框为空或用户正在输入/IME 组词时也不会触发前台搜索。
+
+## 2. v0.4.9 输入完成后再搜索
 
 0.4.9 保留 0.4.8 的 UTF-8 查询修复，不修改搜索结果语义。本版只调整 GUI 的搜索触发时机：用户连续输入时不立即查询，每次编辑都会重置 800 ms 单次计时器；只有最后一次输入后连续空闲 800 ms 才执行搜索。中文输入法处于拼音预编辑、候选选择等 IME composition 状态时会完全停止搜索计时，候选词正式提交后才重新计时。
 
@@ -22,20 +26,20 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 按 Enter            → 立即搜索（IME 组词期间除外）
 ```
 
-这样可以避免在输入 `砀例甲`、`示例工匠` 等词时，关键词尚未完成就启动同步数据库查询造成界面卡顿。后续 v0.5 的 Preferences 将把该延迟开放为可配置项。
+这样可以避免在输入 `研究生`、`机器学习` 等词时，关键词尚未完成就启动同步数据库查询造成界面卡顿。后续 v0.5 的 Preferences 将把该延迟开放为可配置项。
 
 ## 1. v0.4.8 UTF-8 查询解析修复
 
-0.4.8 根据真实 macOS GUI Trace 找到了 `砀例甲`、`示例工匠` 等关键词漏搜的根因：旧版 `splitQuery()` 对 UTF-8 字符串逐字节调用 `std::isspace()`，GUI locale 会把中文字符内部的 `0xA0` 字节误判为空白。现在查询拆词只识别 ASCII whitespace，因此中文 UTF-8 字节序列不会再被拆坏。
+0.4.8 根据真实 macOS GUI Trace 找到了 `研究生`、`机器学习` 等关键词漏搜的根因：旧版 `splitQuery()` 对 UTF-8 字符串逐字节调用 `std::isspace()`，GUI locale 会把中文字符内部的 `0xA0` 字节误判为空白。现在查询拆词只识别 ASCII whitespace，因此中文 UTF-8 字节序列不会再被拆坏。
 
 重点验证：
 
 ```text
-砀例甲
-示例工匠
-工匠
-匠
-砀例
+研究生
+机器学习
+学习
+习
+研究
 ```
 
 如需观察解析过程，可继续使用：
@@ -44,7 +48,7 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 ./scripts/run-macos-debug.sh
 ```
 
-正常 Trace 应显示 `砀例甲` 为 `terms=1`，完整 hex 为 `e7 a0 80 e4 be 8b e7 94 b2`。详细说明见 `RELEASE_NOTES_0.4.8.md`。
+正常 Trace 应显示 `研究生` 为 `terms=1`，完整 hex 为 `e7 a0 94 e7 a9 b6 e7 94 9f`。详细说明见 `RELEASE_NOTES_0.4.8.md`。
 
 ## 2. v0.4.7 Search Trace 诊断版
 
@@ -55,7 +59,7 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 ./scripts/run-macos-debug.sh
 ```
 
-在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.9 [SEARCH TRACE]`。在 GUI 中搜索 `砀例甲`、`示例工匠` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
+在当前版本使用调试脚本时，窗口标题应显示 `Everything Lite 0.4.10 [SEARCH TRACE]`。在 GUI 中搜索 `研究生`、`机器学习` 后，终端会同时打印 GUI 搜索参数、SQLite SQL/bind/结果、同进程 direct/instr 对照，并自动调用同一 build 下的 CLI 做独立进程对照。日志自动保存到 `debug-logs/`。完整说明见 `docs/SEARCH_DEBUG.md` 和 `RELEASE_NOTES_0.4.7.md`。
 
 ## 1.1 v0.4.6 重点
 
@@ -63,7 +67,7 @@ Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件�
 
 v0.4.6 针对真实 macOS 数据中“CLI 能找到、GUI 漏搜”的问题重构搜索入口。新增 `SearchService` 作为应用级唯一搜索服务：CLI `search` 和 GUI 默认查询都调用同一个 `SearchService::search()`，从源头避免两套搜索策略。
 
-为排除 Qt 异步调度、查询取消和 pending request 对结果的影响，v0.4.6 暂时把 GUI 搜索改为主线程同步执行。少数慢查询可能暂时让窗口短暂停顿，但当前验收标准是“该找到的必须找到”。等 GUI/CLI 结果在真实 large项数据库上稳定一致后，再恢复异步性能层。
+为排除 Qt 异步调度、查询取消和 pending request 对结果的影响，v0.4.6 暂时把 GUI 搜索改为主线程同步执行。少数慢查询可能暂时让窗口短暂停顿，但当前验收标准是“该找到的必须找到”。等 GUI/CLI 结果在真实 262 万项数据库上稳定一致后，再恢复异步性能层。
 
 本版同时修复 `size:<...` / `size:<=...` 查询中 `max_size` 参数被重复绑定的问题。
 
@@ -98,7 +102,7 @@ macOS 原生菜单栏
 名称                 所在位置              大小     修改时间
 ...
 ────────────────────────────────────────────────────────
-[private benchmark removed] 个对象 · 已加载 1000+ · 32 ms      全部 / 匹配路径
+2624110 个对象 · 已加载 1000+ · 32 ms      全部 / 匹配路径
 ```
 
 常用快捷键：
@@ -134,7 +138,7 @@ paper 2026
 例如：
 
 ```text
-path:sample
+path:research
 ```
 
 过滤文件 / 文件夹：
@@ -150,7 +154,7 @@ type:dir
 
 ```text
 ext:pdf
-path:sample
+path:research
 size:>100m
 modified:7d
 type:file
@@ -179,17 +183,17 @@ GUI 不把所有匹配项一次性复制到 Qt Model。每次加载 1000 条，�
 
 v0.4.6 起，GUI 与 CLI `search` 共用唯一 `SearchService`。GUI 不再自己选择中文/英文、FTS/INSTR 或 fallback。当前 GUI 搜索暂时同步执行，以搜索结果一致性为第一目标；性能优化继续后置。
 
-真实 v0.2 基线（约 [private benchmark removed] 项）：
+真实 v0.2 基线（约 2,624,110 项）：
 
 ```text
-Index time: [redacted] ms
-Index rate: [redacted] items/s
-pdf: [redacted] ms
-sample: [redacted] ms
-ext:pdf: [redacted] ms
-path:sample: [redacted] ms
-modified:7d: [redacted] ms
-size:>100m type:file: [redacted] ms
+Index time: 175479.6 ms
+Index rate: 14954 items/s
+pdf: 18153.846 ms
+2026: 16379.592 ms
+ext:pdf: 100.190 ms
+path:research: 8381.031 ms
+modified:7d: 20.281 ms
+size:>100m type:file: 20.967 ms
 ```
 
 v0.3 开始解决 `pdf / 2026` 这种名称任意子串全表扫描问题；v0.7 将进行 250 万～500 万项系统性性能优化。
@@ -243,9 +247,9 @@ v0.4 Bookmarks 保存：
 ```bash
 ./build-macos/everything-lite-cli benchmark "$HOME" \
   'pdf' \
-  'sample' \
+  '2026' \
   'ext:pdf' \
-  'path:sample' \
+  'path:research' \
   'modified:7d' \
   'size:>100m type:file'
 ```

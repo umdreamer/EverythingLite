@@ -65,7 +65,7 @@ namespace {
 // terms are UTF-8. Never pass arbitrary UTF-8 continuation bytes to locale-
 // sensitive character classification such as std::isspace(): in some locales
 // bytes such as 0xA0 are classified as whitespace even when they are the middle
-// byte of a valid Chinese character (for example, 砀 = E7 A0 80).
+// byte of a valid Chinese character (for example, 研 = E7 A0 94).
 //
 // Everything Lite currently defines token separators as ASCII whitespace only.
 // Keeping this test explicit makes query tokenization deterministic across GUI

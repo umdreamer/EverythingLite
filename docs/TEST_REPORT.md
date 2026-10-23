@@ -23,8 +23,8 @@ ctest --test-dir build-test --output-on-failure
 Core 自动测试继续覆盖：
 
 - 普通名称搜索；
-- 中文 `砀例甲` 名称搜索；
-- `path:砀例甲`；
+- 中文 `研究生` 名称搜索；
+- `path:研究生`；
 - FTS5 trigram 索引；
 - 查询取消；
 - 文件新增、删除与索引同步；
@@ -45,10 +45,10 @@ Core 自动测试继续覆盖：
 - 表格模型行数；
 - 查询耗时。
 
-`砀例甲` 的 UTF-8 应为：
+`研究生` 的 UTF-8 应为：
 
 ```text
-e7 a0 80 e4 be 8b e7 94 b2
+e7 a0 94 e7 a9 b6 e7 94 9f
 ```
 
 如果“核心返回”大于 0 但模型行数为 0，则问题位于 Qt Model/View 更新；如果核心返回为 0，则应继续检查 GUI 实际查询字节和 UI 过滤状态。
@@ -57,15 +57,15 @@ e7 a0 80 e4 be 8b e7 94 b2
 ## v0.4.5 回归
 
 - `searchReliable` 改为 SQLite `instr()` 子串匹配。
-- `searchCorrect("砀例甲")` 必须命中 `砀例甲示例文档.docx` 与 `砀例甲资料`。
-- `searchCorrect("示例工匠")` 必须命中 `示例工匠示例文件.pdf`。
+- `searchCorrect("研究生")` 必须命中 `研究生培养方案.docx` 与 `研究生资料`。
+- `searchCorrect("机器学习")` 必须命中 `机器学习课程资料.pdf`。
 - Core/CLI CTest 需 100% 通过。
 
 ## v0.4.6 搜索一致性回归
 
 - Core / CLI clean build：通过。
 - CTest：100% 通过。
-- 新增 SearchService 与 SearchEngine reference 逐项路径一致性测试：`砀例甲`、`示例工匠`、`sample`、`pdf`。
+- 新增 SearchService 与 SearchEngine reference 逐项路径一致性测试：`研究生`、`机器学习`、`research`、`pdf`。
 - 新增 SearchService Files / Folders scope 测试。
 - 新增 `size:<100b` 参数绑定回归测试。
-- 当前执行环境无 Qt6 Widgets/macOS SDK，因此 GUI 最终编译和真实 large项数据库验证仍由 macOS 实机完成。
+- 当前执行环境无 Qt6 Widgets/macOS SDK，因此 GUI 最终编译和真实 262 万项数据库验证仍由 macOS 实机完成。

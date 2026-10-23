@@ -51,7 +51,7 @@ Usage:
 
 Search syntax:
   ext:pdf              filter by extension
-  path:sample        path contains "sample"
+  path:research        path contains "research"
   size:>10m            file size; supports b/k/m/g/t and > >= < <=
   modified:7d          modified within the last 7 days (h/d/w)
   type:file | type:dir files or directories only
@@ -66,11 +66,11 @@ Database selection:
 
 Examples:
   everything-lite-cli db-path
-  everything-lite-cli --trace-search probe-search '砀例甲' --limit 1001
-  everything-lite-cli search '砀例甲' --limit 50
-  everything-lite-cli --db '/path/to/everything-lite.db' search '砀例甲'
-  everything-lite-cli search 'ext:pdf example'
-  everything-lite-cli search 'path:sample size:>10m type:file'
+  everything-lite-cli --trace-search probe-search '研究生' --limit 1001
+  everything-lite-cli search '研究生' --limit 50
+  everything-lite-cli --db '/path/to/everything-lite.db' search '研究生'
+  everything-lite-cli search 'ext:pdf transformer'
+  everything-lite-cli search 'path:research size:>10m type:file'
 )";
 }
 
@@ -255,7 +255,7 @@ int main(int argc, char** argv) {
             const auto root = fs::absolute(fs::path(args[1])).lexically_normal().string();
             std::vector<std::string> queries;
             for (std::size_t i = 2; i < args.size(); ++i) queries.emplace_back(args[i]);
-            if (queries.empty()) queries = {"pdf", "sample", "type:file"};
+            if (queries.empty()) queries = {"pdf", "2026", "type:file"};
 
             const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
             const auto bench_dir = fs::temp_directory_path() / ("everything-lite-benchmark-" + std::to_string(stamp));

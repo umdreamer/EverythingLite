@@ -2,7 +2,7 @@
 
 ## 定位
 
-本版本只处理搜索正确性，不扩展 v0.5 功能。真实 large项索引反馈显示，“砀例甲”“示例工匠”等词可能在 GUI 中稳定返回 0，而 CLI 快速搜索可以命中。进一步检查确认工程没有零结果缓存；问题属于某个关键词持续进入同一失效搜索路径。
+本版本只处理搜索正确性，不扩展 v0.5 功能。真实 262 万项索引反馈显示，“研究生”“机器学习”等词可能在 GUI 中稳定返回 0，而 CLI 快速搜索可以命中。进一步检查确认工程没有零结果缓存；问题属于某个关键词持续进入同一失效搜索路径。
 
 ## 核心修复
 
@@ -18,11 +18,11 @@
 ## 验证命令
 
 ```bash
-./build-macos/everything-lite-cli search '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-correct '砀例甲' --limit 2000
+./build-macos/everything-lite-cli search '研究生' --limit 2000
+./build-macos/everything-lite-cli search-safe '研究生' --limit 2000
+./build-macos/everything-lite-cli search-correct '研究生' --limit 2000
 
-./build-macos/everything-lite-cli search-correct '示例工匠' --limit 2000
+./build-macos/everything-lite-cli search-correct '机器学习' --limit 2000
 ```
 
 GUI 与 `search-correct` 现在共享同一个正确性决策。

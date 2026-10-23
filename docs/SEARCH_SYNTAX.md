@@ -6,7 +6,7 @@
 paper
 pdf
 2026
-"Example Collection"
+"Analytical Chemistry"
 ```
 
 普通关键词默认只匹配当前项目自身的 basename，即“文件名或文件夹名”，不会因为某个父目录包含关键词而把它下面所有后代都返回。
@@ -14,10 +14,10 @@ pdf
 例如：
 
 ```text
-/Sample/unrelated.bin
+/Research/unrelated.bin
 ```
 
-搜索 `sample` 默认只会命中名为 `Sample` 的文件夹，不会命中 `unrelated.bin`。
+搜索 `research` 默认只会命中名为 `Research` 的文件夹，不会命中 `unrelated.bin`。
 
 ## 文件 / 文件夹范围
 
@@ -45,14 +45,14 @@ type:dir
 CLI 可使用：
 
 ```text
-matchpath: sample
+matchpath: research
 ```
 
 显式路径过滤仍支持：
 
 ```text
-path:sample
-path:"Sample Projects"
+path:research
+path:"Research Projects"
 ```
 
 ## 扩展名
@@ -86,10 +86,10 @@ modified:4w
 ## 组合
 
 ```text
-ext:pdf size:>10m modified:30d type:file example
+ext:pdf size:>10m modified:30d type:file transformer
 ```
 
-默认 example 只匹配文件名。如果需要完整路径也匹配 example，打开“匹配路径”。
+默认 transformer 只匹配文件名。如果需要完整路径也匹配 transformer，打开“匹配路径”。
 
 ## 性能说明
 
@@ -109,7 +109,7 @@ v0.4.4 曾使用 LIKE 作为中文可靠路径；v0.4.5 已进一步改为 `inst
 CLI 可显式验证可靠路径：
 
 ```bash
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
+./build-macos/everything-lite-cli search-safe '研究生' --limit 2000
 ```
 
 
@@ -124,8 +124,8 @@ GUI 使用 `searchCorrect`：
 显式验证：
 
 ```bash
-./build-macos/everything-lite-cli search-correct '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-correct '示例工匠' --limit 2000
+./build-macos/everything-lite-cli search-correct '研究生' --limit 2000
+./build-macos/everything-lite-cli search-correct '机器学习' --limit 2000
 ```
 
 搜索框文字不变时可直接按 Enter 强制重新执行当前查询。
@@ -135,8 +135,8 @@ GUI 使用 `searchCorrect`：
 从 v0.4.6 起，GUI 默认搜索与 CLI `search` 共用同一个 `SearchService`，不再在 GUI 内部选择 `searchCorrect`、INSTR/FTS 顺序或 cancellation。当前阶段以结果一致性为最高优先级。
 
 ```bash
-./build-macos/everything-lite-cli search '砀例甲' --limit 1001
-./build-macos/everything-lite-cli search '示例工匠' --limit 1001
+./build-macos/everything-lite-cli search '研究生' --limit 1001
+./build-macos/everything-lite-cli search '机器学习' --limit 1001
 ```
 
 GUI 默认“全部 + 不匹配路径”使用与上述命令相同的核心搜索入口。`search-safe` / `search-correct` 暂时保留为诊断命令，不是 GUI 默认执行路径。

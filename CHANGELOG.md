@@ -1,3 +1,10 @@
+## 0.4.10
+
+- 修复程序启动后第一次输入明显卡顿：取消构造函数末尾的同步空查询（此前会立即加载 1000 条结果）。
+- GUI 复用单一 `SearchService`，避免每次搜索重复 `Database::initialize()` / schema / FTS 初始化检查。
+- 文件系统结果刷新在搜索框为空、debounce 正在等待或 IME 正在组词时不再抢占前台输入。
+- 保留 v0.4.8 UTF-8 拆词修复与 v0.4.9 的 800 ms 输入完成后搜索策略。
+
 ## 0.4.9
 
 - GUI 搜索改为“输入完成后搜索”：最后一次用户编辑后空闲 800 ms 才执行查询。
@@ -10,8 +17,8 @@
 
 - 修复 UTF-8 查询被 locale-sensitive `std::isspace()` 按字节错误拆分的问题。
 - 查询分隔符改为固定 ASCII whitespace，GUI/CLI 不再受 `LC_CTYPE` / `LANG` 差异影响。
-- 修复 `砀例甲` 中 `砀 = E7 A0 80` 的 `A0` 被吞掉、`示例工匠` 中 `匠 = E5 8C A0` 被错误拆词导致漏搜的问题。
-- 新增 parser 级 UTF-8 回归测试：`砀例甲`、`示例工匠`、`工匠`、`匠`、`砀例`、混合 ASCII 空白及 U+00A0。
+- 修复 `研究生` 中 `研 = E7 A0 94` 的 `A0` 被吞掉、`机器学习` 中 `习 = E4 B9 A0` 被错误拆词导致漏搜的问题。
+- 新增 parser 级 UTF-8 回归测试：`研究生`、`机器学习`、`学习`、`习`、`研究`、混合 ASCII 空白及 U+00A0。
 - 保留 0.4.7 Search Trace，正常模式默认关闭，必要时可继续使用 `run-macos-debug.sh`。
 
 ## 0.4.7
@@ -32,7 +39,7 @@
 - GUI 暂时改为主线程同步搜索，移除 QtConcurrent/cancellation/pending-query 对搜索语义的干预。
 - GUI 不再自行选择 FTS/INSTR/fallback；默认查询严格复用 CLI reference 路径。
 - All / Files / Folders 与 Match Path 统一在 SearchService 中应用。
-- 新增 GUI/CLI backend 一致性回归测试，覆盖“砀例甲”“示例工匠”“sample”“pdf”。
+- 新增 GUI/CLI backend 一致性回归测试，覆盖“研究生”“机器学习”“research”“pdf”。
 - 修复 `max_size` 重复绑定导致 `size:<...` 查询 LIMIT/OFFSET 错位的问题。
 - 性能优化暂时后置，优先保证不漏搜。
 
@@ -44,7 +51,7 @@
 - GUI 统一使用 `searchCorrect`，避免单一算法的 false zero 成为最终结果。
 - 搜索框按 Enter 可在文本不变时强制重试。
 - CLI 新增 `search-correct`。
-- 新增/保留 `砀例甲`、`示例工匠`、中文路径回归测试。
+- 新增/保留 `研究生`、`机器学习`、中文路径回归测试。
 
 ## 0.4.4
 
@@ -53,7 +60,7 @@
 - GUI 中文/非 ASCII 查询默认使用 Reliable LIKE。
 - ASCII 快速搜索返回 0 时自动执行 Reliable LIKE 复核。
 - CLI 新增 `search-safe`。
-- 新增“砀例甲”“示例工匠”中文回归测试。
+- 新增“研究生”“机器学习”中文回归测试。
 
 ## v0.4.4 — GUI/CLI 查询链路一致性修复
 
@@ -70,7 +77,7 @@
 - 文件系统同步不再抢占用户搜索；后台变化写入数据库后，通过独立静默刷新定时器延迟刷新结果。
 - 自动结果刷新只在当前没有搜索运行、没有待处理搜索时执行。
 - 保留 v0.4.1 的中文查询取消、request ID、统一数据库路径和 FTS 完整性检查。
-- 重点场景：索引 Home/Library 时系统文件持续变化，`砀例甲` 等相对较慢查询不应再被后台事件永久饿死。
+- 重点场景：索引 Home/Library 时系统文件持续变化，`研究生` 等相对较慢查询不应再被后台事件永久饿死。
 
 ## 0.4.1 — GUI 搜索可靠性修复
 
@@ -80,7 +87,7 @@
 - 对 1～2 字符查询使用更长 debounce；3 字符及以上保持快速响应。
 - GUI 与 CLI 统一数据库路径解析；CLI 新增 `db-path` 与 `--db PATH`。
 - 索引状态增加 Files/FTS 可见记录数、最近查询与耗时；CLI 增加 FTS5 `integrity-check` 深度一致性检查。
-- 新增“砀例甲”中文 trigram/path 回归测试和取消查询测试。
+- 新增“研究生”中文 trigram/path 回归测试和取消查询测试。
 
 ## 0.4.0 - 2026-09-14
 

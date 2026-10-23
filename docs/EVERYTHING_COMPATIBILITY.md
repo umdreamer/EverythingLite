@@ -1,6 +1,6 @@
 # Everything 兼容性矩阵
 
-本项目不会复制 Everything 的 Windows 专有底层实现；目标是尽量对齐其用户模型、搜索匠惯和桌面工作流。
+本项目不会复制 Everything 的 Windows 专有底层实现；目标是尽量对齐其用户模型、搜索习惯和桌面工作流。
 
 | 能力 | Everything | Everything Lite v0.4 | 计划 |
 | --- | --- | --- | --- |

@@ -26,10 +26,10 @@ v0.4.0/v0.4.1 的 macOS FSEvents 增量同步完成后会通过通用 `startWork
 
 ## 建议验证
 
-在 GUI 中直接输入 `砀例甲` 并保持 5～10 秒不再输入。即使后台状态栏持续出现文件同步，前台结果也不应被反复清空或永久等待。随后可用 CLI 对照：
+在 GUI 中直接输入 `研究生` 并保持 5～10 秒不再输入。即使后台状态栏持续出现文件同步，前台结果也不应被反复清空或永久等待。随后可用 CLI 对照：
 
 ```bash
-./build-macos/everything-lite-cli search '砀例甲' --limit 50
+./build-macos/everything-lite-cli search '研究生' --limit 50
 ```
 
 GUI 与 CLI 应对同一数据库给出一致的匹配集合（GUI 首屏最多加载 1000 条并支持继续下拉）。

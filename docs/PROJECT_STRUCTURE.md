@@ -1,6 +1,6 @@
 # 工程目录
 
-Everything Lite 0.4.14 使用单一工程根目录，历史版本通过 Git 版本快照记录。
+Everything Lite 0.4.15 使用单一工程根目录，历史版本通过 Git 版本快照记录。
 
 ```text
 EverythingLite/

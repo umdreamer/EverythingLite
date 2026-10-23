@@ -1,6 +1,6 @@
 # Everything 兼容性范围
 
-Everything Lite 参考 Everything 的名称优先搜索和桌面操作习惯，但不是其实现的复制，也不承诺语法或结果行为完全兼容。当前状态以本项目 0.4.14 源码及 [搜索语法](SEARCH_SYNTAX.md) 为准。
+Everything Lite 参考 Everything 的名称优先搜索和桌面操作习惯，但不是其实现的复制，也不承诺语法或结果行为完全兼容。当前状态以本项目 0.4.15 源码及 [搜索语法](SEARCH_SYNTAX.md) 为准。
 
 ## 当前范围
 

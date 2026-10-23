@@ -8,7 +8,7 @@ if [[ -z "${EL_TEST_PLATFORM:-}" ]]; then
         *) echo '请设置 EL_TEST_PLATFORM 为目标 Linux 架构。' >&2; exit 1 ;;
     esac
 fi
-EL_TEST_IMAGE="${EL_TEST_IMAGE:-everythinglite-dev:0.4.14-${EL_TEST_PLATFORM##*/}}"
+EL_TEST_IMAGE="${EL_TEST_IMAGE:-everythinglite-dev:0.4.15-${EL_TEST_PLATFORM##*/}}"
 EL_ARTIFACT_DIR="${EL_ARTIFACT_DIR:-$ROOT_DIR/dist/linux-${EL_TEST_PLATFORM##*/}}"
 mkdir -p "$EL_ARTIFACT_DIR"
 EL_SOURCE_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/everything-lite-source.XXXXXX")"

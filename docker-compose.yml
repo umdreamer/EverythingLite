@@ -1,7 +1,7 @@
 services:
   everything-lite:
     build: .
-    image: everything-lite:0.4.14
+    image: everything-lite:0.4.15
     environment:
       EVERYTHING_LITE_DB: /data/everything-lite.db
     volumes:

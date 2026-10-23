@@ -2,7 +2,7 @@
 
 > **Vibe Coding 项目**：本项目通过提示驱动的 AI 生成、修改与迭代形成，非个人逐行手工编写。该开发方式不等于代码已经得到全面验证；功能实现、自动测试、交互验收与性能验证应分别评估。
 
-Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前版本为 **0.4.14**。技术栈为 C++17、Qt 6 Widgets、SQLite、PCRE2 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
+Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前版本为 **0.4.15**。技术栈为 C++17、Qt 6 Widgets、SQLite、PCRE2 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
 
 ## 功能
 

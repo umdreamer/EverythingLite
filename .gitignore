@@ -20,6 +20,7 @@ logs/*
 
 # Local archives, generated outputs, and developer-specific settings
 /archive/
+/待删除目录/
 /debug-logs/
 /dist/
 /.vscode/

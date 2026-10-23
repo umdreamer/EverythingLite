@@ -665,6 +665,72 @@ class UiTest : public QObject {
         QVERIFY(window.status_label_->displayText().endsWith(QChar(0x2026)));
         QVERIFY(window.statusBar()->height() <= window.fontMetrics().height() * 2 + 16);
     }
+    void searchLogListsRunDetailsAndCanBeCleared() {
+        MainWindow window;
+        window.watcher_->stop();
+        window.search_edit_->setText(QStringLiteral("alpha"));
+        window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.search_log_entries_.size(), std::size_t{1});
+        QCOMPARE(window.search_log_entries_.front().query, QStringLiteral("alpha"));
+        QTRY_COMPARE(window.search_log_entries_.front().state, QStringLiteral("完成"));
+        QVERIFY(window.search_log_entries_.front().elapsed_ms >= 0.0);
+
+        QAction* log_action = nullptr;
+        for (auto* action : window.findChildren<QAction*>())
+            if (action->text() == QStringLiteral("搜索日志…")) log_action = action;
+        QVERIFY(log_action);
+        log_action->trigger();
+        auto* dialog = window.findChild<QDialog*>(QStringLiteral("searchLogDialog"));
+        QVERIFY(dialog && dialog->isVisible());
+        auto* list = dialog->findChild<QListWidget*>(QStringLiteral("searchLogList"));
+        auto* details = dialog->findChild<QPlainTextEdit*>(QStringLiteral("searchLogDetails"));
+        QVERIFY(list && details);
+        QCOMPARE(list->count(), 1);
+        QVERIFY(details->toPlainText().contains(QStringLiteral("alpha")));
+        QVERIFY(details->toPlainText().contains(QStringLiteral("耗时")));
+        auto* clear = dialog->findChild<QPushButton*>(QStringLiteral("clearSearchLog"));
+        QVERIFY(clear);
+        clear->click();
+        QCOMPARE(list->count(), 0);
+        QCOMPARE(window.search_log_entries_.size(), std::size_t{0});
+    }
+    void searchLogMarksSupersededQueryCancelled() {
+        MainWindow window;
+        window.watcher_->stop();
+        WorkerGate gate;
+        QVERIFY(gate.block(window.search_worker_));
+        window.search_edit_->setText(QStringLiteral("alpha"));
+        window.runSearch();
+        QVERIFY(window.search_in_flight_);
+        window.search_edit_->setText(QStringLiteral("beta"));
+        window.runSearch();
+        gate.release->release();
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->nameAt(0), QStringLiteral("beta.txt"), 5000);
+        QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.search_log_entries_.size(), std::size_t{2});
+        QCOMPARE(window.search_log_entries_.front().state, QStringLiteral("取消"));
+        QTRY_COMPARE(window.search_log_entries_.back().state, QStringLiteral("完成"));
+    }
+    void searchLogRecordsIndexSyncWarningAndUnindexedFolder() {
+        MainWindow window;
+        window.watcher_->stop();
+        const auto path = QStringLiteral("/synthetic/failed-source");
+        window.reportSyncOutcome(path, path, true, QStringLiteral("synthetic failure"));
+        window.search_edit_->setText(QStringLiteral("alpha"));
+        window.runSearch();
+        QTRY_COMPARE(window.search_log_entries_.back().state, QStringLiteral("完成"));
+        QCOMPARE(window.search_log_entries_.back().sync_failure_count, 1);
+        window.showSearchLog();
+        auto* details = window.findChild<QPlainTextEdit*>(QStringLiteral("searchLogDetails"));
+        QVERIFY(details);
+        QVERIFY(details->toPlainText().contains(QStringLiteral("同步失败 1")));
+
+        window.setFolderScope(QStringLiteral("/synthetic/unindexed-folder"));
+        window.runSearch();
+        QCOMPARE(window.search_log_entries_.back().state, QStringLiteral("未执行"));
+        QVERIFY(window.search_log_entries_.back().detail.contains(QStringLiteral("未索引")));
+    }
     void manualRebuildShowsBusyAndCompletionFeedback() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         const auto saved=qgetenv("EVERYTHING_LITE_DB");

@@ -44,6 +44,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -527,24 +528,24 @@ void MainWindow::buildUi() {
     status_label_->setTextFormat(Qt::PlainText);
     status_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     statusBar()->addWidget(status_label_, 1);
-    search_metrics_label_ = new QLabel(QStringLiteral("结果 0 · — ms"), this);
+    search_metrics_label_ = new ElidedLabel(QStringLiteral("结果 0 · — ms"), this);
     search_metrics_label_->setFixedWidth(175);
     search_metrics_label_->setAlignment(Qt::AlignCenter);
     statusBar()->addPermanentWidget(search_metrics_label_);
     search_state_label_ = new ElidedLabel(this);
     search_state_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    watcher_error_label_ = new QLabel(this);
-    watcher_error_label_->setTextFormat(Qt::PlainText);
-    watcher_error_label_->setWordWrap(false);
-    watcher_error_label_->setFixedWidth(90);
-    watcher_error_label_->setText(QStringLiteral("监听待启动"));
-    statusBar()->addPermanentWidget(watcher_error_label_);
-    sync_error_label_ = new QLabel(this);
+    sync_error_label_ = new ElidedLabel(this);
     sync_error_label_->setTextFormat(Qt::PlainText);
     sync_error_label_->setWordWrap(false);
     sync_error_label_->setFixedWidth(110);
     sync_error_label_->setText(QStringLiteral("同步正常"));
     statusBar()->addPermanentWidget(sync_error_label_);
+    watcher_error_label_ = new ElidedLabel(this);
+    watcher_error_label_->setTextFormat(Qt::PlainText);
+    watcher_error_label_->setWordWrap(false);
+    watcher_error_label_->setFixedWidth(90);
+    watcher_error_label_->setText(QStringLiteral("监听待启动"));
+    statusBar()->addPermanentWidget(watcher_error_label_);
     search_state_label_->setTextFormat(Qt::PlainText);
     search_state_label_->setFixedWidth(160);
     statusBar()->addPermanentWidget(search_state_label_);
@@ -660,6 +661,9 @@ void MainWindow::buildMenus() {
     connect(scope_folders_action_, &QAction::triggered, this, [this] { setScopeFromMenu(2); });
 
     search_menu->addSeparator();
+    auto* search_log_action = search_menu->addAction(QStringLiteral("搜索日志…"));
+    connect(search_log_action, &QAction::triggered, this, &MainWindow::showSearchLog);
+
     auto* syntax_action = search_menu->addAction(QStringLiteral("搜索语法…"));
     connect(syntax_action, &QAction::triggered, this, &MainWindow::showSearchSyntax);
 
@@ -964,6 +968,14 @@ void MainWindow::runSearch() {
         model_->clearResults();
         status_label_->setText(QStringLiteral("该文件夹未索引；未执行搜索"));
         search_metrics_label_->setText(QStringLiteral("未搜索"));
+        search_log_entries_.push_back({++search_request_id_, QDateTime::currentDateTime().toString(Qt::ISODate),
+                                       normalizeGuiQuery(search_edit_->text()), folder_scope_,
+                                       scope_combo_->currentIndex(), match_path_check_->isChecked(),
+                                       include_hidden_check_->isChecked(), 0, QStringLiteral("未执行"),
+                                       QStringLiteral("该文件夹未索引；加入索引后才能搜索"), 0.0, 0, 0,
+                                       static_cast<int>(sync_errors_.size())});
+        if (search_log_entries_.size() > kMaxSearchLogEntries) search_log_entries_.erase(search_log_entries_.begin());
+        refreshSearchLogDialog();
         return;
     }
     cancelActiveSearch();
@@ -1054,6 +1066,12 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     const auto cancellation = active_search_cancellation_;
     search_in_flight_ = true;
     search_pending_ = false;
+    search_log_entries_.push_back({request_id, QDateTime::currentDateTime().toString(Qt::ISODate),
+                                   normalized_query, folder_scope, item_scope, match_path,
+                                   options.include_hidden, offset, QStringLiteral("搜索中"), {}, 0.0, 0, 0,
+                                   static_cast<int>(sync_errors_.size())});
+    if (search_log_entries_.size() > kMaxSearchLogEntries) search_log_entries_.erase(search_log_entries_.begin());
+    refreshSearchLogDialog();
     status_label_->setText(QStringLiteral("正在后台搜索“%1”… 可继续输入")
         .arg(normalized_query.isEmpty() ? QStringLiteral("全部") : normalized_query));
     search_metrics_label_->setText(QStringLiteral("搜索中…"));
@@ -1076,7 +1094,12 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             self->search_in_flight_ = false;
             self->active_search_cancellation_.reset();
             if (self->closing_) return;
-            if (self->storage_maintenance_) {self->tryStartStorageMaintenance();return;}
+            if (self->storage_maintenance_) {
+                self->finishSearchLog(request_id, QStringLiteral("取消"), QStringLiteral("索引存储维护开始"),
+                                      outcome->elapsed_ms, 0, 0);
+                self->tryStartStorageMaintenance();
+                return;
+            }
 
             // textEdited/scope changes invalidate request_id immediately. Old
             // queries may finish, but are never allowed to flash stale results.
@@ -1084,6 +1107,8 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             const bool still_current = request_id == self->search_request_id_
                 && same_configuration && !outcome->cancelled;
             if (!still_current) {
+                self->finishSearchLog(request_id, QStringLiteral("取消"),
+                                      QStringLiteral("已被新搜索或筛选条件替代"), outcome->elapsed_ms, 0, 0);
                 searchTrace("GUI-SEARCH", "discarded stale background result request_id="
                     + std::to_string(request_id)
                     + " current_request_id=" + std::to_string(self->search_request_id_));
@@ -1093,6 +1118,8 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
                         self->search_timer_->start(kSearchIdleDelayMs);
                 }
             } else if (outcome->snapshot_changed) {
+                self->finishSearchLog(request_id, QStringLiteral("待重试"), QStringLiteral("索引版本已变化"),
+                                      outcome->elapsed_ms, 0, 0);
                 self->resetPaging();
                 self->model_->clearResults();
                 self->last_search_elapsed_ms_ = outcome->elapsed_ms;
@@ -1104,6 +1131,8 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
                 // and cannot cause an immediate restart loop on a busy index.
                 self->search_timer_->start(kSearchIdleDelayMs);
             } else if (!outcome->error.empty()) {
+                self->finishSearchLog(request_id, QStringLiteral("失败"), QString::fromUtf8(outcome->error.c_str()),
+                                      outcome->elapsed_ms, 0, self->model_->rowCount());
                 self->resetPaging();
                 self->last_search_elapsed_ms_ = outcome->elapsed_ms;
                 self->last_search_raw_result_count_ = 0;
@@ -1130,6 +1159,8 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
 
                 self->last_search_elapsed_ms_ = outcome->elapsed_ms;
                 self->last_search_result_count_ = self->model_->rowCount();
+                self->finishSearchLog(request_id, QStringLiteral("完成"), {}, outcome->elapsed_ms,
+                                      self->last_search_raw_result_count_, self->last_search_result_count_);
                 searchTrace("GUI-MODEL", "model_rows_after=" + std::to_string(self->model_->rowCount())
                     + " have_more=" + std::to_string(self->results_have_more_ ? 1 : 0)
                     + " elapsed_ms=" + std::to_string(self->last_search_elapsed_ms_));
@@ -1542,6 +1573,104 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("终端 Trace：%1").arg(searchTraceEnabled() ? QStringLiteral("已启用") : QStringLiteral("未启用"));
     details << QStringLiteral("CLI 探针：%1").arg(cliProbePath());
     QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));
+}
+
+void MainWindow::finishSearchLog(std::uint64_t request_id, const QString& state, const QString& detail,
+                                 double elapsed_ms, int returned_count, int loaded_count) {
+    const auto it = std::find_if(search_log_entries_.begin(), search_log_entries_.end(),
+                                 [request_id](const SearchLogEntry& entry) { return entry.request_id == request_id; });
+    if (it == search_log_entries_.end()) return;
+    it->state = state;
+    it->detail = detail;
+    it->elapsed_ms = elapsed_ms;
+    it->returned_count = returned_count;
+    it->loaded_count = loaded_count;
+    refreshSearchLogDialog();
+}
+
+void MainWindow::refreshSearchLogDialog() {
+    if (!search_log_dialog_) return;
+    auto* list = search_log_dialog_->findChild<QListWidget*>(QStringLiteral("searchLogList"));
+    if (!list) return;
+    const auto selected_id = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toULongLong() : 0;
+    list->clear();
+    int selected_row = 0;
+    for (auto it = search_log_entries_.rbegin(); it != search_log_entries_.rend(); ++it) {
+        auto* item = new QListWidgetItem(QStringLiteral("%1  %2  %3")
+            .arg(it->started_at, it->state, it->query.isEmpty() ? QStringLiteral("<全部>") : it->query));
+        item->setData(Qt::UserRole, static_cast<qulonglong>(it->request_id));
+        list->addItem(item);
+        if (it->request_id == selected_id) selected_row = list->count() - 1;
+    }
+    if (list->count()) list->setCurrentRow(selected_row);
+    else if (auto* details = search_log_dialog_->findChild<QPlainTextEdit*>(QStringLiteral("searchLogDetails")))
+        details->clear();
+}
+
+void MainWindow::showSearchLog() {
+    if (search_log_dialog_) {
+        search_log_dialog_->show();
+        search_log_dialog_->raise();
+        search_log_dialog_->activateWindow();
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setObjectName(QStringLiteral("searchLogDialog"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("搜索日志"));
+    dialog->resize(780, 470);
+    search_log_dialog_ = dialog;
+    auto* layout = new QVBoxLayout(dialog);
+    auto* note = new QLabel(QStringLiteral("仅保留本窗口最近 100 次搜索；关闭窗口后清除，不写入磁盘。"), dialog);
+    layout->addWidget(note);
+    auto* content = new QHBoxLayout;
+    auto* list = new QListWidget(dialog);
+    list->setObjectName(QStringLiteral("searchLogList"));
+    auto* details = new QPlainTextEdit(dialog);
+    details->setObjectName(QStringLiteral("searchLogDetails"));
+    details->setReadOnly(true);
+    content->addWidget(list, 2);
+    content->addWidget(details, 3);
+    layout->addLayout(content);
+    connect(list, &QListWidget::currentRowChanged, dialog, [this, list, details](int row) {
+        if (row < 0 || static_cast<std::size_t>(row) >= search_log_entries_.size()) {
+            details->clear();
+            return;
+        }
+        const auto& entry = search_log_entries_[search_log_entries_.size() - 1 - static_cast<std::size_t>(row)];
+        QStringList lines;
+        lines << QStringLiteral("开始时间：%1").arg(entry.started_at)
+              << QStringLiteral("查询：%1").arg(entry.query.isEmpty() ? QStringLiteral("<全部>") : entry.query)
+              << QStringLiteral("文件夹：%1").arg(entry.folder.isEmpty() ? QStringLiteral("<所有已索引目录>") : entry.folder)
+              << QStringLiteral("范围：%1").arg(entry.scope == 1 ? QStringLiteral("文件") : entry.scope == 2 ? QStringLiteral("文件夹") : QStringLiteral("全部"))
+              << QStringLiteral("匹配路径：%1").arg(entry.match_path ? QStringLiteral("是") : QStringLiteral("否"))
+              << QStringLiteral("包含隐藏项：%1").arg(entry.include_hidden ? QStringLiteral("是") : QStringLiteral("否"))
+              << QStringLiteral("分页偏移：%1").arg(static_cast<qulonglong>(entry.offset))
+              << QStringLiteral("状态：%1").arg(entry.state)
+              << QStringLiteral("耗时：%1 ms").arg(entry.elapsed_ms, 0, 'f', 1)
+              << QStringLiteral("核心返回：%1").arg(entry.returned_count)
+              << QStringLiteral("当前已加载：%1").arg(entry.loaded_count)
+              << (entry.sync_failure_count > 0
+                      ? QStringLiteral("索引同步：同步失败 %1；缓存结果可能过期，详情见“工具 → 索引状态”").arg(entry.sync_failure_count)
+                      : QStringLiteral("索引同步：正常"));
+        if (!entry.detail.isEmpty()) lines << QStringLiteral("详情：%1").arg(entry.detail);
+        details->setPlainText(lines.join(QLatin1Char('\n')));
+    });
+    auto* buttons = new QHBoxLayout;
+    auto* clear = new QPushButton(QStringLiteral("清空日志"), dialog);
+    clear->setObjectName(QStringLiteral("clearSearchLog"));
+    connect(clear, &QPushButton::clicked, dialog, [this] {
+        search_log_entries_.clear();
+        refreshSearchLogDialog();
+    });
+    buttons->addWidget(clear);
+    buttons->addStretch();
+    auto* close = new QPushButton(QStringLiteral("关闭"), dialog);
+    connect(close, &QPushButton::clicked, dialog, &QDialog::close);
+    buttons->addWidget(close);
+    layout->addLayout(buttons);
+    refreshSearchLogDialog();
+    dialog->show();
 }
 
 QStringList MainWindow::selectedPaths() const {

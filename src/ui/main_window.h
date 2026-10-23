@@ -23,6 +23,7 @@ class QAction;
 class QActionGroup;
 class QCheckBox;
 class QCloseEvent;
+class QDialog;
 class QEvent;
 class QObject;
 class QComboBox;
@@ -81,6 +82,26 @@ private:
     friend class UiTest;
     static constexpr std::size_t kPageSize = 1000;
     static constexpr int kSearchIdleDelayMs = 800;
+    static constexpr std::size_t kMaxSearchLogEntries = 100;
+
+    struct SearchLogEntry {
+        std::uint64_t request_id = 0;
+        QString started_at;
+        QString query;
+        QString folder;
+        int scope = 0;
+        bool match_path = false;
+        bool include_hidden = false;
+        std::size_t offset = 0;
+        QString state;
+        QString detail;
+        double elapsed_ms = 0.0;
+        int returned_count = 0;
+        int loaded_count = 0;
+        int sync_failure_count = 0;
+    };
+    std::vector<SearchLogEntry> search_log_entries_;
+    QPointer<QDialog> search_log_dialog_;
 
     QString db_path_;
     QStringList roots_;
@@ -100,10 +121,10 @@ private:
     QCheckBox* include_hidden_check_ = nullptr;
     QLabel* scope_label_ = nullptr;
     ElidedLabel* status_label_ = nullptr;
-    QLabel* search_metrics_label_ = nullptr;
-    QLabel* watcher_error_label_ = nullptr;
+    ElidedLabel* search_metrics_label_ = nullptr;
+    ElidedLabel* watcher_error_label_ = nullptr;
     QString watcher_error_;
-    QLabel* sync_error_label_ = nullptr;
+    ElidedLabel* sync_error_label_ = nullptr;
     struct SyncFailureScope {
         QString root;
         QString path;
@@ -202,6 +223,10 @@ private:
     void showIndexStatus();
     void showSettingsOverview();
     void showSearchDiagnostics();
+    void showSearchLog();
+    void refreshSearchLogDialog();
+    void finishSearchLog(std::uint64_t request_id, const QString& state, const QString& detail,
+                         double elapsed_ms, int returned_count, int loaded_count);
     void openCurrent();
     void openWithCurrent();
     void revealCurrent();

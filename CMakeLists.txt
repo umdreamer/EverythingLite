@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.21.1)
 project(EverythingLite VERSION 0.4.15 LANGUAGES CXX)
+set(EVERYTHING_LITE_DISPLAY_VERSION "${PROJECT_VERSION}-fixbug")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,7 +59,7 @@ add_library(everything_core
 
 target_include_directories(everything_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(everything_core PUBLIC ${EVERYTHING_LITE_SQLITE_TARGET} Threads::Threads PkgConfig::PCRE2)
-target_compile_definitions(everything_core PUBLIC EVERYTHING_LITE_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(everything_core PUBLIC EVERYTHING_LITE_VERSION="${EVERYTHING_LITE_DISPLAY_VERSION}")
 
 if(APPLE)
     target_sources(everything_core PRIVATE src/platform/mac_fsevents_watcher.cpp)

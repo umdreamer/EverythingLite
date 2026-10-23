@@ -1,4 +1,4 @@
-# 测试范围与验证记录（截至 0.4.15）
+# 测试范围与验证记录（截至本地 0.4.15-fixbug）
 
 ## 验证范围
 
@@ -11,6 +11,12 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.4.15-fixbug 本地核验（2026-10-23）
+
+Core Debug 全套 CTest 20/20 通过，GUI Debug 全套 CTest 25/25 通过。新增回归覆盖旧界面设置恢复、状态栏用时、未索引目录的拒绝与加入、点号隐藏路径、Finder 的 `UF_HIDDEN` 与 `FinderInfo` 标记、隐藏目录子项，以及紧凑索引中的标记读写。Mac Release 构建生成 `EverythingLite.app` 和 `everything-lite-cli`；二进制含 `0.4.15-fixbug` 版本字符串，应用包的系统数值版本为 0.4.15。本版本尚未推送到 GitHub。
+
+未以真实大索引量测隐藏属性扫描成本，也未完成原生文件夹选择器与日常 Finder 交互的人工验收。已有索引的 Finder 隐藏标记需要对应目录重新扫描才完整；测试仅使用合成目录。
 
 ## Mac 0.4.15 发布核验（2026-10-23）
 

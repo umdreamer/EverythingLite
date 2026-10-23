@@ -1,4 +1,5 @@
 #include "ui/main_window.h"
+#include "ui/app_settings.h"
 #include "ui/index_storage_dialog.h"
 #include "ui/exclusion_settings_dialog.h"
 #include "core/index_storage.h"
@@ -675,7 +676,7 @@ void MainWindow::buildMenus() {
 }
 
 void MainWindow::loadSettings() {
-    QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
+    auto settings = makeAppSettings();
     roots_ = settings.value(QStringLiteral("index/roots")).toStringList();
     if (roots_.isEmpty()) roots_ = defaultRoots();
     scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
@@ -711,7 +712,7 @@ void MainWindow::loadSettings() {
 }
 
 void MainWindow::saveSettings() {
-    QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
+    auto settings = makeAppSettings();
     settings.setValue(QStringLiteral("index/roots"), roots_);
     settings.setValue(QStringLiteral("search/itemScope"), scope_combo_->currentIndex());
     settings.setValue(QStringLiteral("search/matchPath"), match_path_check_->isChecked());
@@ -727,7 +728,7 @@ void MainWindow::saveSettings() {
 }
 
 void MainWindow::loadBookmarks() {
-    QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
+    auto settings = makeAppSettings();
     bookmarks_.clear();
     const int count = settings.beginReadArray(QStringLiteral("bookmarks/items"));
     for (int i = 0; i < count; ++i) {
@@ -746,7 +747,7 @@ void MainWindow::loadBookmarks() {
 }
 
 void MainWindow::saveBookmarks() {
-    QSettings settings(QStringLiteral("CICHI"), QStringLiteral("EverythingLite"));
+    auto settings = makeAppSettings();
     settings.remove(QStringLiteral("bookmarks/items"));
     settings.beginWriteArray(QStringLiteral("bookmarks/items"));
     for (int i = 0; i < static_cast<int>(bookmarks_.size()); ++i) {

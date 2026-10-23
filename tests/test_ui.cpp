@@ -1,4 +1,5 @@
 #include "ui/main_window.h"
+#include "ui/app_settings.h"
 #include "ui/search_result_model.h"
 #include "ui/search_worker.h"
 #include "ui/index_storage_dialog.h"
@@ -86,7 +87,7 @@ class UiTest : public QObject {
     QString fixture_root;
   private slots:
     void defaultSearchControlsAndStatusAreVisible() {
-        QSettings settings("CICHI", "EverythingLite");
+        auto settings = makeAppSettings();
         settings.setValue("view/statusBar", false);
         settings.setValue("view/filterBar", false);
         settings.setValue("view/scopeBar", false);
@@ -105,7 +106,7 @@ class UiTest : public QObject {
         QVERIFY(window.status_label_->text().contains(QStringLiteral("已加载")));
     }
     void init() {
-        QSettings settings("CICHI", "EverythingLite");
+        auto settings = makeAppSettings();
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
@@ -665,7 +666,7 @@ class UiTest : public QObject {
     void sixColumnSortAndSettingsMigration() {
         QStandardItemModel old(0,4); QTableView oldTable; oldTable.setModel(&old);
         oldTable.setColumnWidth(0,222);
-        QSettings settings("CICHI","EverythingLite"); settings.setValue("table/header",oldTable.horizontalHeader()->saveState());
+        auto settings = makeAppSettings(); settings.setValue("table/header",oldTable.horizontalHeader()->saveState());
         settings.setValue("table/sortColumn",99);
         MainWindow window; window.watcher_->stop(); QCOMPARE(window.model_->columnCount(),6);
         QCOMPARE(window.table_->horizontalHeader()->count(),6);
@@ -785,7 +786,7 @@ class UiTest : public QObject {
         }
         const auto db_path=dir.filePath("index.db");
         IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
-        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        auto settings = makeAppSettings(); settings.setValue("index/roots",QStringList{root});
         const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
         MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
         QVERIFY(window.findChild<QPushButton*>(QStringLiteral("chooseFolderScope")));
@@ -831,7 +832,7 @@ class UiTest : public QObject {
         QVERIFY(sample.open(QIODevice::WriteOnly)); sample.write("test"); sample.close();
         const auto db_path=dir.filePath("index.db");
         IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
-        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        auto settings = makeAppSettings(); settings.setValue("index/roots",QStringList{root});
         const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
         MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
         window.search_edit_->setText("unique-needle");
@@ -870,7 +871,7 @@ class UiTest : public QObject {
         QVERIFY(hidden.open(QIODevice::WriteOnly)); hidden.write("test"); hidden.close();
         const auto db_path=dir.filePath("index.db");
         IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
-        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        auto settings = makeAppSettings(); settings.setValue("index/roots",QStringList{root});
         const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
         MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
         window.search_edit_->setText("private-sample"); window.runSearch();
@@ -1432,7 +1433,7 @@ class UiTest : public QObject {
     }
 #ifdef Q_OS_LINUX
     void localizedDefaultRoots() {
-        QSettings settings("CICHI", "EverythingLite");
+        auto settings = makeAppSettings();
         settings.remove("index/roots");
         MainWindow window;
         QCOMPARE(window.roots_, (QStringList{QDir::homePath() + QStringLiteral("/桌面"),
@@ -1440,7 +1441,7 @@ class UiTest : public QObject {
                                              QDir::homePath() + QStringLiteral("/下载")}));
     }
     void watcherStartFailureIsPersistent() {
-        QSettings settings("CICHI", "EverythingLite");
+        auto settings = makeAppSettings();
         settings.setValue("index/roots", QStringList{QString {}});
         MainWindow window;
         QVERIFY(!window.watcher_error_.isEmpty());
@@ -1524,7 +1525,7 @@ class UiTest : public QObject {
         }
         const auto db_path=dir.path()+"/index.db";
         IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
-        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        auto settings = makeAppSettings(); settings.setValue("index/roots",QStringList{root});
         const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
         MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
         QAction* action=nullptr;
@@ -1609,6 +1610,7 @@ int main(int argc, char** argv) {
     qputenv("XDG_DATA_HOME", (sandbox.path() + "/data").toUtf8());
     qputenv("XDG_CACHE_HOME", (sandbox.path() + "/cache").toUtf8());
     qputenv("EVERYTHING_LITE_DB", (sandbox.path() + "/test.db").toUtf8());
+    qputenv("EVERYTHING_LITE_TEST_SETTINGS_FILE", (sandbox.path() + "/settings.ini").toUtf8());
 #ifdef Q_OS_LINUX
     QDir().mkpath(sandbox.path() + "/config");
     QFile dirs(sandbox.path() + "/config/user-dirs.dirs");
@@ -1623,9 +1625,6 @@ int main(int argc, char** argv) {
 #endif
     QApplication app(argc, argv);
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
-    QSettings::setDefaultFormat(QSettings::IniFormat);
-    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, sandbox.path() + "/settings");
-    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, sandbox.path() + "/system");
     const auto root = sandbox.path() + "/root";
     QDir().mkpath(root + "/needle");
     auto write = [&](const QString& name) {
@@ -1641,7 +1640,11 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 1005; ++i)
         if (!write(QStringLiteral("item%1.txt").arg(i, 4, 10, QChar('0'))))
             return 2;
-    QSettings settings("CICHI", "EverythingLite");
+    auto settings = everything_lite::makeAppSettings();
+    if (settings.format() != QSettings::IniFormat || settings.fileName() != sandbox.path() + "/settings.ini") {
+        qCritical() << "Refusing to run UI tests with non-isolated settings:" << settings.fileName();
+        return 2;
+    }
     settings.setValue("index/roots", QStringList{root});
     settings.sync();
     everything_lite::IndexManager manager((sandbox.path() + "/test.db").toStdString());

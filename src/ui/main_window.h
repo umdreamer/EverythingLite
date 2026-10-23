@@ -76,6 +76,8 @@ private:
 
     QLineEdit* search_edit_ = nullptr;
     QString folder_scope_;
+    bool folder_scope_index_pending_ = false;
+    bool folder_scope_index_failed_ = false;
     QLabel* folder_scope_label_ = nullptr;
     QLabel* folder_scope_status_ = nullptr;
     QPushButton* clear_folder_scope_ = nullptr;
@@ -167,6 +169,7 @@ private:
     void rebuildBookmarksMenu();
     void updateScopeLabel();
     void setFolderScope(const QString& path);
+    void selectFolderScope(const QString& path);
     void updateFolderScopeLabel();
     void updateSearchStateLabel();
     void refreshStats();
@@ -190,7 +193,7 @@ private:
     void copyCurrentName();
     void exportLoadedResults();
     void showContextMenu(const QPoint& pos);
-    void restartWatcher();
+    void restartWatcher(bool refresh_stats = true);
     void receiveWatcherEvent(std::uint64_t generation, const FileEvent& event);
     void scheduleFileEvent(const FileEvent& event);
     void processPendingEvents();

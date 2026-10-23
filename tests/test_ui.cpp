@@ -5,6 +5,7 @@
 #include "ui/exclusion_settings_dialog.h"
 #include "core/index_manager.h"
 #include <QAction>
+#include <QAbstractButton>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -817,6 +818,48 @@ class UiTest : public QObject {
         gate.release->release();
         QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1,3000);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("item-c.txt"));
+    }
+    void choosingUnindexedFolderRequiresConsentAndIndexesOnlyThatFolder() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("indexed");
+        const auto new_root=dir.filePath("new-root");
+        QVERIFY(QDir().mkpath(root));
+        QVERIFY(QDir().mkpath(new_root));
+        QFile sample(new_root+"/unique-needle.txt");
+        QVERIFY(sample.open(QIODevice::WriteOnly)); sample.write("test"); sample.close();
+        const auto db_path=dir.filePath("index.db");
+        IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        window.search_edit_->setText("unique-needle");
+        QTimer::singleShot(0, &window, [] {
+            auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            QVERIFY(box); QVERIFY(box->text().contains(QStringLiteral("未索引")));
+            box->button(QMessageBox::No)->click();
+        });
+        window.selectFolderScope(new_root);
+        QCOMPARE(window.folder_scope_,new_root);
+        QCOMPARE(window.model_->rowCount(),0);
+        QVERIFY(window.folder_scope_status_->text().contains(QStringLiteral("未索引")));
+        window.runSearch();
+        QVERIFY(!window.search_in_flight_);
+        QVERIFY(!window.search_timer_->isActive());
+        QCOMPARE(window.roots_,(QStringList{root}));
+        QTimer::singleShot(0, &window, [] {
+            auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            QVERIFY(box); box->button(QMessageBox::Yes)->click();
+        });
+        window.selectFolderScope(new_root);
+        QVERIFY(window.roots_.contains(new_root));
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QVERIFY2(window.sync_error_label_->text().isEmpty(),qPrintable(window.sync_error_label_->text()));
+        Database indexed(db_path.toStdString());
+        QVERIFY2(indexed.totalFileCount()>=2,qPrintable(window.status_label_->text()));
+        QTRY_VERIFY_WITH_TIMEOUT(window.search_request_id_>0,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1,5000);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("unique-needle.txt"));
+        QVERIFY(window.roots_.contains(new_root));
     }
     void paginationRefreshesChangedSnapshot() {
         MainWindow window; window.watcher_->stop();

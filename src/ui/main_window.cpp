@@ -454,7 +454,7 @@ void MainWindow::buildUi() {
     connect(choose_folder, &QPushButton::clicked, this, [this] {
         const auto initial = folder_scope_.isEmpty() ? QDir::homePath() : folder_scope_;
         const auto chosen = QFileDialog::getExistingDirectory(this, QStringLiteral("选择搜索文件夹"), initial);
-        if (!chosen.isEmpty()) setFolderScope(chosen);
+        if (!chosen.isEmpty()) selectFolderScope(chosen);
     });
     connect(clear_folder_scope_, &QPushButton::clicked, this, [this] { setFolderScope({}); });
 
@@ -788,17 +788,25 @@ void MainWindow::updateFolderScopeLabel() {
     }
     folder_scope_label_->setText(QStringLiteral("搜索范围：%1").arg(folder_scope_));
     clear_folder_scope_->setEnabled(true);
+    if (folder_scope_index_pending_) {
+        folder_scope_status_->setText(QStringLiteral("正在加入索引…"));
+        return;
+    }
+    if (folder_scope_index_failed_) {
+        folder_scope_status_->setText(QStringLiteral("索引失败；请检查同步错误后重试"));
+        return;
+    }
     bool indexed = false;
     try {
         Database db(toUtf8(db_path_));
         const auto scope = toUtf8(folder_scope_);
         for (const auto& source : db.sources()) {
-            if (pathIsWithin(scope, source.root) || pathIsWithin(source.root, scope)) {
+            if (!rootForPath(folder_scope_).isEmpty() && pathIsWithin(scope, source.root)) {
                 indexed = true;
                 break;
             }
         }
-        folder_scope_status_->setText(indexed ? QString{} : QStringLiteral("该目录未索引；只搜索已有索引"));
+        folder_scope_status_->setText(indexed ? QString{} : QStringLiteral("该目录未索引；加入索引后才能搜索"));
     } catch (const std::exception& error) {
         folder_scope_status_->setText(QStringLiteral("索引状态读取失败：%1").arg(fromUtf8(error.what())));
     }
@@ -812,6 +820,8 @@ void MainWindow::setFolderScope(const QString& path) {
     const auto normalized = path.isEmpty() ? QString{} : QDir::cleanPath(path);
     if (normalized == folder_scope_) return;
     folder_scope_ = normalized;
+    folder_scope_index_pending_ = false;
+    folder_scope_index_failed_ = false;
     cancelActiveSearch();
     search_pending_ = false;
     ++search_request_id_;
@@ -821,6 +831,33 @@ void MainWindow::setFolderScope(const QString& path) {
     updateFolderScopeLabel();
     updateSearchStateLabel();
     search_timer_->start(kSearchIdleDelayMs);
+}
+
+void MainWindow::selectFolderScope(const QString& path) {
+    if (!QDir(path).exists()) {
+        QMessageBox::warning(this, QStringLiteral("选择搜索文件夹"), QStringLiteral("所选文件夹不存在或无法访问。"));
+        return;
+    }
+    const auto normalized = QDir::cleanPath(path);
+    setFolderScope(normalized);
+    if (!rootForPath(normalized).isEmpty()) return;
+    search_timer_->stop();
+    const auto answer = QMessageBox::question(this, QStringLiteral("文件夹未索引"),
+        QStringLiteral("该文件夹未索引。是否加入索引并在完成后搜索？\n%1").arg(normalized),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (answer != QMessageBox::Yes) {
+        status_label_->setText(QStringLiteral("该文件夹未索引；未执行搜索"));
+        return;
+    }
+    roots_.append(normalized);
+    folder_scope_index_pending_ = true;
+    saveSettings();
+    updateScopeLabel();
+    updateFolderScopeLabel();
+    restartWatcher(false);
+    pending_rescan_roots_.insert(normalized);
+    normal_events_due_ = true;
+    dispatchSyncJobs();
 }
 
 void MainWindow::updateSearchStateLabel() {
@@ -881,6 +918,13 @@ void MainWindow::runSearch() {
     if(storage_maintenance_) {search_pending_=true;pending_search_query_=normalizeGuiQuery(search_edit_->text());return;}
     if (closing_ || search_ime_composing_ || (indexing_.load() && indexed_count_ == 0)) return;
     search_timer_->stop();
+    if (!folder_scope_.isEmpty() && (rootForPath(folder_scope_).isEmpty()
+        || folder_scope_index_pending_ || folder_scope_index_failed_)) {
+        cancelActiveSearch();
+        model_->clearResults();
+        status_label_->setText(QStringLiteral("该文件夹未索引；未执行搜索"));
+        return;
+    }
     cancelActiveSearch();
     pending_search_query_ = normalizeGuiQuery(search_edit_->text());
     resetPaging();
@@ -1531,7 +1575,7 @@ void MainWindow::showContextMenu(const QPoint& pos) {
     else if (selected == copy_name) copyCurrentName();
 }
 
-void MainWindow::restartWatcher() {
+void MainWindow::restartWatcher(bool refresh_stats) {
     const auto generation = ++watcher_generation_;
     if (watcher_) watcher_->stop();
     watcher_ = createPlatformWatcher();
@@ -1552,7 +1596,8 @@ void MainWindow::restartWatcher() {
     }
     watcher_error_label_->setText(watcher_error_);
     watcher_error_label_->setVisible(!watcher_error_.isEmpty());
-    refreshStats();
+    if (refresh_stats) refreshStats();
+    else updateCachedStatus();
 }
 
 void MainWindow::receiveWatcherEvent(std::uint64_t generation, const FileEvent& event) {

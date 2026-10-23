@@ -61,8 +61,7 @@ bool MacFSEventsWatcher::start() {
     context.info = this;
     const auto flags = static_cast<FSEventStreamCreateFlags>(
         kFSEventStreamCreateFlagFileEvents |
-        kFSEventStreamCreateFlagWatchRoot |
-        kFSEventStreamCreateFlagNoDefer);
+        kFSEventStreamCreateFlagWatchRoot);
 
     FSEventStreamRef stream = FSEventStreamCreate(
         kCFAllocatorDefault,
@@ -70,7 +69,7 @@ bool MacFSEventsWatcher::start() {
         &context,
         paths_to_watch,
         kFSEventStreamEventIdSinceNow,
-        0.35,
+        2.0,
         flags);
     CFRelease(paths_to_watch);
 

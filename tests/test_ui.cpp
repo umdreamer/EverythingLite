@@ -137,6 +137,7 @@ class UiTest : public QObject {
     }
     void init() {
         auto settings = makeAppSettings();
+        settings.setValue("index/syncRetryBaseMs", 1500);
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
@@ -646,7 +647,7 @@ class UiTest : public QObject {
         window.show();
         window.watcher_->stop();
         QVERIFY(window.search_metrics_label_);
-        window.search_metrics_label_->setText(QStringLiteral("结果 7 · 12.3 ms"));
+        window.search_metrics_label_->setText(QStringLiteral("搜索结果 7 条 · 12.3 ms"));
         const auto metrics = window.search_metrics_label_->text();
         const auto path = QStringLiteral("/synthetic/very/long/directory/name/that/should/not/stretch/the/status/bar");
         window.reportSyncOutcome(path, path, true, QStringLiteral("synthetic synchronization failure"));
@@ -657,13 +658,33 @@ class UiTest : public QObject {
         QVERIFY(!window.sync_error_label_->text().contains(path));
         QVERIFY(window.sync_error_label_->toolTip().contains(path));
         window.scheduleFileEvent({{}, false, "synthetic watcher failure with a long path"});
-        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("监听异常"));
+        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("目录监听异常"));
         QVERIFY(window.watcher_error_label_->toolTip().contains(QStringLiteral("long path")));
         QVERIFY(!window.watcher_error_label_->wordWrap());
         window.status_label_->resize(110, window.status_label_->height());
         window.status_label_->setText(path);
         QVERIFY(window.status_label_->displayText().endsWith(QChar(0x2026)));
         QVERIFY(window.statusBar()->height() <= window.fontMetrics().height() * 2 + 16);
+    }
+    void statusLabelsExplainListenerSyncAndSearch() {
+        auto settings = makeAppSettings();
+        settings.remove("index/syncRetryBaseMs");
+        MainWindow window;
+        window.watcher_->stop();
+        QCOMPARE(window.sync_retry_base_ms_, 5000);
+        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("目录监听正常"));
+        QVERIFY(window.watcher_error_label_->toolTip().contains(QStringLiteral("索引目录")));
+        QCOMPARE(window.sync_error_label_->text(), QStringLiteral("索引同步待命"));
+        QCOMPARE(window.search_metrics_label_->text(), QStringLiteral("尚未搜索"));
+        const auto path = QStringLiteral("/synthetic/status-source");
+        window.reportSyncOutcome(path, path, true, {});
+        QCOMPARE(window.sync_error_label_->text(), QStringLiteral("索引同步成功"));
+        QVERIFY(window.sync_error_label_->toolTip().contains(QStringLiteral("已完成")));
+        window.search_edit_->setText(QStringLiteral("alpha"));
+        window.runSearch();
+        QTRY_COMPARE(window.search_log_entries_.back().state, QStringLiteral("完成"));
+        QVERIFY(window.search_metrics_label_->text().startsWith(QStringLiteral("搜索结果 1 条 · ")));
+        QVERIFY(window.search_metrics_label_->text().endsWith(QStringLiteral(" ms")));
     }
     void searchLogListsRunDetailsAndCanBeCleared() {
         MainWindow window;
@@ -730,6 +751,59 @@ class UiTest : public QObject {
         window.runSearch();
         QCOMPARE(window.search_log_entries_.back().state, QStringLiteral("未执行"));
         QVERIFY(window.search_log_entries_.back().detail.contains(QStringLiteral("未索引")));
+    }
+    void unchangedFilesystemSyncDoesNotRepeatSearch() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root = dir.filePath(QStringLiteral("root"));
+        QVERIFY(QDir().mkpath(root));
+        QFile first(root + QStringLiteral("/alpha-one.txt"));
+        QVERIFY(first.open(QIODevice::WriteOnly)); first.close();
+        const auto db_path = dir.filePath(QStringLiteral("index.db"));
+        IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        const auto saved_db = qgetenv("EVERYTHING_LITE_DB");
+        qputenv("EVERYTHING_LITE_DB", db_path.toUtf8());
+        MainWindow window;
+        qputenv("EVERYTHING_LITE_DB", saved_db);
+        window.watcher_->stop();
+        window.roots_ = {root};
+        window.search_edit_->setText(QStringLiteral("alpha"));
+        window.runSearch();
+        QTRY_COMPARE(window.search_log_entries_.back().state, QStringLiteral("完成"));
+        QCOMPARE(window.model_->rowCount(), 1);
+        const auto initial_log_count = window.search_log_entries_.size();
+        const auto initial_status = window.status_label_->text();
+        const auto initial_metrics = window.search_metrics_label_->text();
+        window.scheduleFileEvent({first.fileName().toStdString(), false, {}});
+        window.processPendingEvents();
+        QTRY_VERIFY(!window.worker_thread_);
+        QTest::qWait(2100);
+        QCOMPARE(window.search_log_entries_.size(), initial_log_count);
+        QCOMPARE(window.status_label_->text(), initial_status);
+        QCOMPARE(window.search_metrics_label_->text(), initial_metrics);
+
+        QFile second(root + QStringLiteral("/alpha-two.txt"));
+        QVERIFY(second.open(QIODevice::WriteOnly)); second.close();
+        window.scheduleFileEvent({second.fileName().toStdString(), false, {}});
+        window.processPendingEvents();
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(), 2, 5000);
+        QCOMPARE(window.search_log_entries_.size(), initial_log_count + 1);
+    }
+    void ownIndexDatabaseEventsDoNotScheduleSync() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto db_path = dir.filePath(QStringLiteral("index.db"));
+        const auto saved_db = qgetenv("EVERYTHING_LITE_DB");
+        qputenv("EVERYTHING_LITE_DB", db_path.toUtf8());
+        MainWindow window;
+        qputenv("EVERYTHING_LITE_DB", saved_db);
+        window.watcher_->stop();
+        window.roots_ = {dir.path()};
+        window.scheduleFileEvent({db_path.toStdString(), false, {}});
+        window.scheduleFileEvent({(db_path + QStringLiteral("-wal")).toStdString(), false, {}});
+        window.scheduleFileEvent({(db_path + QStringLiteral("-shm")).toStdString(), false, {}});
+        QVERIFY(window.pending_paths_.isEmpty());
+        QVERIFY(window.pending_rescan_roots_.isEmpty());
+        QVERIFY(!window.event_timer_->isActive());
     }
     void manualRebuildShowsBusyAndCompletionFeedback() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -979,7 +1053,7 @@ class UiTest : public QObject {
         window.selectFolderScope(new_root);
         QVERIFY(window.roots_.contains(new_root));
         QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
-        QCOMPARE(window.sync_error_label_->text(), QStringLiteral("同步正常"));
+        QCOMPARE(window.sync_error_label_->text(), QStringLiteral("索引同步成功"));
         Database indexed(db_path.toStdString());
         QVERIFY2(indexed.totalFileCount()>=2,qPrintable(window.status_label_->text()));
         QTRY_VERIFY_WITH_TIMEOUT(window.search_request_id_>0,5000);
@@ -1600,7 +1674,7 @@ class UiTest : public QObject {
         QVERIFY(!window.watcher_error_.isEmpty());
         window.scheduleFileEvent(FileEvent{fixture_root.toStdString(), true, {}});
         QVERIFY(window.watcher_error_.isEmpty());
-        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("监听正常"));
+        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("目录监听正常"));
     }
     void watcherErrorSurvivesStatisticsAndSearch() {
         MainWindow window;
@@ -1615,7 +1689,7 @@ class UiTest : public QObject {
         window.search_edit_->setText("alpha");
         window.runSearch();
         QTRY_COMPARE(window.model_->rowCount(), 1);
-        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("监听异常"));
+        QCOMPARE(window.watcher_error_label_->text(), QStringLiteral("目录监听异常"));
         QCOMPARE(window.watcher_error_label_->toolTip(), QStringLiteral("synthetic watcher failure"));
         QVERIFY(!window.watcher_error_label_->isHidden());
     }

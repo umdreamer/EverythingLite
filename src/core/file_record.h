@@ -42,6 +42,7 @@ struct SearchResult {
 struct IndexStats {
     bool completed = false;
     bool cancelled = false;
+    bool changed = false;
     std::string error;
     std::uint64_t scanned = 0;
     std::uint64_t indexed = 0;

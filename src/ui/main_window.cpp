@@ -528,8 +528,8 @@ void MainWindow::buildUi() {
     status_label_->setTextFormat(Qt::PlainText);
     status_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     statusBar()->addWidget(status_label_, 1);
-    search_metrics_label_ = new ElidedLabel(QStringLiteral("结果 0 · — ms"), this);
-    search_metrics_label_->setFixedWidth(175);
+    search_metrics_label_ = new ElidedLabel(QStringLiteral("尚未搜索"), this);
+    search_metrics_label_->setFixedWidth(205);
     search_metrics_label_->setAlignment(Qt::AlignCenter);
     statusBar()->addPermanentWidget(search_metrics_label_);
     search_state_label_ = new ElidedLabel(this);
@@ -537,14 +537,14 @@ void MainWindow::buildUi() {
     sync_error_label_ = new ElidedLabel(this);
     sync_error_label_->setTextFormat(Qt::PlainText);
     sync_error_label_->setWordWrap(false);
-    sync_error_label_->setFixedWidth(110);
-    sync_error_label_->setText(QStringLiteral("同步正常"));
+    sync_error_label_->setFixedWidth(140);
+    sync_error_label_->setText(QStringLiteral("索引同步待命"));
     statusBar()->addPermanentWidget(sync_error_label_);
     watcher_error_label_ = new ElidedLabel(this);
     watcher_error_label_->setTextFormat(Qt::PlainText);
     watcher_error_label_->setWordWrap(false);
-    watcher_error_label_->setFixedWidth(90);
-    watcher_error_label_->setText(QStringLiteral("监听待启动"));
+    watcher_error_label_->setFixedWidth(120);
+    watcher_error_label_->setText(QStringLiteral("目录监听待启动"));
     statusBar()->addPermanentWidget(watcher_error_label_);
     search_state_label_->setTextFormat(Qt::PlainText);
     search_state_label_->setFixedWidth(160);
@@ -709,6 +709,7 @@ void MainWindow::buildMenus() {
 
 void MainWindow::loadSettings() {
     auto settings = makeAppSettings();
+    sync_retry_base_ms_ = std::clamp(settings.value(QStringLiteral("index/syncRetryBaseMs"), 5000).toInt(), 1000, 60000);
     roots_ = settings.value(QStringLiteral("index/roots")).toStringList();
     if (roots_.isEmpty()) roots_ = defaultRoots();
     scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
@@ -1167,7 +1168,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
 
                 const auto loaded = self->model_->rowCount();
                 self->status_label_->setText(QStringLiteral("搜索完成"));
-                self->search_metrics_label_->setText(QStringLiteral("结果 %1%2 · %3 ms")
+                self->search_metrics_label_->setText(QStringLiteral("搜索结果 %1%2 条 · %3 ms")
                     .arg(loaded)
                     .arg(self->results_have_more_ ? QStringLiteral("+") : QString{})
                     .arg(self->last_search_elapsed_ms_, 0, 'f', 1));
@@ -1233,26 +1234,22 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
         worker_thread_ = nullptr;
         setBusy(false);
         if (closing_) return;
+        const bool count_changed = stats->valid && indexed_count_ != stats->count;
         if (stats->valid) {
             indexed_count_ = stats->count;
             name_search_available_ = stats->available;
             name_search_ready_ = stats->ready;
         }
         if (!stats->error.isEmpty()) {
-            sync_error_label_->setText(QStringLiteral("同步失败"));
-            sync_error_label_->setToolTip(QStringLiteral("同步失败（保留缓存）：%1").arg(stats->error));
+            sync_error_label_->setText(QStringLiteral("索引同步失败"));
+            sync_error_label_->setToolTip(QStringLiteral("索引同步失败（保留缓存）：%1").arg(stats->error));
             sync_error_label_->setStyleSheet(QStringLiteral("color: #b33"));
-        } else if (sync_errors_.isEmpty()) {
-            sync_error_label_->setText(QStringLiteral("同步正常"));
-            sync_error_label_->setToolTip(QString{});
-            sync_error_label_->setStyleSheet(QString{});
         }
         if(on_finished) on_finished(stats->error);
         if(storage_maintenance_) {tryStartStorageMaintenance();return;}
-        updateCachedStatus();
-        Q_UNUSED(refresh_search_on_finish)
+        if (refresh_search_on_finish || count_changed) updateCachedStatus();
         // Manual rebuilds and event batches share the same user-query protection.
-        scheduleFilesystemResultRefresh();
+        if (refresh_search_on_finish) scheduleFilesystemResultRefresh();
         // Continue only queues whose own deadlines have already elapsed.
         // A completed worker never advances a fresh normal event or retry.
         if (normal_events_due_ || !ready_sync_retries_.isEmpty()) {
@@ -1652,7 +1649,7 @@ void MainWindow::showSearchLog() {
               << QStringLiteral("当前已加载：%1").arg(entry.loaded_count)
               << (entry.sync_failure_count > 0
                       ? QStringLiteral("索引同步：同步失败 %1；缓存结果可能过期，详情见“工具 → 索引状态”").arg(entry.sync_failure_count)
-                      : QStringLiteral("索引同步：正常"));
+                      : QStringLiteral("索引同步：搜索开始时无失败记录"));
         if (!entry.detail.isEmpty()) lines << QStringLiteral("详情：%1").arg(entry.detail);
         details->setPlainText(lines.join(QLatin1Char('\n')));
     });
@@ -1839,9 +1836,10 @@ void MainWindow::restartWatcher(bool refresh_stats) {
     } else if (!watcher_->lastError().empty()) {
         watcher_error_ = fromUtf8(watcher_->lastError());
     }
-    watcher_error_label_->setText(watcher_error_.isEmpty() ? QStringLiteral("监听正常") : QStringLiteral("监听异常"));
+    watcher_error_label_->setText(watcher_error_.isEmpty() ? QStringLiteral("目录监听正常") : QStringLiteral("目录监听异常"));
     watcher_error_label_->setToolTip(watcher_error_.isEmpty()
-        ? fromUtf8(watcher_->backendName()) : watcher_error_);
+        ? QStringLiteral("监听 %1 个索引目录的文件变化；后端：%2").arg(roots_.size()).arg(fromUtf8(watcher_->backendName()))
+        : watcher_error_);
     watcher_error_label_->setStyleSheet(watcher_error_.isEmpty() ? QString{} : QStringLiteral("color: #b33"));
     if (refresh_stats) refreshStats();
     else updateCachedStatus();

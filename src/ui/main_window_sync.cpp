@@ -2,6 +2,7 @@
 #include "core/index_manager.h"
 #include "core/path_utils.h"
 
+#include <QDir>
 #include <QLabel>
 #include <QMetaObject>
 #include <QStatusBar>
@@ -31,18 +32,23 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
         : watcher_ ? QString::fromUtf8(watcher_->lastError().c_str()) : QString{};
     if (!error.isEmpty()) {
         watcher_error_ = error;
-        watcher_error_label_->setText(QStringLiteral("监听异常"));
+        watcher_error_label_->setText(QStringLiteral("目录监听异常"));
         watcher_error_label_->setToolTip(error);
         watcher_error_label_->setStyleSheet(QStringLiteral("color: #b33"));
     }
     if (event.path.empty()) return;
     const auto path = QString::fromUtf8(event.path.c_str());
+    const auto normalized_path = QDir::cleanPath(path);
+    const auto own_database = QDir::cleanPath(db_path_);
+    if (!event.needs_full_rescan &&
+        (normalized_path == own_database || normalized_path.startsWith(own_database + QLatin1Char('-')))) return;
     const auto root = rootForPath(path);
     if (root.isEmpty()) return;
     if (event.needs_full_rescan && error.isEmpty()) {
         watcher_error_.clear();
-        watcher_error_label_->setText(QStringLiteral("监听正常"));
-        watcher_error_label_->setToolTip(QString{});
+        watcher_error_label_->setText(QStringLiteral("目录监听正常"));
+        watcher_error_label_->setToolTip(QStringLiteral("监听 %1 个索引目录的文件变化；后端：%2")
+            .arg(roots_.size()).arg(watcher_ ? QString::fromUtf8(watcher_->backendName().c_str()) : QStringLiteral("未知")));
         watcher_error_label_->setStyleSheet(QString{});
     }
 
@@ -179,13 +185,17 @@ void MainWindow::dispatchSyncJobs() {
     ready_sync_retries_.clear();
     if (jobs.empty()) return;
     const auto db_path = db_path_;
-    startWorker([this, db_path, jobs] {
+    auto changed = std::make_shared<std::atomic_bool>(false);
+    sync_error_label_->setText(QStringLiteral("索引同步中"));
+    sync_error_label_->setToolTip(QStringLiteral("正在将索引目录的文件变化写入索引"));
+    startWorker([this, db_path, jobs, changed] {
         auto process = [&](const QString& root, const QString& path, bool rescan) {
             QString error;
             try {
                 IndexManager manager(native(db_path));
                 const auto stats = rescan ? manager.rebuildRoot(native(root))
                     : manager.applyPathChange(native(root), native(path));
+                if (stats.changed) changed->store(true, std::memory_order_relaxed);
                 if (!stats.completed) {
                     error = stats.cancelled ? QStringLiteral("同步已取消")
                         : stats.error.empty() ? QStringLiteral("扫描未完整完成") : QString::fromUtf8(stats.error.c_str());
@@ -200,7 +210,9 @@ void MainWindow::dispatchSyncJobs() {
             }, Qt::QueuedConnection);
         };
         for (const auto& job : jobs) process(job.root, job.path, job.rescan);
-    }, QStringLiteral("正在同步文件变化…"), false);
+    }, {}, false, [this, changed](const QString&) {
+        if (changed->load(std::memory_order_relaxed)) scheduleFilesystemResultRefresh();
+    });
 }
 
 void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool requested_rescan, const QString& error) {
@@ -243,7 +255,7 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         const auto attempts = ++sync_attempts_[key];
         if (attempts < 3) {
             ready_sync_retries_.remove(key);
-            retry_deadlines_.insert(key, QDeadlineTimer(1500 * attempts, Qt::PreciseTimer));
+            retry_deadlines_.insert(key, QDeadlineTimer(sync_retry_base_ms_ * attempts, Qt::PreciseTimer));
         } else {
             retry_deadlines_.remove(key);
             ready_sync_retries_.remove(key);
@@ -253,11 +265,11 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
     }
     armRetryTimer();
     const auto message = sync_errors_.isEmpty() ? QString{}
-        : QStringLiteral("同步失败（保留缓存；最多自动重试两次，新事件可重试）：%1")
+        : QStringLiteral("索引同步失败（保留缓存；最多自动重试两次，新事件可重试）：%1")
             .arg(sync_errors_.values().join(QStringLiteral("；")));
     sync_error_label_->setText(sync_errors_.isEmpty()
-        ? QStringLiteral("同步正常") : QStringLiteral("同步失败 %1").arg(sync_errors_.size()));
-    sync_error_label_->setToolTip(message);
+        ? QStringLiteral("索引同步成功") : QStringLiteral("索引同步失败 %1").arg(sync_errors_.size()));
+    sync_error_label_->setToolTip(message.isEmpty() ? QStringLiteral("最近一次索引同步已完成；当前无失败范围") : message);
     sync_error_label_->setStyleSheet(sync_errors_.isEmpty() ? QString{} : QStringLiteral("color: #b33"));
     if (!message.isEmpty()) statusBar()->showMessage(QStringLiteral("索引同步失败；详情见“工具 → 索引状态”"), 10000);
     else if (statusBar()->currentMessage().startsWith(QStringLiteral("索引同步失败"))) statusBar()->clearMessage();

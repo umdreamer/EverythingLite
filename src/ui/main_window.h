@@ -133,6 +133,7 @@ private:
     QHash<QString, SyncFailureScope> sync_failure_scopes_;
     QHash<QString, int> sync_attempts_;
     QHash<QString, QDeadlineTimer> retry_deadlines_;
+    int sync_retry_base_ms_ = 5000;
     QSet<QString> ready_sync_retries_;
     QHash<QString, QString> sync_errors_;
     QSet<QString> dormant_paths_;

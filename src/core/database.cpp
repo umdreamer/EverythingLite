@@ -480,6 +480,7 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         std::unique_ptr<DirectoryRecordWriter> compact_writer;
         if(compact)compact_writer=std::make_unique<DirectoryRecordWriter>(conn.get());
         std::vector<FileRecord> records; std::uint64_t count=0;
+        bool content_changed = false;
         while(next(records)) {
             std::vector<FileRecord> accepted; accepted.reserve(records.size());
             for(const auto& record:records) {
@@ -491,12 +492,13 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
                 accepted.push_back(record);
                 sqlite3_reset(keys.get()); sqlite3_clear_bindings(keys.get());
                 if(compact) {
-                    compact_writer->upsert(s.id,record,relative,0);
+                    content_changed = compact_writer->upsert(s.id,record,relative,0) || content_changed;
                     sqlite3_bind_int64(keys.get(),1,compact_writer->entryId(s.id,relative));
                 } else bindText(keys.get(),1,relative);
                 if(sqlite3_step(keys.get())!=SQLITE_DONE) throw std::runtime_error("duplicate snapshot path");
             }
-            if(!compact)upsertRecords(conn.get(),s,accepted,0,policy); count+=accepted.size(); records.clear();
+            if(!compact) content_changed = upsertRecords(conn.get(),s,accepted,0,policy) || content_changed;
+            count+=accepted.size(); records.clear();
         }
         std::uint64_t retained_count=0;
         // Pruned but unconfirmed/offline children cannot prove deletion of
@@ -572,6 +574,7 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             if(compact)conn.exec("INSERT INTO files_name_fts(files_name_fts,rank) VALUES('integrity-check',1);");
             installFtsTriggers(conn); setMetadataFlag(conn.get(),"name_fts_ready",true);
         }
+        stats.changed = content_changed || stats.removed > 0 || (full && s.status != SourceStatus::Accessible);
         conn.exec("COMMIT;"); return stats;
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }

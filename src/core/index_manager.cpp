@@ -56,6 +56,7 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
         try {
             const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative, &descendants);
             stats.removed = merged.removed;
+            stats.changed = merged.changed;
         } catch (const std::exception& error) {
             stats.completed = false; stats.error = error.what(); stats.indexed = 0;
         }
@@ -72,7 +73,10 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
             using namespace std::chrono;
             updated.last_check = duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
             // A concurrent catalog update owns the new state; never overwrite it.
-            try { database_.saveSource(updated); } catch (const std::exception&) {}
+            try {
+                database_.saveSource(updated);
+                stats.changed = updated.status != expected.status;
+            } catch (const std::exception&) {}
         }
     }
     return stats;
@@ -107,6 +111,7 @@ IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
         const auto stats = rebuildSource(entry.second, progress, cancelled);
         total.scanned += stats.scanned; total.indexed += stats.indexed;
         total.skipped += stats.skipped; total.removed += stats.removed;
+        total.changed = total.changed || stats.changed;
         total.completed = total.completed && stats.completed;
         total.cancelled = total.cancelled || stats.cancelled;
         if (!stats.error.empty()) total.error = stats.error;

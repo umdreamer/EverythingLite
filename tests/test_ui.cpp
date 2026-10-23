@@ -30,6 +30,8 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QPlainTextEdit>
+#include <QProgressBar>
+#include <QProgressDialog>
 #include <QInputMethodEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -400,13 +402,18 @@ class UiTest : public QObject {
         SearchResult unknown; unknown.file.name="cache.txt"; unknown.file.path="/unreachable/cache.txt";
         model.setResults({unknown});
         QCOMPARE(model.columnCount(), 6);
-        QVERIFY(model.data(model.index(0,4)).toString().contains(QStringLiteral("未分类")));
+        QVERIFY(model.data(model.index(0,4)).toString().contains(QStringLiteral("本地磁盘")));
         QVERIFY(model.data(model.index(0,5)).toString().contains(QStringLiteral("未核验")));
         auto offline=unknown; offline.source_label="NAS"; offline.source_type=SourceType::NAS;
         offline.source_status=SourceStatus::Offline; offline.source_last_success=1700000000;
         model.setResults({offline});
         QVERIFY(model.data(model.index(0,5)).toString().contains(QStringLiteral("离线缓存")));
         QVERIFY(model.data(model.index(0,5),Qt::ToolTipRole).toString().contains(QStringLiteral("上次可用")));
+        auto app=unknown; app.file.name="Sample.app"; app.file.path="/Applications/Sample.app";
+        app.file.is_directory=true;
+        model.setResults({app});
+        QVERIFY(model.data(model.index(0,0)).toString().contains(QStringLiteral("程序包")));
+        QVERIFY(!model.data(model.index(0,0),Qt::DecorationRole).value<QIcon>().isNull());
     }
     void cancellationReachesServiceAndWorker() {
         MainWindow window; window.watcher_->stop();
@@ -819,6 +826,9 @@ class UiTest : public QObject {
         QFile file(dir.filePath("new.txt")); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
         window.rebuildIndex();
         QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("正在重建")));
+        auto* progress=window.findChild<QProgressDialog*>(QStringLiteral("rebuildProgressDialog"));
+        QVERIFY(progress && progress->isVisible());
+        QVERIFY(progress->labelText().contains(QStringLiteral("已处理")));
         QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
         Database db(window.db_path_.toStdString()); QVERIFY(!db.search("new.txt").empty());
         QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("重建完成")));
@@ -1764,6 +1774,10 @@ class UiTest : public QObject {
         const auto rules=dialog.rules();
         QCOMPARE(rules.directories,std::vector<std::string>{"/synthetic/offline-folder"});
         QCOMPARE(rules.files,std::vector<std::string>{"/synthetic/offline-file.txt"});
+        auto* app_contents=dialog.findChild<QCheckBox*>(QStringLiteral("indexAppBundleContents"));
+        QVERIFY(app_contents && !app_contents->isChecked());
+        app_contents->setChecked(true);
+        QVERIFY(dialog.rules().index_app_bundle_contents);
     }
     void exclusionSettingsShowsSaveProgress() {
         ExclusionSettingsDialog dialog({}); dialog.show();
@@ -1771,8 +1785,14 @@ class UiTest : public QObject {
         auto* progress=dialog.findChild<QLabel*>(QStringLiteral("exclusionSaving"));
         QVERIFY(progress && progress->isVisible());
         QVERIFY(progress->text().contains(QStringLiteral("正在保存")));
+        auto* bar=dialog.findChild<QProgressBar*>(QStringLiteral("exclusionProgressBar"));
+        QVERIFY(bar && bar->isVisible());
+        dialog.setSaveProgress(3, 10, 2);
+        QCOMPARE(bar->value(),28);
+        QVERIFY(progress->text().contains(QStringLiteral("3 / 10")));
         dialog.setSaving(false);
         QVERIFY(progress->isHidden());
+        QVERIFY(bar->isHidden());
     }
     void exclusionSettingsKeepsEditsWhenIndexing() {
         MainWindow window; window.watcher_->stop();

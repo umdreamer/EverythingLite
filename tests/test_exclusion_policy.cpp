@@ -63,6 +63,11 @@ int main() {
         rules.file_filter=invalid; assert(rejected([&]{ ExclusionPolicy invalid_policy(rules); }));
     }
     rules.file_filter=""; rules.directories={"relative"}; assert(rejected([&]{ExclusionPolicy invalid_policy(rules);}));
+    assert(!ExclusionPolicy({}).excludes("/Applications/Sample.app",true));
+    assert(ExclusionPolicy({}).excludes("/Applications/Sample.app/Contents/Info.plist",false));
+    assert(ExclusionPolicy({}).excludes("/Applications/Sample.APP/Contents",true));
+    ExclusionRules include_bundles;include_bundles.index_app_bundle_contents=true;
+    assert(!ExclusionPolicy(include_bundles).excludes("/Applications/Sample.app/Contents/Info.plist",false));
     const auto nonce=std::chrono::steady_clock::now().time_since_epoch().count();
     auto base=fs::temp_directory_path()/("everything-lite-policy-test-"+std::to_string(nonce));
     auto root=base/"root"; fs::create_directories(root/"cache-parent"/"nested"); fs::create_directories(root/"sample-other");
@@ -74,6 +79,27 @@ int main() {
     auto typed_root=base/"types"; fs::create_directories(typed_root/"directory.tmp");
     std::ofstream(typed_root/"directory.tmp"/"inside.txt")<<"inside";
     std::ofstream(typed_root/"cache-file")<<"ordinary file";
+    const auto app_root=base/"apps",app=app_root/"Sample.app";
+    fs::create_directories(app/"Contents");
+    std::ofstream(app/"Contents"/"Info.plist")<<"synthetic";
+    IndexManager app_manager((base/"apps.db").string());auto& app_db=app_manager.database();
+    assert(app_manager.rebuildRoot(app_root.string()).completed);
+    assert(app_db.search("Sample.app").size()==1);
+    assert(app_db.search("Info.plist").empty());
+    assert(app_manager.applyPathChange(app_root.string(),(app/"Contents"/"Info.plist").string()).completed);
+    assert(app_db.search("Info.plist").empty());
+    app_db.saveExclusionPolicy(include_bundles);
+    assert(app_manager.rebuildRoot(app_root.string()).completed);
+    assert(app_db.search("Info.plist").size()==1);
+    sql(base/"apps.db","DELETE FROM app_metadata WHERE key IN ('index_app_bundle_contents','app_bundle_policy_applied')");
+    // The first unchanged save after upgrading an older index must remove
+    // package descendants; later unchanged saves can skip the full sweep.
+    app_db.saveExclusionPolicy({});
+    assert(app_db.search("Info.plist").empty() && app_db.search("Sample.app").size()==1);
+    app_db.saveExclusionPolicy(include_bundles);
+    assert(app_manager.rebuildRoot(app_root.string()).completed && app_db.search("Info.plist").size()==1);
+    app_db.saveExclusionPolicy({});
+    assert(app_db.search("Info.plist").empty());
     ExclusionRules typed_rules; typed_rules.file_filter="*.tmp"; typed_rules.folder_filter="cache*";
     ExclusionPolicy typed(typed_rules); std::vector<FileRecord> typed_rows;
     auto typed_scan=FileScanner().scanTree(typed_root.string(),[&](std::vector<FileRecord>&& batch) {
@@ -88,7 +114,13 @@ int main() {
     auto first=manager.rebuildRoot(root.string()); assert(first.completed);
     auto old_source=db.sources().front();
     ExclusionRules applied; applied.folder_filter="cache*"; applied.files={(root/"exact.txt").string()};
-    const auto purged=db.saveExclusionPolicy(applied); assert(purged==4);
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> progress;
+    const auto purged=db.saveExclusionPolicy(applied,[&](std::uint64_t done,std::uint64_t total) {
+        progress.emplace_back(done,total);
+    });
+    assert(purged==4);
+    assert(!progress.empty() && progress.front().first==0);
+    assert(progress.back().first==progress.back().second && progress.back().second==first.indexed);
     const auto strict_policy=db.exclusionPolicy(); assert(strict_policy.revision==1);
     assert(db.search("hidden").empty() && db.search("exact").empty());
     auto pruned=manager.rebuildRoot(root.string()); assert(pruned.completed && pruned.scanned<first.scanned);

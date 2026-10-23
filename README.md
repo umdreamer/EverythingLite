@@ -2,7 +2,7 @@
 
 > **Vibe Coding 项目**：本项目通过提示驱动的 AI 生成、修改与迭代形成，非个人逐行手工编写。该开发方式不等于代码已经得到全面验证；功能实现、自动测试、交互验收与性能验证应分别评估。
 
-Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前本地试用版本为 **0.4.15-fixbug**。技术栈为 C++17、Qt 6 Widgets、SQLite、PCRE2 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
+Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前本地试用版本为 **0.4.16**。技术栈为 C++17、Qt 6 Widgets、SQLite、PCRE2 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
 
 ## 功能
 
@@ -15,6 +15,8 @@ macOS 使用 FSEvents，Linux 使用递归 inotify 监听文件变化。两平�
 GUI 显示名称为 **Everything Lite**，GUI 可执行文件名为 `EverythingLite`（macOS 为 `EverythingLite.app`），命令行程序名为 `everything-lite-cli`。文件名、界面名称与内部配置标识分别按用途命名，已有数据库及 QSettings 标识保持兼容。
 
 索引保留来源身份及离线缓存。Core、CLI 和 GUI 支持排除目录与文件，过滤器可使用 `*`、`**`、`?` 和 `regex:`。GUI 可只搜索指定文件夹；选择未索引目录时，会询问是否加入索引，拒绝后不搜索。GUI 可切换是否显示点号开头及 Finder 标记为隐藏的项目；旧索引中的 Finder 标记须在对应目录重新扫描后才完整。CLI 对应文件夹参数为 `--in-folder PATH`。`storage stats` 报告主库、辅助文件、空闲页和同目录备份；`storage optimize` 显式迁移到目录字典与紧凑名称索引，`storage compact` 显式整理空闲页。Mac GUI 的这两项维护操作不再自动创建备份；CLI 的 `--backup` 操作仍保留恢复副本。实际节省空间取决于索引内容，见[索引存储](docs/INDEX_STORAGE.md)。
+
+0.4.16 默认把未识别来源显示为“本地磁盘”；完整重建时会检查可识别的本地、NAS 或外置来源。`.app` 目录默认只索引程序包本身，结果显示程序包名称与图标；“排除规则”中可开启包内索引。旧索引中的包内记录需要保存规则或重建索引后清理。排除规则保存窗口显示已检查条数和耗时，手动重建窗口显示当前目录、已处理条数和耗时；扫描总量未知时不显示估算百分比。
 
 ## 构建与测试
 

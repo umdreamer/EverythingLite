@@ -17,7 +17,7 @@ static ScanTask fixture(const fs::path& base) {
     auto probe=beginSourceProbe(s).result();assert(!probe.identity.empty());
     s.identity=probe.identity;s.mount_fingerprint=probe.mount_fingerprint;
     s.label="砀例甲 \"quote\" \\ slash";s.mode=IndexMode::Periodic;s.interval_seconds=42;s.last_check=11;s.last_success=10;s.revision=3;s.policy_revision=9;
-    ExclusionRules rules;rules.files={(base/"root"/"excluded").string()};rules.directories={(base/"root"/"hidden").string()};rules.folder_filter="cache*";rules.file_filter="*.bak";
+    ExclusionRules rules;rules.files={(base/"root"/"excluded").string()};rules.directories={(base/"root"/"hidden").string()};rules.folder_filter="cache*";rules.file_filter="*.bak";rules.index_app_bundle_contents=true;
     return ScanTask({s,ExclusionPolicy(rules,9),{(base/"root"/"nested").string()},s.root,(base/"job"/"snapshot.sqlite").string(),"synthetic-nonce"},(base/"locks"/"source-7.scan.lock").string());
 }
 static void rejects(const std::function<void()>& action) {bool rejected=false;try{action();}catch(const std::exception&){rejected=true;}assert(rejected && "invalid or unsafe task must be rejected");}
@@ -81,7 +81,7 @@ int main(int argc,char** argv) {
     assert(fs::exists(path) && "writing an explicit task must create its manifest");
     auto read=readScanTask(path);const auto& s=read.scan.source;const auto& original=task.scan.source;
     assert(s.id==original.id && s.label==original.label && s.type==original.type && s.mode==original.mode && s.status==original.status && s.interval_seconds==original.interval_seconds && s.identity==original.identity && s.root==original.root && s.mount_fingerprint==original.mount_fingerprint && s.last_check==11 && s.last_success==10 && s.revision==3 && s.policy_revision==9);
-    assert(read.scan.policy.revision==9 && read.scan.policy.rules().files==task.scan.policy.rules().files && read.scan.policy.rules().directories==task.scan.policy.rules().directories && read.scan.policy.rules().folder_filter=="cache*" && read.scan.policy.rules().file_filter=="*.bak");
+    assert(read.scan.policy.revision==9 && read.scan.policy.rules().files==task.scan.policy.rules().files && read.scan.policy.rules().directories==task.scan.policy.rules().directories && read.scan.policy.rules().folder_filter=="cache*" && read.scan.policy.rules().file_filter=="*.bak" && read.scan.policy.rules().index_app_bundle_contents);
     assert(read.scan.nested_source_roots==task.scan.nested_source_roots && read.scan.scan_path==s.root && read.scan.snapshot_path==task.scan.snapshot_path && read.scan.nonce==task.scan.nonce && read.lock_path==task.lock_path);
     regressions(base,task,path);
     fs::remove_all(base);std::cout<<"scan request tests passed\n";

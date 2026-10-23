@@ -9,6 +9,10 @@ namespace everything_lite {
 namespace fs = std::filesystem;
 
 namespace {
+bool appBundleName(const std::string& name) {
+    const auto folded=asciiFold(name);
+    return folded.size()>=4 && folded.compare(folded.size()-4,4,".app")==0;
+}
 std::int64_t toUnixSeconds(const fs::file_time_type& value) {
     using namespace std::chrono;
     const auto system_time = time_point_cast<system_clock::duration>(
@@ -110,7 +114,8 @@ IndexStats FileScanner::scanTree(const std::string& root,
         return batch.size() < batch_size_ || flush();
     };
     if (!append(root_path,fs::is_directory(status))) return stats;
-    if (fs::is_directory(status)) {
+    if (fs::is_directory(status) && !(policy && !policy->indexAppBundleContents() &&
+                                      appBundleName(pathToUtf8(root_path.filename())))) {
         // Never skip permission errors: an incomplete enumeration cannot be
         // used to infer deletions from a previously complete snapshot.
         fs::recursive_directory_iterator it(root_path, fs::directory_options::none, ec), end;
@@ -123,7 +128,11 @@ IndexStats FileScanner::scanTree(const std::string& root,
             const bool is_directory=fs::is_directory(entry_status);
             if(is_directory && policy && policy->excludes(path,true)) {
                 it.disable_recursion_pending(); ++stats.skipped;
-            } else if (!append(it->path(),is_directory)) return stats;
+            } else {
+                if (!append(it->path(),is_directory)) return stats;
+                if (is_directory && policy && !policy->indexAppBundleContents() &&
+                    appBundleName(pathToUtf8(it->path().filename()))) it.disable_recursion_pending();
+            }
             it.increment(ec);
             if (ec) { stats.error = ec.message(); return stats; }
         }
@@ -153,6 +162,10 @@ IndexStats FileScanner::scanTree(const std::string& root,
 namespace everything_lite {
 namespace fs=std::filesystem;
 namespace {
+bool appBundleName(const std::string& name) {
+    const auto folded=asciiFold(name);
+    return folded.size()>=4 && folded.compare(folded.size()-4,4,".app")==0;
+}
 bool finderInvisible(const std::string& path,const struct stat& st) {
 #if defined(__APPLE__)
     if ((st.st_flags & UF_HIDDEN) != 0) return true;
@@ -283,7 +296,9 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                     const auto decision=enter(child,nested.fd);
                     if(decision==DirectoryDecision::Prune){++stats.skipped;continue;}
                     if(decision==DirectoryDecision::Error)return fail("directory boundary check failed");
-                    if(!append(child,st,child_hidden) || !walk(nested.fd,child,child_hidden))return false;
+                    if(!append(child,st,child_hidden))return false;
+                    if(!(policy && !policy->indexAppBundleContents() && appBundleName(name)) &&
+                       !walk(nested.fd,child,child_hidden))return false;
                     // A held fd survives rename/replacement. Check the current
                     // entry again on exit, before accepting old-bound paths.
                     struct stat current{},after{};
@@ -296,7 +311,9 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
             }
             return true;
         };
-        if(root_fd && !walk(root_fd->fd,scope,root_hidden))return stats;
+        if(root_fd && !(policy && !policy->indexAppBundleContents() &&
+                        appBundleName(pathToUtf8(utf8ToPath(scope).filename()))) &&
+           !walk(root_fd->fd,scope,root_hidden))return stats;
         if(!flush() || stopped())return stats;stats.completed=true;
     } catch(const std::exception& error){stats.error=error.what();}
       catch(...){stats.error="scan callback or directory check failed";}

@@ -1,5 +1,6 @@
 #include "core/index_manager.h"
 #include "core/path_utils.h"
+#include "core/source_probe.h"
 
 #include <chrono>
 #include <algorithm>
@@ -36,6 +37,11 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
     catch(const std::exception& error) { IndexStats stats; stats.error=error.what(); return stats; }
     const auto& policy=ownership->policy;
     const auto& descendants=ownership->descendants;
+    // Classification changes only the displayed physical type. It never binds
+    // a legacy cache to a new volume identity or grants snapshot authority.
+    std::optional<ProbeSession> type_probe;
+    if(expected.type==SourceType::Unknown && subtree_relative.empty())
+        type_probe.emplace(beginSourceProbe(expected));
     ScanBoundary boundary; boundary.allow_root_symlink=subtree_relative.empty();
     for(const auto& child:descendants) {
         if(pathIsWithin(scan_path,child.root)) {
@@ -57,6 +63,27 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
             const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative, &descendants);
             stats.removed = merged.removed;
             stats.changed = merged.changed;
+            if(type_probe) {
+                const auto before=type_probe->result(), after=type_probe->finish();
+                if((before.type==SourceType::Local || before.type==SourceType::NAS || before.type==SourceType::External) &&
+                   before.type==after.type && !before.mount_fingerprint.empty() &&
+                   before.mount_fingerprint==after.mount_fingerprint &&
+                   before.canonical_root==after.canonical_root &&
+                   before.status!=SourceStatus::Failed && before.status!=SourceStatus::Offline &&
+                   after.status!=SourceStatus::Failed && after.status!=SourceStatus::Offline) {
+                    try {
+                        auto source=database_.source(expected.id);
+                        if(source.type==SourceType::Unknown && source.root==expected.root) {
+                            source.type=before.type;
+                            database_.saveSource(source);
+                            stats.changed=true;
+                        }
+                    } catch(const std::exception&) {
+                        // A concurrent catalog edit wins; the completed index
+                        // snapshot remains valid and the next rebuild can retry.
+                    }
+                }
+            }
         } catch (const std::exception& error) {
             stats.completed = false; stats.error = error.what(); stats.indexed = 0;
         }

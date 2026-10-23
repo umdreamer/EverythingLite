@@ -183,6 +183,8 @@ bool ExclusionPolicy::matches(const Pattern& pattern,const std::string& path) {
 }
 bool ExclusionPolicy::excludes(const std::string& path,bool is_directory) const {
     const auto normalized=normalizePath(path), folded=asciiFold(normalized);
+    // The bundle itself remains searchable; only descendants are omitted.
+    if(!rules_.index_app_bundle_contents && folded.find(".app/")!=std::string::npos) return true;
     for(const auto& directory:rules_.directories) if(withinFolded(folded,asciiFold(directory))) return true;
     if(!is_directory) {
         for(const auto& file:rules_.files) if(folded==asciiFold(file)) return true;

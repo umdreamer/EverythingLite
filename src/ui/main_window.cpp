@@ -31,6 +31,7 @@
 #include <QDir>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -43,6 +44,7 @@
 #include <QItemSelectionModel>
 #include <QKeySequence>
 #include <QLabel>
+#include <QProgressDialog>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
@@ -1266,21 +1268,32 @@ void MainWindow::showExclusionSettings() {
     }
     try {
         Database db(toUtf8(db_path_));db.initialize();
-        auto* dialog=new ExclusionSettingsDialog(db.exclusionPolicy().rules(),this);
+        const auto previous_rules=db.exclusionPolicy().rules();
+        auto* dialog=new ExclusionSettingsDialog(previous_rules,this);
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         QPointer<ExclusionSettingsDialog> safe(dialog);
-        dialog->saveRequested=[this,safe](ExclusionRules rules){
+        dialog->saveRequested=[this,safe,previous_rules](ExclusionRules rules){
             if(worker_thread_ || storage_maintenance_) {
                 if(safe) safe->showError(QStringLiteral("索引任务正在运行，规则未保存。请稍后重试。"));
                 return;
             }
             if(safe) safe->setSaving(true);
             auto removed=std::make_shared<std::uint64_t>(0);
+            auto elapsed=std::make_shared<QElapsedTimer>();elapsed->start();
             const auto path=toUtf8(db_path_);
             cancelActiveSearch();++search_request_id_;resetPaging();search_timer_->stop();
-            startWorker([path,rules,removed]{
-                Database db(path);db.initialize();*removed=db.saveExclusionPolicy(rules);
-            },QStringLiteral("正在保存排除规则…"),true,[this,removed,safe](const QString& error){
+            startWorker([this,path,rules,removed,safe,elapsed]{
+                Database db(path);db.initialize();
+                qint64 last_report=-1000;
+                *removed=db.saveExclusionPolicy(rules,[this,safe,elapsed,&last_report](std::uint64_t checked,std::uint64_t total) {
+                    const auto now=elapsed->elapsed();
+                    if(checked && checked<total && now-last_report<150)return;
+                    last_report=now;
+                    QMetaObject::invokeMethod(this,[safe,checked,total,seconds=static_cast<int>(now/1000)] {
+                        if(safe)safe->setSaveProgress(checked,total,seconds);
+                    },Qt::QueuedConnection);
+                });
+            },QStringLiteral("正在保存排除规则…"),true,[this,removed,safe,previous_rules,rules](const QString& error){
                 if(!error.isEmpty()) {
                     if(safe) {safe->setSaving(false);safe->showError(QStringLiteral("保存失败：%1").arg(error));}
                     statusBar()->showMessage(QStringLiteral("排除规则保存失败：%1").arg(error),15000);
@@ -1289,6 +1302,8 @@ void MainWindow::showExclusionSettings() {
                 if(safe) safe->finishSaved();
                 statusBar()->showMessage(QStringLiteral("排除规则已保存，清理 %1 项。放宽规则后请重建索引。").arg(*removed),15000);
                 if(model_->rowCount() || !search_edit_->text().isEmpty()) runSearch();
+                if(!previous_rules.index_app_bundle_contents && rules.index_app_bundle_contents)
+                    QTimer::singleShot(0,this,&MainWindow::rebuildIndex);
             });
         };
         dialog->show();
@@ -1410,26 +1425,52 @@ void MainWindow::rebuildIndex() {
     armRetryTimer();
     const auto roots = roots_;
     const auto db_path = db_path_;
+    QStringList configured;
+    for(const auto& root:roots) {
+        const auto normalized=fromUtf8(normalizePath(toUtf8(root)));
+        if(!configured.contains(normalized))configured.push_back(normalized);
+    }
+    std::stable_sort(configured.begin(),configured.end(),[](const QString& a,const QString& b){return a.toUtf8().size()>b.toUtf8().size();});
     auto errors=std::make_shared<QStringList>();
+    auto elapsed=std::make_shared<QElapsedTimer>();elapsed->start();
+    auto scanned=std::make_shared<std::atomic<std::uint64_t>>(0);
+    auto root_index=std::make_shared<std::atomic<int>>(0);
+    auto* progress=new QProgressDialog(this);
+    progress->setObjectName(QStringLiteral("rebuildProgressDialog"));
+    progress->setWindowTitle(QStringLiteral("重建索引"));
+    progress->setCancelButton(nullptr);
+    progress->setRange(0,0);progress->setMinimumDuration(0);
+    progress->setWindowModality(Qt::NonModal);
+    progress->setAutoClose(false);progress->setAutoReset(false);
+    progress->setLabelText(QStringLiteral("已处理 0 项 · 已用 0 秒"));
+    progress->show();
+    QPointer<QProgressDialog> safe_progress(progress);
+    auto* progress_timer=new QTimer(progress);
+    connect(progress_timer,&QTimer::timeout,this,[safe_progress,configured,elapsed,scanned,root_index] {
+        if(!safe_progress)return;
+        const auto number=root_index->load(std::memory_order_relaxed);
+        const auto folder=number<configured.size()?configured.at(number):QStringLiteral("完成扫描");
+        safe_progress->setLabelText(QStringLiteral("目录 %1/%2：%3\n已处理 %4 项 · 已用 %5 秒（总量未知）")
+            .arg(std::min(number+1,static_cast<int>(configured.size()))).arg(configured.size()).arg(folder)
+            .arg(scanned->load(std::memory_order_relaxed)).arg(elapsed->elapsed()/1000));
+    });
+    progress_timer->start(250);
     statusBar()->showMessage(QStringLiteral("正在重建索引：%1 个目录…").arg(roots.size()));
-    startWorker([this, roots, db_path, errors] {
-        QStringList configured;
-        for(const auto& root:roots) {
-            const auto normalized=fromUtf8(normalizePath(toUtf8(root)));
-            if(!configured.contains(normalized))configured.push_back(normalized);
-        }
+    startWorker([this, configured, db_path, errors, scanned, root_index] {
         IndexManager manager(toUtf8(db_path));
         // Any registration error aborts before traversing a partial topology.
         for(const auto& root:configured)manager.database().ensureSourceForRoot(toUtf8(root));
-        std::stable_sort(configured.begin(),configured.end(),[](const QString& a,const QString& b){return a.toUtf8().size()>b.toUtf8().size();});
-        for (const auto& root : configured) {
+        std::uint64_t completed_scanned=0;
+        for (int i=0;i<configured.size();++i) {
+            root_index->store(i,std::memory_order_relaxed);
+            const auto& root=configured.at(i);
             QString error;
             try {
-                const auto stats = manager.rebuildRoot(toUtf8(root), [this](const std::string& root, std::uint64_t count) {
-                    QMetaObject::invokeMethod(this, [this, root, count] {
-                        if (!closing_ && !userSearchOwnsStatus()) status_label_->setText(QStringLiteral("正在索引：%1    %2 项").arg(fromUtf8(root)).arg(count));
-                    }, Qt::QueuedConnection);
+                const auto stats = manager.rebuildRoot(toUtf8(root), [scanned,completed_scanned](const std::string&, std::uint64_t count) {
+                    scanned->store(completed_scanned+count,std::memory_order_relaxed);
                 });
+                completed_scanned+=stats.scanned;
+                scanned->store(completed_scanned,std::memory_order_relaxed);
                 if (!stats.completed) error = stats.cancelled ? QStringLiteral("同步已取消")
                     : stats.error.empty() ? QStringLiteral("扫描未完整完成") : fromUtf8(stats.error);
             } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); }
@@ -1437,9 +1478,11 @@ void MainWindow::rebuildIndex() {
             if(!error.isEmpty())errors->push_back(QStringLiteral("%1：%2").arg(root,error));
             QMetaObject::invokeMethod(this, [this, root, error] { if (!closing_) reportSyncOutcome(root, root, true, error); }, Qt::QueuedConnection);
         }
+        root_index->store(configured.size(),std::memory_order_relaxed);
     }, name_search_ready_ ? QStringLiteral("正在准备索引…")
                           : QStringLiteral("正在准备索引；完成后将一次性建立名称加速索引…"),true,
-        [this,errors](const QString& error){
+        [this,errors,safe_progress](const QString& error){
+            if(safe_progress){safe_progress->close();safe_progress->deleteLater();}
             if(!error.isEmpty() || !errors->isEmpty())
                 statusBar()->showMessage(QStringLiteral("重建未完成：%1").arg(!error.isEmpty()?error:errors->join(QStringLiteral("；"))),15000);
             else statusBar()->showMessage(QStringLiteral("重建完成：索引现有 %1 项。").arg(indexed_count_),15000);

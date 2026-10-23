@@ -23,12 +23,12 @@ sudo apt-get install build-essential cmake pkg-config libsqlite3-dev libpcre2-de
 ./scripts/package-linux.sh
 dpkg-deb --info dist/*.deb
 dpkg-deb --contents dist/*.deb
-sudo apt install ./dist/everything-lite_0.4.15_*.deb
+sudo apt install ./dist/everything-lite_0.4.16_*.deb
 ```
 
 打包默认使用 `build/linux-release/` 和 `dist/`，不会自动执行系统安装。可用 `EL_RELEASE_DIR`、`EL_PACKAGE_DIR` 改变输出目录。包包含 `/usr/bin/EverythingLite`、`/usr/bin/everything-lite-cli`、桌面入口、SVG 图标和 MIT 许可；Qt/SQLite 库由发行版安装。CPack 使用 shlibdeps 提取链接依赖，并声明 Qt 基础/Wayland 平台插件与 xdg-utils。包应在对应 Ubuntu 版本与 CPU 架构使用，不保证跨发行版二进制兼容。
 
-Linux 隔离环境可使用 `./scripts/check-linux-package.sh dist/everything-lite_0.4.15_*.deb` 检查解包后的文件、CLI 对照和 offscreen 启动。设置 `EL_CHECK_NATIVE_QPA=1` 时，还需安装 xvfb、xauth 与 weston，检查 X11 和无显示 Wayland 启动。检查使用独立临时 HOME/XDG，结束后删除，不执行系统安装。
+Linux 隔离环境可使用 `./scripts/check-linux-package.sh dist/everything-lite_0.4.16_*.deb` 检查解包后的文件、CLI 对照和 offscreen 启动。设置 `EL_CHECK_NATIVE_QPA=1` 时，还需安装 xvfb、xauth 与 weston，检查 X11 和无显示 Wayland 启动。检查使用独立临时 HOME/XDG，结束后删除，不执行系统安装。
 
 GNOME 原生快速查看可选安装 `gnome-sushi`。服务缺失时使用有读取和解码上限的 Qt 基础预览。基础预览格式范围与原生预览不同，见 [平台一致性](PLATFORM_PARITY.md)。
 

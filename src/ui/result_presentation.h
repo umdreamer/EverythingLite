@@ -6,14 +6,14 @@ namespace everything_lite {
 // Presentation uses only the cached search row; never probes the filesystem.
 inline QString sourceTypeText(SourceType type) {
     switch (type) {
-        case SourceType::Local: return QStringLiteral("本地");
+        case SourceType::Local: return QStringLiteral("本地磁盘");
         case SourceType::NAS: return QStringLiteral("NAS");
         case SourceType::Cloud: return QStringLiteral("网盘");
         case SourceType::USB: return QStringLiteral("U盘");
         case SourceType::External: return QStringLiteral("移动硬盘/外置存储");
-        case SourceType::Unknown: return QStringLiteral("未分类");
+        case SourceType::Unknown: return QStringLiteral("本地磁盘");
     }
-    return QStringLiteral("未分类");
+    return QStringLiteral("本地磁盘");
 }
 inline QString sourceText(const SearchResult& row) {
     const auto type = sourceTypeText(row.source_type);

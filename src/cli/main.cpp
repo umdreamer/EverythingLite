@@ -293,7 +293,10 @@ int main(int argc, char** argv) {
                 for(const auto& path:policy.rules().files) std::cout<<"file="<<std::quoted(path)<<"\n";
                 std::cout<<"folder-filter="<<std::quoted(policy.rules().folder_filter)<<"\n";
                 std::cout<<"file-filter="<<std::quoted(policy.rules().file_filter)<<"\n";
+                std::cout<<"index-app-bundle-contents="<<(policy.rules().index_app_bundle_contents?"true":"false")<<"\n";
             } else {
+                // Exclusion CLI commands do not configure the GUI bundle option.
+                rules.index_app_bundle_contents=db.exclusionPolicy().rules().index_app_bundle_contents;
                 const auto removed=db.saveExclusionPolicy(rules);
                 std::cout<<"排除策略已保存，清理 "<<removed<<" 项\n";
             }

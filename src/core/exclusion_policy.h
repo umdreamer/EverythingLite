@@ -10,6 +10,7 @@ struct ExclusionRules {
     std::vector<std::string> files;
     std::string folder_filter;
     std::string file_filter;
+    bool index_app_bundle_contents = false;
 };
 
 // Shared, validated subset: whole-name/path glob (*, **, Unicode ?) and
@@ -19,6 +20,7 @@ class ExclusionPolicy {
 public:
     explicit ExclusionPolicy(ExclusionRules rules = {}, std::int64_t revision = 0);
     bool excludes(const std::string& path, bool is_directory) const;
+    bool indexAppBundleContents() const { return rules_.index_app_bundle_contents; }
     const ExclusionRules& rules() const { return rules_; }
     const std::int64_t revision;
 private:

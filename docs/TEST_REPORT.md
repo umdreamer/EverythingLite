@@ -1,4 +1,4 @@
-# 测试范围与验证记录（截至本地 0.4.15-fixbug）
+# 测试范围与验证记录（截至本地 0.4.16）
 
 ## 验证范围
 
@@ -11,6 +11,12 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.4.16 本地核验（2026-10-23）
+
+Core Debug 全套 CTest 20/20、GUI Debug 全套 CTest 25/25 通过。新增合成回归覆盖来源默认显示、`.app` 包内索引开关、旧包内记录清理、排除规则保存进度、重建进度窗口，以及命令行保存排除规则时保留 GUI 的程序包设置。Mac Release 构建生成 `EverythingLite.app` 和 `everything-lite-cli`；应用包版本为 0.4.16。合成 CLI 完整重建验证本地磁盘来源分类。
+
+这些检查未量测真实大索引的规则保存与重建耗时，也未完成 NAS、外置设备或 Finder 窗口的人工验收。测试使用隔离数据库，未修改日常索引。本版本仅在本地提交和标记，未推送到 GitHub。
 
 ## Mac 0.4.15-fixbug 本地核验（2026-10-23）
 

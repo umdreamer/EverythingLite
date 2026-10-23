@@ -154,10 +154,11 @@ ScanTask::ScanTask(SourceScanRequest request,std::string lock):scan(std::move(re
 void writeScanTask(const std::string& path,const ScanTask& task) {
 #if defined(__APPLE__)
     validate(task);Encoder out;const auto& r=task.scan;const auto& s=r.source;
-    out.number(1);out.number(1);out.number(1); // version, one metadata, one source
+    out.number(2);out.number(1);out.number(1); // version, one metadata, one source
     out.number(s.id);out.text(s.label);out.number(static_cast<int>(s.type));out.number(static_cast<int>(s.mode));out.number(static_cast<int>(s.status));out.number(s.interval_seconds);
     out.text(s.identity);out.text(s.root);out.text(s.mount_fingerprint);out.number(s.last_check);out.number(s.last_success);out.number(s.revision);out.number(s.policy_revision);
     out.number(r.policy.revision);out.list(r.policy.rules().directories);out.list(r.policy.rules().files);out.text(r.policy.rules().folder_filter);out.text(r.policy.rules().file_filter);
+    out.number(r.policy.rules().index_app_bundle_contents ? 1 : 0);
     out.list(r.nested_source_roots);out.text(r.scan_path);out.text(r.snapshot_path);out.text(r.nonce);out.text(task.lock_path);
     require(!pathIsWithin(path,s.root),"task manifest cannot be inside source root");
     PrivateFile file(path,true,false,capturedSourceCanonicalRoot(s.mount_fingerprint));
@@ -173,11 +174,13 @@ ScanTask readScanTask(const std::string& path) {
     while(offset<bytes.size()){auto n=read(file.file.value,bytes.data()+offset,bytes.size()-offset);if(n<0 && errno==EINTR)continue;require(n>0,"truncated task file");offset+=static_cast<std::size_t>(n);}
     char extra;auto n=read(file.file.value,&extra,1);struct stat end{};
     require(n==0 && fstat(file.file.value,&end)==0 && end.st_size==file.leaf_stat.st_size && end.st_mtimespec.tv_sec==file.leaf_stat.st_mtimespec.tv_sec && end.st_mtimespec.tv_nsec==file.leaf_stat.st_mtimespec.tv_nsec && end.st_ctimespec.tv_sec==file.leaf_stat.st_ctimespec.tv_sec && end.st_ctimespec.tv_nsec==file.leaf_stat.st_ctimespec.tv_nsec && file.unchanged(),"task file changed during read");
-    Decoder in(bytes);require(in.number()==1 && in.number()==1 && in.number()==1,"invalid task version or singleton count");
+    Decoder in(bytes);require(in.number()==2 && in.number()==1 && in.number()==1,"invalid task version or singleton count");
     SourceRecord s;s.id=in.number();s.label=in.text();
     auto type=in.number(),mode=in.number(),status=in.number();require(type<=static_cast<int>(SourceType::Unknown) && mode<=static_cast<int>(IndexMode::Periodic) && status<=static_cast<int>(SourceStatus::Failed),"invalid task source enum");
     s.type=static_cast<SourceType>(type);s.mode=static_cast<IndexMode>(mode);s.status=static_cast<SourceStatus>(status);s.interval_seconds=in.number();s.identity=in.text();s.root=in.text();s.mount_fingerprint=in.text();s.last_check=in.number();s.last_success=in.number();s.revision=in.number();s.policy_revision=in.number();
     auto revision=in.number();ExclusionRules rules;rules.directories=in.list();rules.files=in.list();rules.folder_filter=in.text();rules.file_filter=in.text();
+    const auto include_app_contents=in.number();require(include_app_contents<=1,"invalid app bundle indexing option");
+    rules.index_app_bundle_contents=include_app_contents!=0;
     paths(rules.directories);paths(rules.files); // validate before policy normalization
     auto nested=in.list();auto scope=in.text(),snapshot=in.text(),nonce=in.text(),lock=in.text();require(in.pos==bytes.size(),"trailing task data");
     require(!pathIsWithin(path,s.root),"task manifest cannot be inside source root");file.outside(capturedSourceCanonicalRoot(s.mount_fingerprint));

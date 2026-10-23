@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -68,7 +69,8 @@ public:
     ExclusionPolicy exclusionPolicy() const;
     // Validates first; atomically replaces rules, increments revision and purges
     // excluded cached rows for all sources, including offline sources.
-    std::uint64_t saveExclusionPolicy(const ExclusionRules& rules) const;
+    using ExclusionProgress = std::function<void(std::uint64_t checked,std::uint64_t total)>;
+    std::uint64_t saveExclusionPolicy(const ExclusionRules& rules,const ExclusionProgress& progress = {}) const;
 
     // Compatibility scans reserve a unique (root,generation) and advance the
     // source revision at begin/completion. Every published file mutation

@@ -2,6 +2,8 @@
 #include "ui/result_presentation.h"
 
 #include <QDateTime>
+#include <QFileIconProvider>
+#include <QFileInfo>
 #include <QString>
 
 #include <algorithm>
@@ -23,10 +25,11 @@ QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
     if (!index.isValid() || index.row() < 0 || index.row() >= static_cast<int>(results_.size())) return {};
     const auto& row = results_[static_cast<std::size_t>(index.row())];
     const auto& file = row.file;
+    const auto app_bundle=file.is_directory && QString::fromUtf8(file.name.c_str()).endsWith(QStringLiteral(".app"),Qt::CaseInsensitive);
 
     if (role == Qt::DisplayRole) {
         switch (index.column()) {
-            case 0: return QString::fromUtf8(file.name.c_str());
+            case 0: return QString::fromUtf8(file.name.c_str())+(app_bundle?QStringLiteral("（程序包）"):QString{});
             case 1: return QString::fromUtf8(file.parent_path.c_str());
             case 2: return file.is_directory ? QStringLiteral("—") : formatSize(file.size);
             case 3: return file.modified_time > 0
@@ -36,6 +39,17 @@ QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
             case 5: return statusText(row);
             default: return {};
         }
+    }
+    if(role==Qt::DecorationRole && index.column()==0 && app_bundle) {
+        const auto path=QString::fromUtf8(file.path.c_str());
+        auto found=app_icons_.constFind(path);
+        if(found!=app_icons_.cend())return *found;
+        QFileIconProvider provider;
+        auto icon=provider.icon(QFileInfo(path));
+        if(icon.isNull())icon=QIcon::fromTheme(QStringLiteral("application-x-executable"),provider.icon(QFileIconProvider::Folder));
+        if(app_icons_.size()>=256)app_icons_.clear();
+        app_icons_.insert(path,icon);
+        return icon;
     }
     if (role == Qt::TextAlignmentRole && (index.column() == 2 || index.column() == 3)) {
         return static_cast<int>(Qt::AlignVCenter | Qt::AlignRight);

@@ -159,6 +159,7 @@ ExclusionPolicy getPolicy(sqlite3* db) {
     if(sqlite3_step(state.get())!=SQLITE_ROW) throw std::runtime_error("exclusion policy missing");
     const auto revision=sqlite3_column_int64(state.get(),0);
     ExclusionRules rules; rules.folder_filter=columnText(state.get(),1); rules.file_filter=columnText(state.get(),2);
+    rules.index_app_bundle_contents=metadataFlag(db,"index_app_bundle_contents");
     auto paths=prepare(db,"SELECT kind,path FROM exclusion_paths ORDER BY kind,position");
     int rc;
     while((rc=sqlite3_step(paths.get()))==SQLITE_ROW) {
@@ -167,18 +168,30 @@ ExclusionPolicy getPolicy(sqlite3* db) {
     if(rc!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
     return ExclusionPolicy(std::move(rules),revision);
 }
-std::uint64_t purgeExcluded(const SqliteConnection& conn,const ExclusionPolicy& policy) {
+std::uint64_t purgeExcluded(const SqliteConnection& conn,const ExclusionPolicy& policy,
+                            const Database::ExclusionProgress& progress = {}) {
     // Build membership without modifying the SELECT input; do not probe paths.
     conn.exec("CREATE TEMP TABLE IF NOT EXISTS excluded_keys(id INTEGER PRIMARY KEY); DELETE FROM excluded_keys;");
     auto rows=prepare(conn.get(),"SELECT id,path,is_dir FROM files");
     auto excluded=prepare(conn.get(),"INSERT INTO excluded_keys VALUES(?)");
+    std::uint64_t checked=0,total=0;
+    if(progress) {
+        auto count=prepare(conn.get(),hasDirectoryStorage(conn.get())
+            ? "SELECT COUNT(*) FROM file_entries" : "SELECT COUNT(*) FROM files");
+        if(sqlite3_step(count.get())!=SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        total=static_cast<std::uint64_t>(sqlite3_column_int64(count.get(),0));
+        progress(0,total);
+    }
     int rc;
     while((rc=sqlite3_step(rows.get()))==SQLITE_ROW) {
-        if(!policy.excludes(columnText(rows.get(),1),sqlite3_column_int(rows.get(),2)!=0)) continue;
-        sqlite3_reset(excluded.get()); sqlite3_bind_int64(excluded.get(),1,sqlite3_column_int64(rows.get(),0));
-        if(sqlite3_step(excluded.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        if(policy.excludes(columnText(rows.get(),1),sqlite3_column_int(rows.get(),2)!=0)) {
+            sqlite3_reset(excluded.get()); sqlite3_bind_int64(excluded.get(),1,sqlite3_column_int64(rows.get(),0));
+            if(sqlite3_step(excluded.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        }
+        if(progress && (++checked%4096==0)) progress(checked,total);
     }
     if(rc!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+    if(progress) progress(checked,total);
     conn.exec(hasDirectoryStorage(conn.get()) ? "DELETE FROM file_entries WHERE id IN (SELECT id FROM excluded_keys);" : "DELETE FROM files WHERE id IN (SELECT id FROM excluded_keys);");
     const auto removed=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
     conn.exec("UPDATE roots SET file_count=(SELECT COUNT(*) FROM files WHERE files.root=roots.root);");
@@ -996,13 +1009,25 @@ CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 ExclusionPolicy Database::exclusionPolicy() const {
     SqliteConnection conn(db_path_); conn.exec("BEGIN;"); return getPolicy(conn.get());
 }
-std::uint64_t Database::saveExclusionPolicy(const ExclusionRules& rules) const {
+std::uint64_t Database::saveExclusionPolicy(const ExclusionRules& rules,const ExclusionProgress& progress) const {
     const ExclusionPolicy validated(rules); // invalid rules must not touch storage
     SqliteConnection conn(db_path_); conn.exec("PRAGMA temp_store=FILE; BEGIN IMMEDIATE;");
     try {
+        const auto old=getPolicy(conn.get()).rules();
+        if(old.directories==validated.rules().directories && old.files==validated.rules().files &&
+           old.folder_filter==validated.rules().folder_filter && old.file_filter==validated.rules().file_filter &&
+           old.index_app_bundle_contents==validated.rules().index_app_bundle_contents &&
+           metadataFlag(conn.get(),"app_bundle_policy_applied")) {
+            if(progress) progress(0,0);
+            // Keep the revision barrier for scans already in flight, without
+            // repeating a full index sweep when the rules are unchanged.
+            conn.exec("UPDATE exclusion_policy SET revision=revision+1 WHERE id=1;");
+            conn.exec("COMMIT;"); return 0;
+        }
         auto update=prepare(conn.get(),"UPDATE exclusion_policy SET revision=revision+1,folder_filter=?,file_filter=? WHERE id=1");
         bindText(update.get(),1,validated.rules().folder_filter); bindText(update.get(),2,validated.rules().file_filter);
         if(sqlite3_step(update.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        setMetadataFlag(conn.get(),"index_app_bundle_contents",validated.rules().index_app_bundle_contents);
         conn.exec("DELETE FROM exclusion_paths;");
         auto paths=prepare(conn.get(),"INSERT INTO exclusion_paths(kind,position,path) VALUES(?,?,?)");
         int kind=0;
@@ -1015,7 +1040,8 @@ std::uint64_t Database::saveExclusionPolicy(const ExclusionRules& rules) const {
             }
             ++kind;
         }
-        const auto removed=purgeExcluded(conn,validated);
+        const auto removed=purgeExcluded(conn,validated,progress);
+        setMetadataFlag(conn.get(),"app_bundle_policy_applied",true);
         conn.exec("COMMIT;"); return removed;
     } catch(...) { conn.exec("ROLLBACK;"); throw; }
 }

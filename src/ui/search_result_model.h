@@ -3,6 +3,8 @@
 #include "core/file_record.h"
 
 #include <QAbstractTableModel>
+#include <QHash>
+#include <QIcon>
 
 #include <set>
 #include <unordered_map>
@@ -31,6 +33,7 @@ public:
     QString actionBlockAt(int row) const;
 
 private:
+    mutable QHash<QString,QIcon> app_icons_;
     std::vector<SearchResult> results_;
     std::set<std::pair<std::int64_t, std::string>> membership_;
     std::unordered_map<std::string, std::size_t> path_membership_;

@@ -429,7 +429,6 @@ void MainWindow::buildUi() {
 
     match_path_check_ = new QCheckBox(QStringLiteral("匹配路径"), this);
     match_path_check_->setToolTip(QStringLiteral("关闭时普通关键词只匹配名称；打开后匹配完整路径"));
-    match_path_check_->hide(); // Controlled from Search menu by default, like Everything.
 
     search_row->addWidget(search_edit_, 1);
     search_row->addWidget(scope_combo_);
@@ -674,15 +673,19 @@ void MainWindow::loadSettings() {
     if (!folder_scope_.isEmpty()) folder_scope_ = QDir::cleanPath(folder_scope_);
     updateFolderScopeLabel();
 
-    const bool show_status = settings.value(QStringLiteral("view/statusBar"), true).toBool();
-    const bool show_scope = settings.value(QStringLiteral("view/scopeBar"), true).toBool();
-    const bool show_filter = settings.value(QStringLiteral("view/filterBar"), true).toBool();
+    // Restore controls once after the 0.4.15 UI regression. Later user toggles
+    // in the View menu remain persistent.
+    const bool restore_controls = !settings.value(QStringLiteral("view/restoredControls0415Fixbug"), false).toBool();
+    const bool show_status = restore_controls || settings.value(QStringLiteral("view/statusBar"), true).toBool();
+    const bool show_scope = restore_controls || settings.value(QStringLiteral("view/scopeBar"), true).toBool();
+    const bool show_filter = restore_controls || settings.value(QStringLiteral("view/filterBar"), true).toBool();
     show_status_bar_action_->setChecked(show_status);
     show_scope_bar_action_->setChecked(show_scope);
     show_filter_bar_action_->setChecked(show_filter);
     statusBar()->setVisible(show_status);
     scope_label_->setVisible(show_scope);
     scope_combo_->setVisible(show_filter);
+    if (restore_controls) settings.setValue(QStringLiteral("view/restoredControls0415Fixbug"), true);
 
     const auto geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
     if (!geometry.isEmpty()) restoreGeometry(geometry);
@@ -859,7 +862,9 @@ void MainWindow::updateCachedStatus() {
     else if (!name_search_ready_) acceleration = QStringLiteral("    ·    名称加速索引未就绪");
     const auto state = normalizeGuiQuery(search_edit_->text()).isEmpty()
         ? QStringLiteral("输入关键词开始搜索")
-        : QStringLiteral("已加载 %1%2").arg(model_->rowCount()).arg(results_have_more_ ? QStringLiteral("+") : QString{});
+        : QStringLiteral("已加载 %1%2    ·    搜索用时 %3 ms")
+              .arg(model_->rowCount()).arg(results_have_more_ ? QStringLiteral("+") : QString{})
+              .arg(last_search_elapsed_ms_, 0, 'f', 1);
     status_label_->setText(QStringLiteral("%1 个对象    ·    %2    ·    %3%4")
         .arg(indexed_count_).arg(state)
         .arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("等待启动")).arg(acceleration));

@@ -84,6 +84,24 @@ class UiTest : public QObject {
   public:
     QString fixture_root;
   private slots:
+    void defaultSearchControlsAndStatusAreVisible() {
+        QSettings settings("CICHI", "EverythingLite");
+        settings.setValue("view/statusBar", false);
+        settings.setValue("view/filterBar", false);
+        settings.setValue("view/scopeBar", false);
+        settings.remove("view/restoredControls0415Fixbug");
+        MainWindow window;
+        window.show();
+        QVERIFY(window.statusBar()->isVisible());
+        QVERIFY(window.scope_combo_->isVisible());
+        QVERIFY(window.scope_label_->isVisible());
+        QVERIFY(window.match_path_check_->isVisible());
+        window.search_edit_->setText("item");
+        window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_);
+        QVERIFY(window.status_label_->text().contains(QStringLiteral("ms")));
+        QVERIFY(window.status_label_->text().contains(QStringLiteral("已加载")));
+    }
     void init() {
         QSettings settings("CICHI", "EverythingLite");
         settings.setValue("index/roots", QStringList{fixture_root});

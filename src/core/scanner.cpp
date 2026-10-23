@@ -147,9 +147,32 @@ IndexStats FileScanner::scanTree(const std::string& root,
 #include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/xattr.h>
+#endif
 namespace everything_lite {
 namespace fs=std::filesystem;
 namespace {
+bool finderInvisible(const std::string& path,const struct stat& st) {
+#if defined(__APPLE__)
+    if ((st.st_flags & UF_HIDDEN) != 0) return true;
+    unsigned char finder_info[32]{};
+    const auto size=getxattr(path.c_str(),XATTR_FINDERINFO_NAME,finder_info,sizeof(finder_info),0,XATTR_NOFOLLOW);
+    return size>=10 && (finder_info[8]&0x40)!=0; // Finder kIsInvisible = 0x4000.
+#else
+    (void)path;(void)st;
+    return false;
+#endif
+}
+bool finderInvisibleInPath(fs::path path) {
+    for (;;) {
+        struct stat st{};
+        if(lstat(path.c_str(),&st)==0 && finderInvisible(pathToUtf8(path),st))return true;
+        const auto parent=path.parent_path();
+        if(parent==path || parent.empty())return false;
+        path=parent;
+    }
+}
 struct Descriptor {
     int fd;
     explicit Descriptor(int value):fd(value) {}
@@ -165,7 +188,7 @@ bool sameDirectory(const struct stat& a,const struct stat& b) {
     return true;
 #endif
 }
-void fromStat(const fs::path& path,const struct stat& st,FileRecord& r) {
+void fromStat(const fs::path& path,const struct stat& st,FileRecord& r,bool finder_hidden) {
     r.path=normalizePath(pathToUtf8(path));r.parent_path=normalizePath(pathToUtf8(path.parent_path()));
     r.name=pathToUtf8(path.filename());if(r.name.empty())r.name=r.path;
     r.extension=pathToUtf8(path.extension());if(!r.extension.empty() && r.extension[0]=='.')r.extension.erase(0,1);
@@ -173,11 +196,12 @@ void fromStat(const fs::path& path,const struct stat& st,FileRecord& r) {
     // Link size is its own stored path-byte length, not target file size.
     // POSIX epoch seconds, read from the object itself, including broken links.
     r.modified_time=static_cast<std::int64_t>(st.st_mtime);
+    r.finder_hidden=finder_hidden;
 }
 }
 FileScanner::FileScanner(std::size_t n):batch_size_(std::max<std::size_t>(1,n)) {}
 bool FileScanner::makeRecord(const fs::path& path,FileRecord& r) {
-    struct stat st{};if(lstat(path.c_str(),&st)!=0)return false;fromStat(path,st,r);return true;
+    struct stat st{};if(lstat(path.c_str(),&st)!=0)return false;fromStat(path,st,r,finderInvisibleInPath(path));return true;
 }
 bool FileScanner::readSingle(const std::string& path,FileRecord& r,const ExclusionPolicy* policy) {
     if(path.find('\0')!=std::string::npos)return false;
@@ -206,9 +230,9 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
     auto enter=[&](const std::string& path,int fd) {
         return boundary && boundary->enter_directory ? boundary->enter_directory(path,fd):DirectoryDecision::Enter;
     };
-    auto append=[&](const std::string& path,const struct stat& st) {
+    auto append=[&](const std::string& path,const struct stat& st,bool finder_hidden) {
         if(policy && policy->excludes(path,S_ISDIR(st.st_mode))){++stats.skipped;return true;}
-        ++stats.scanned;FileRecord record;fromStat(utf8ToPath(path),st,record);batch.push_back(std::move(record));
+        ++stats.scanned;FileRecord record;fromStat(utf8ToPath(path),st,record,finder_hidden);batch.push_back(std::move(record));
         return batch.size()<batch_size_ || flush();
     };
     try {
@@ -234,8 +258,9 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(policy && (policy->excludes(pathToUtf8(utf8ToPath(scope).parent_path()),true) || policy->excludes(scope,S_ISDIR(root_st.st_mode)))) {
             stats.completed=true;return stats;
         }
-        if(!append(scope,root_st))return stats;
-        std::function<bool(int,const std::string&)> walk=[&](int fd,const std::string& path) {
+        const bool root_hidden=finderInvisibleInPath(utf8ToPath(scope));
+        if(!append(scope,root_st,root_hidden))return stats;
+        std::function<bool(int,const std::string&,bool)> walk=[&](int fd,const std::string& path,bool parent_hidden) {
             int copy=dup(fd);if(copy<0)return fail("unable to duplicate directory");
             DIR* opened=fdopendir(copy);if(!opened){close(copy);return fail("unable to enumerate directory");}
             std::unique_ptr<DIR,int(*)(DIR*)> directory(opened,closedir);
@@ -249,6 +274,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                 if(prune(child) || (entry->d_type==DT_DIR && policy && policy->excludes(child,true))){++stats.skipped;continue;}
                 struct stat st{};
                 if(!metadata(child) || fstatat(fd,name.c_str(),&st,AT_SYMLINK_NOFOLLOW)!=0)return fail("unable to read file metadata");
+                const bool child_hidden=parent_hidden || finderInvisible(child,st);
                 if(S_ISDIR(st.st_mode)) {
                     if(policy && policy->excludes(child,true)){++stats.skipped;continue;}
                     Descriptor nested(openat(fd,name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
@@ -257,7 +283,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                     const auto decision=enter(child,nested.fd);
                     if(decision==DirectoryDecision::Prune){++stats.skipped;continue;}
                     if(decision==DirectoryDecision::Error)return fail("directory boundary check failed");
-                    if(!append(child,st) || !walk(nested.fd,child))return false;
+                    if(!append(child,st,child_hidden) || !walk(nested.fd,child,child_hidden))return false;
                     // A held fd survives rename/replacement. Check the current
                     // entry again on exit, before accepting old-bound paths.
                     struct stat current{},after{};
@@ -266,11 +292,11 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                        !sameDirectory(st,current) || !sameDirectory(st,after) ||
                        enter(child,nested.fd)!=DirectoryDecision::Enter)
                         return fail("directory binding changed during enumeration");
-                } else if(!append(child,st))return false; // Descendant links never enter.
+                } else if(!append(child,st,child_hidden))return false; // Descendant links never enter.
             }
             return true;
         };
-        if(root_fd && !walk(root_fd->fd,scope))return stats;
+        if(root_fd && !walk(root_fd->fd,scope,root_hidden))return stats;
         if(!flush() || stopped())return stats;stats.completed=true;
     } catch(const std::exception& error){stats.error=error.what();}
       catch(...){stats.error="scan callback or directory check failed";}

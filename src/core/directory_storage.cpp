@@ -142,7 +142,7 @@ bool DirectoryRecordWriter::upsert(std::int64_t source,const FileRecord& r,const
     sqlite3_reset(stmt.get());sqlite3_clear_bindings(stmt.get());
     sqlite3_bind_int64(stmt.get(),1,source);sqlite3_bind_int64(stmt.get(),2,dir);text(stmt.get(),3,parts.second);text(stmt.get(),4,r.name);text(stmt.get(),5,r.extension);
     sqlite3_bind_int64(stmt.get(),6,static_cast<sqlite3_int64>(r.size));sqlite3_bind_int64(stmt.get(),7,r.modified_time);sqlite3_bind_int(stmt.get(),8,r.is_directory);
-    text(stmt.get(),9,asciiFold(r.name));sqlite3_bind_int64(stmt.get(),10,generation);sqlite3_bind_int(stmt.get(),11,static_cast<int>(r.cloud_copy));
+    text(stmt.get(),9,asciiFold(r.name));sqlite3_bind_int64(stmt.get(),10,generation);sqlite3_bind_int(stmt.get(),11,storedCloudFlags(r));
     if(sqlite3_step(stmt.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(impl_->db));return sqlite3_changes(impl_->db)>0;
 }
 std::vector<DirectoryScopeQuery> directoryScopeQueries(const std::string& prefix,const std::string& suffix,const std::string& scope) {

@@ -219,7 +219,7 @@ SourceScanResult scanSourceToSnapshot(SourceScanRequest request,const std::atomi
                     row.source_id=source.id;row.relative_path=relative(row.path,source.root);if(row.relative_path.empty())row.relative_path=".";row.root=source.root;
                     text(insert.value,1,row.path);text(insert.value,2,row.parent_path);text(insert.value,3,row.name);text(insert.value,4,row.extension);text(insert.value,5,row.root);
                     require(row.size<=static_cast<std::uint64_t>(INT64_MAX),"snapshot file size out of range");
-                    integer(insert.value,6,static_cast<std::int64_t>(row.size));integer(insert.value,7,row.modified_time);integer(insert.value,8,row.is_directory);integer(insert.value,9,0);integer(insert.value,10,source.id);text(insert.value,11,row.relative_path);integer(insert.value,12,static_cast<int>(CloudCopy::Unknown));done(insert.value);
+                    integer(insert.value,6,static_cast<std::int64_t>(row.size));integer(insert.value,7,row.modified_time);integer(insert.value,8,row.is_directory);integer(insert.value,9,0);integer(insert.value,10,source.id);text(insert.value,11,row.relative_path);integer(insert.value,12,storedCloudFlags(row));done(insert.value);
                 }
                 snapshot.exec("COMMIT");result.staged+=rows.size();++result.batches;result.max_batch=std::max(result.max_batch,rows.size());
                 if(progress)progress(result.staged);

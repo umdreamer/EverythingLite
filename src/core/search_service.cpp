@@ -31,7 +31,7 @@ std::vector<SearchResult> SearchService::search(const std::string& query,
     // The common/default case deliberately calls the exact same SearchEngine
     // string overload used by the CLI historically. This is the reference
     // behavior for GUI/CLI consistency.
-    if (options.scope == SearchItemScope::All && !options.match_path && !options.folder_scope) {
+    if (options.scope == SearchItemScope::All && !options.match_path && !options.folder_scope && options.include_hidden) {
         auto results = engine_.search(query, limit, offset, cancellation);
         searchTrace("SearchService", "default branch result_count=" + std::to_string(results.size()));
         return results;
@@ -50,6 +50,7 @@ std::vector<SearchResult> SearchService::search(const std::string& query,
         if (options.scope == SearchItemScope::Folders) parsed.directories_only = true;
     }
     if (options.match_path) parsed.match_path = true;
+    parsed.include_hidden = options.include_hidden;
 
     auto results = engine_.search(parsed, limit, offset, cancellation);
     searchTrace("SearchService", "filtered branch result_count=" + std::to_string(results.size()));

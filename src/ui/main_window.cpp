@@ -267,6 +267,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         updateSearchStateLabel();
         search_timer_->start(kSearchIdleDelayMs);
     });
+    connect(include_hidden_check_, &QCheckBox::toggled, this, [this] {
+        cancelActiveSearch();
+        search_pending_ = false;
+        ++search_request_id_;
+        resetPaging();
+        updateSearchStateLabel();
+        search_timer_->start(kSearchIdleDelayMs);
+    });
 
     event_timer_ = new QTimer(this);
     event_timer_->setSingleShot(true);
@@ -429,10 +437,14 @@ void MainWindow::buildUi() {
 
     match_path_check_ = new QCheckBox(QStringLiteral("匹配路径"), this);
     match_path_check_->setToolTip(QStringLiteral("关闭时普通关键词只匹配名称；打开后匹配完整路径"));
+    include_hidden_check_ = new QCheckBox(QStringLiteral("显示隐藏项目"), this);
+    include_hidden_check_->setChecked(true);
+    include_hidden_check_->setToolTip(QStringLiteral("包括点号开头和 Finder 标记为隐藏的文件及文件夹"));
 
     search_row->addWidget(search_edit_, 1);
     search_row->addWidget(scope_combo_);
     search_row->addWidget(match_path_check_);
+    search_row->addWidget(include_hidden_check_);
     layout->addLayout(search_row);
 
     auto* folder_row = new QHBoxLayout();
@@ -668,6 +680,7 @@ void MainWindow::loadSettings() {
     if (roots_.isEmpty()) roots_ = defaultRoots();
     scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
     match_path_check_->setChecked(settings.value(QStringLiteral("search/matchPath"), false).toBool());
+    include_hidden_check_->setChecked(settings.value(QStringLiteral("search/includeHidden"), true).toBool());
     folder_scope_ = settings.value(QStringLiteral("search/folderScope")).toString();
     if (!folder_scope_.isEmpty() && !QDir::isAbsolutePath(folder_scope_)) folder_scope_.clear();
     if (!folder_scope_.isEmpty()) folder_scope_ = QDir::cleanPath(folder_scope_);
@@ -702,6 +715,7 @@ void MainWindow::saveSettings() {
     settings.setValue(QStringLiteral("index/roots"), roots_);
     settings.setValue(QStringLiteral("search/itemScope"), scope_combo_->currentIndex());
     settings.setValue(QStringLiteral("search/matchPath"), match_path_check_->isChecked());
+    settings.setValue(QStringLiteral("search/includeHidden"), include_hidden_check_->isChecked());
     settings.setValue(QStringLiteral("search/folderScope"), folder_scope_);
     settings.setValue(QStringLiteral("view/statusBar"), statusBar()->isVisible());
     settings.setValue(QStringLiteral("view/scopeBar"), scope_label_->isVisible());
@@ -863,6 +877,7 @@ void MainWindow::selectFolderScope(const QString& path) {
 void MainWindow::updateSearchStateLabel() {
     QStringList states;
     if (match_path_check_->isChecked()) states << QStringLiteral("匹配路径");
+    if (!include_hidden_check_->isChecked()) states << QStringLiteral("隐藏项目已过滤");
     if (scope_combo_->currentIndex() == 1) states << QStringLiteral("文件");
     else if (scope_combo_->currentIndex() == 2) states << QStringLiteral("文件夹");
     else states << QStringLiteral("全部");
@@ -911,6 +926,7 @@ QString MainWindow::currentSearchSignature() const {
     return normalizeGuiQuery(search_edit_->text())
         + QLatin1Char('\x1f') + QString::number(scope_combo_->currentIndex())
         + QLatin1Char('\x1f') + QString::number(match_path_check_->isChecked() ? 1 : 0)
+        + QLatin1Char('\x1f') + QString::number(include_hidden_check_->isChecked() ? 1 : 0)
         + QLatin1Char('\x1f') + folder_scope_;
 }
 
@@ -1005,6 +1021,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     else if (item_scope == 2) options.scope = SearchItemScope::Folders;
     else options.scope = SearchItemScope::All;
     options.match_path = match_path;
+    options.include_hidden = include_hidden_check_->isChecked();
     if (!folder_scope.isEmpty()) options.folder_scope = toUtf8(folder_scope);
 
     active_search_cancellation_ = std::make_shared<std::atomic_bool>(false);

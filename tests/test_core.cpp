@@ -10,6 +10,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#if defined(__APPLE__)
+#include <sys/stat.h>
+#include <sys/xattr.h>
+#endif
 
 using namespace everything_lite;
 
@@ -71,11 +75,38 @@ int main() {
     std::ofstream(base / "砀例甲示例文档.docx") << "sample text";
     std::ofstream(base / "砀例甲资料" / "示例记录.txt") << "record";
     std::ofstream(base / "示例工匠示例文件.pdf") << "sample text";
+    fs::create_directories(base / ".private");
+    std::ofstream(base / ".private" / "visible-name.txt") << "hidden parent";
+    std::ofstream(base / ".hidden-name.txt") << "hidden name";
+#if defined(__APPLE__)
+    std::ofstream(base / "finder-invisible.txt") << "finder hidden";
+    assert(chflags((base / "finder-invisible.txt").c_str(), UF_HIDDEN) == 0);
+    fs::create_directories(base / "finder-hidden-folder");
+    std::ofstream(base / "finder-hidden-folder" / "inherited-name.txt") << "finder parent";
+    unsigned char finder_info[32]{};
+    finder_info[8] = 0x40; // FinderInfo kIsInvisible (big-endian 0x4000).
+    assert(setxattr((base / "finder-hidden-folder").c_str(), XATTR_FINDERINFO_NAME,
+                    finder_info, sizeof(finder_info), 0, 0) == 0);
+#endif
 
     const auto db = (db_dir / "index.db").string();
     IndexManager manager(db);
     const auto stats = manager.rebuildRoot(base.string());
     assert(stats.indexed >= 10); // root + directories + test files
+
+    SearchService hidden_service(db);
+    SearchOptions visible_only;
+    visible_only.include_hidden = false;
+    const auto all_hidden = hidden_service.search("hidden", 100);
+    assert(containsName(all_hidden, ".hidden-name.txt"));
+    const auto filtered_hidden = hidden_service.search("hidden", 100, 0, visible_only);
+    assert(!containsName(filtered_hidden, ".hidden-name.txt"));
+    assert(!containsName(hidden_service.search("visible-name", 100, 0, visible_only), "visible-name.txt"));
+#if defined(__APPLE__)
+    assert(containsName(hidden_service.search("finder-invisible", 100), "finder-invisible.txt"));
+    assert(!containsName(hidden_service.search("finder-invisible", 100, 0, visible_only), "finder-invisible.txt"));
+    assert(!containsName(hidden_service.search("inherited-name", 100, 0, visible_only), "inherited-name.txt"));
+#endif
 
     Database diagnostics(db);
     diagnostics.initialize();

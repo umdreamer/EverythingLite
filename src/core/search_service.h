@@ -20,6 +20,7 @@ enum class SearchItemScope {
 struct SearchOptions {
     SearchItemScope scope = SearchItemScope::All;
     bool match_path = false;
+    bool include_hidden = true;
     std::optional<std::string> folder_scope;
 };
 

@@ -107,7 +107,9 @@ FileRecord readFileRecord(sqlite3_stmt* stmt) {
     r.scan_generation = sqlite3_column_int64(stmt, 8);
     r.source_id = sqlite3_column_int64(stmt, 9);
     r.relative_path = columnText(stmt, 10);
-    r.cloud_copy = static_cast<CloudCopy>(sqlite3_column_int(stmt, 11));
+    const int stored_flags = sqlite3_column_int(stmt, 11);
+    r.cloud_copy = static_cast<CloudCopy>(stored_flags & 3);
+    r.finder_hidden = (stored_flags & kFinderHiddenStorageBit) != 0;
     return r;
 }
 
@@ -357,7 +359,7 @@ OR files.cloud_copy<>excluded.cloud_copy;
         sqlite3_bind_int64(stmt.get(),8,static_cast<sqlite3_int64>(r.size));
         sqlite3_bind_int64(stmt.get(),9,r.modified_time); sqlite3_bind_int(stmt.get(),10,r.is_directory?1:0);
         bindText(stmt.get(),11,asciiFold(r.name)); bindText(stmt.get(),12,asciiFold(r.path));
-        sqlite3_bind_int64(stmt.get(),13,generation); sqlite3_bind_int(stmt.get(),14,static_cast<int>(r.cloud_copy));
+        sqlite3_bind_int64(stmt.get(),13,generation); sqlite3_bind_int(stmt.get(),14,storedCloudFlags(r));
         if(sqlite3_step(stmt.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
         changed=sqlite3_changes(db)>0 || changed;
     }
@@ -770,6 +772,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
     if (query.modified_after) where.emplace_back("files.modified_time >= ?");
     if (query.files_only) where.emplace_back("files.is_dir = 0");
     if (query.directories_only) where.emplace_back("files.is_dir = 1");
+    if (!query.include_hidden) where.emplace_back("files.path NOT GLOB '*/.*' AND (files.cloud_copy & 4) = 0");
 
     if (!where.empty()) {
         sql << " WHERE ";
@@ -1279,13 +1282,13 @@ IndexStats Database::mergeSourceScanSnapshot(const SourceScanRequest& captured) 
             const int rc=sqlite3_step(rows.get());if(rc==SQLITE_DONE){done=true;break;}if(rc!=SQLITE_ROW)throw std::runtime_error(sqlite3_errmsg(raw));
             FileRecord record;record.path=snapshotText(rows.get(),0);record.parent_path=snapshotText(rows.get(),1);record.name=snapshotText(rows.get(),2);record.extension=snapshotText(rows.get(),3);record.root=snapshotText(rows.get(),4);
             const auto size=snapshotInteger(rows.get(),5);record.modified_time=snapshotInteger(rows.get(),6);const auto directory=snapshotInteger(rows.get(),7);record.scan_generation=snapshotInteger(rows.get(),8);record.source_id=snapshotInteger(rows.get(),9);record.relative_path=snapshotText(rows.get(),10);const auto cloud=snapshotInteger(rows.get(),11);
-            if(size<0 || directory<0 || directory>1 || cloud<0 || cloud>2 || record.scan_generation!=0 || record.source_id!=expected.id)throw std::runtime_error("invalid snapshot record integer");
+            if(size<0 || directory<0 || directory>1 || cloud<0 || (cloud&3)>2 || (cloud&~7)!=0 || record.scan_generation!=0 || record.source_id!=expected.id)throw std::runtime_error("invalid snapshot record integer");
             if(!normalizedAbsolute(record.path) || !normalizedAbsolute(record.parent_path) || record.root!=expected.root || !pathIsWithin(record.path,captured.scan_path) || record.relative_path!=relativeTo(record.path,expected.root))throw std::runtime_error("snapshot record outside captured scope");
             const auto parsed=utf8ToPath(record.path);auto name=pathToUtf8(parsed.filename());if(name.empty())name=record.path;auto extension=pathToUtf8(parsed.extension());if(!extension.empty() && extension.front()=='.')extension.erase(0,1);
             if(record.parent_path!=normalizePath(pathToUtf8(parsed.parent_path())) || record.name!=name || record.extension!=extension)throw std::runtime_error("invalid snapshot record path fields");
             for(const auto& root:nested)if(pathIsWithin(record.path,root))throw std::runtime_error("snapshot record belongs to nested source");
             for(const auto& root:child_roots){const auto suffix=relativeTo(root,canonical);const auto binding=expected.root=="/"?"/"+suffix:expected.root+"/"+suffix;if(pathIsWithin(record.path,binding))throw std::runtime_error("snapshot record crosses child mount");}
-            record.size=static_cast<std::uint64_t>(size);record.is_directory=directory==1;record.cloud_copy=static_cast<CloudCopy>(cloud);batch.push_back(std::move(record));
+            record.size=static_cast<std::uint64_t>(size);record.is_directory=directory==1;record.cloud_copy=static_cast<CloudCopy>(cloud&3);record.finder_hidden=(cloud&kFinderHiddenStorageBit)!=0;batch.push_back(std::move(record));
         }
         return !batch.empty();
     },scope,[&](sqlite3* main) {

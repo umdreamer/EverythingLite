@@ -104,7 +104,7 @@ static void sourceRegressions(const fs::path& base,SourceScanRequest request) {
     struct stat permissions{};assert(stat(request.snapshot_path.c_str(),&permissions)==0 && (permissions.st_mode&0777)==0600);
     assert(stat((base/"output").c_str(),&permissions)==0 && (permissions.st_mode&0777)==0700);
     assert(scalar(request.snapshot_path,"SELECT COUNT(*) FROM snapshot_proof WHERE nonce='synthetic-nonce' AND source_id=7 AND source_revision=0 AND policy_revision=0 AND subtree_relative=''")==1);
-    assert(scalar(request.snapshot_path,"SELECT COUNT(*) FROM snapshot_files WHERE source_id<>7 OR cloud_copy<>2 OR root='' OR relative_path LIKE '/%'")==0);
+    assert(scalar(request.snapshot_path,"SELECT COUNT(*) FROM snapshot_files WHERE source_id<>7 OR (cloud_copy & 3)<>2 OR root='' OR relative_path LIKE '/%'")==0);
     assert(scalar(request.snapshot_path,"SELECT COUNT(*) FROM snapshot_files WHERE relative_path='.' AND is_dir=1")==1);
     assert(!fs::exists(request.snapshot_path+"-journal"));
     auto r=fresh();r.source.type=SourceType::Unknown;r.source.identity.clear();incomplete(scanSourceToSnapshot(r));assert(!fs::exists(r.snapshot_path));

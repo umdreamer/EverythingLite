@@ -83,6 +83,7 @@ private:
     QPushButton* clear_folder_scope_ = nullptr;
     QComboBox* scope_combo_ = nullptr;
     QCheckBox* match_path_check_ = nullptr;
+    QCheckBox* include_hidden_check_ = nullptr;
     QLabel* scope_label_ = nullptr;
     QLabel* status_label_ = nullptr;
     QLabel* watcher_error_label_ = nullptr;

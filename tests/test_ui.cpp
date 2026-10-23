@@ -97,6 +97,7 @@ class UiTest : public QObject {
         QVERIFY(window.scope_combo_->isVisible());
         QVERIFY(window.scope_label_->isVisible());
         QVERIFY(window.match_path_check_->isVisible());
+        QVERIFY(window.include_hidden_check_->isVisible());
         window.search_edit_->setText("item");
         window.runSearch();
         QTRY_VERIFY(!window.search_in_flight_);
@@ -108,6 +109,7 @@ class UiTest : public QObject {
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
+        settings.setValue("search/includeHidden", true);
         settings.setValue("search/folderScope", QString{});
         settings.setValue("table/sortOrder", static_cast<int>(Qt::AscendingOrder));
     }
@@ -860,6 +862,26 @@ class UiTest : public QObject {
         QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1,5000);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("unique-needle.txt"));
         QVERIFY(window.roots_.contains(new_root));
+    }
+    void hiddenItemControlPersistsAndFiltersSearch() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"); QVERIFY(QDir().mkpath(root));
+        QFile hidden(root+"/.private-sample.txt");
+        QVERIFY(hidden.open(QIODevice::WriteOnly)); hidden.write("test"); hidden.close();
+        const auto db_path=dir.filePath("index.db");
+        IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QSettings settings("CICHI","EverythingLite"); settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        window.search_edit_->setText("private-sample"); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1);
+        window.include_hidden_check_->setChecked(false); window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.model_->rowCount(),0);
+        window.saveSettings();
+        QCOMPARE(settings.value("search/includeHidden").toBool(),false);
+        window.include_hidden_check_->setChecked(true); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1);
     }
     void paginationRefreshesChangedSnapshot() {
         MainWindow window; window.watcher_->stop();

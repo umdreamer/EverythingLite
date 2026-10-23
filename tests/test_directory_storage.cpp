@@ -172,6 +172,19 @@ static void writeApis(const fs::path& base) {
     assert(db.totalFileCount()==0);db.clear();assert(db.sources().empty());db.verifyNameSearchIndex();
     auto raw=open(path);assert(scalar(raw.get(),"SELECT count(*) FROM directories")==0);
 }
+static void hiddenCompact(const fs::path& base) {
+    const auto path=base/"hidden.sqlite";Database db(path.string());db.initialize();
+    const std::string root="/synthetic/hidden";const auto id=db.ensureSourceForRoot(root);
+    auto hidden=file(root,"finder-invisible.txt");hidden.finder_hidden=true;
+    db.mergeSourceSnapshot(db.source(id),{file(root,".",true),hidden});
+    optimize(path);
+    SearchQuery visible_only;visible_only.terms={"finder-invisible"};visible_only.include_hidden=false;
+    assert(db.search(visible_only).empty());
+    assert(db.search("finder-invisible").size()==1);
+    hidden.finder_hidden=false;
+    db.upsertBatch({hidden},root,0);
+    assert(db.search(visible_only).size()==1);
+}
 static void setTrace(bool enabled) {
 #ifdef _WIN32
     _putenv_s("EVERYTHING_LITE_SEARCH_TRACE",enabled?"1":"0");
@@ -235,6 +248,6 @@ int main() {
 #if defined(__APPLE__)
     cancellationAfterVacuum(base);
 #endif
-    writeApis(base);performanceAndQueries(base);
+    writeApis(base);hiddenCompact(base);performanceAndQueries(base);
     fs::remove_all(base);std::cout<<"Directory storage guards passed\n";
 }

@@ -185,6 +185,7 @@ private:
     void rebuildIndex();
     void editRoots();
     void showIndexStatus();
+    void showSettingsOverview();
     void showSearchDiagnostics();
     void openCurrent();
     void openWithCurrent();

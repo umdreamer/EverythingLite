@@ -106,6 +106,35 @@ class UiTest : public QObject {
         QVERIFY(window.status_label_->text().contains(QStringLiteral("ms")));
         QVERIFY(window.status_label_->text().contains(QStringLiteral("已加载")));
     }
+    void previousRestoreMarkerDoesNotKeepControlsHidden() {
+        auto settings = makeAppSettings();
+        settings.setValue("view/statusBar", false);
+        settings.setValue("view/filterBar", false);
+        settings.setValue("view/scopeBar", false);
+        settings.setValue("view/restoredControls0415Fixbug", true);
+        settings.remove("view/restoredControls0415Fixbug2");
+        MainWindow window;
+        window.show();
+        QVERIFY(window.statusBar()->isVisible());
+        QVERIFY(window.scope_combo_->isVisible());
+        QVERIFY(window.scope_label_->isVisible());
+    }
+    void settingsOverviewShowsSavedConfigurationAndStoragePaths() {
+        MainWindow window;
+        QString report;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            if (auto* text = dialog->findChild<QPlainTextEdit*>("settingsOverviewText"))
+                report = text->toPlainText();
+            dialog->accept();
+        });
+        window.showSettingsOverview();
+        QVERIFY(report.contains(QStringLiteral("index/roots")));
+        QVERIFY(report.contains(QStringLiteral("排除规则")));
+        QVERIFY(report.contains(QStringLiteral("数据库")));
+        QVERIFY(report.contains(QStringLiteral("偏好设置文件")));
+    }
     void init() {
         auto settings = makeAppSettings();
         settings.setValue("index/roots", QStringList{fixture_root});

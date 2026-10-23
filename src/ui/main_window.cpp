@@ -29,6 +29,8 @@
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -48,6 +50,7 @@
 #include <QMetaObject>
 #include <QProcess>
 #include <QPointer>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSettings>
@@ -655,6 +658,9 @@ void MainWindow::buildMenus() {
 
     auto* status_action = tools_menu->addAction(QStringLiteral("索引状态…"));
     connect(status_action, &QAction::triggered, this, &MainWindow::showIndexStatus);
+
+    auto* overview_action = tools_menu->addAction(QStringLiteral("设置总览…"));
+    connect(overview_action, &QAction::triggered, this, &MainWindow::showSettingsOverview);
 
     auto* search_diag_action = tools_menu->addAction(QStringLiteral("最近搜索诊断…"));
     connect(search_diag_action, &QAction::triggered, this, &MainWindow::showSearchDiagnostics);
@@ -1419,6 +1425,70 @@ void MainWindow::showIndexStatus() {
     }
     details << QStringLiteral("索引目录：\n  %1").arg(roots_.join(QStringLiteral("\n  ")));
     QMessageBox::information(this, QStringLiteral("索引状态"), details.join(QStringLiteral("\n")));
+}
+
+void MainWindow::showSettingsOverview() {
+    auto settings = makeAppSettings();
+    QStringList details{
+        QStringLiteral("当前索引目录："),
+        roots_.isEmpty() ? QStringLiteral("  <未设置>") : QStringLiteral("  ") + roots_.join(QStringLiteral("\n  ")),
+        QStringLiteral("当前搜索文件夹：%1").arg(folder_scope_.isEmpty() ? QStringLiteral("<全部已索引目录>") : folder_scope_),
+        QStringLiteral("当前搜索范围：%1").arg(scope_combo_->currentText()),
+        QStringLiteral("匹配路径：%1").arg(match_path_check_->isChecked() ? QStringLiteral("是") : QStringLiteral("否")),
+        QStringLiteral("搜索隐藏文件和文件夹：%1").arg(include_hidden_check_->isChecked() ? QStringLiteral("是") : QStringLiteral("否")),
+        QStringLiteral("状态栏：%1；索引范围栏：%2；过滤器栏：%3")
+            .arg(statusBar()->isVisible() ? QStringLiteral("显示") : QStringLiteral("隐藏"),
+                 scope_label_->isVisible() ? QStringLiteral("显示") : QStringLiteral("隐藏"),
+                 scope_combo_->isVisible() ? QStringLiteral("显示") : QStringLiteral("隐藏")),
+        QString{}, QStringLiteral("偏好设置文件：%1").arg(settings.fileName()),
+        QStringLiteral("数据库：%1").arg(db_path_),
+        QString{}, QStringLiteral("已保存的设置：")};
+    const auto keys = settings.allKeys();
+    if (keys.isEmpty()) details << QStringLiteral("  <无>");
+    for (const auto& key : keys) {
+        const auto value = settings.value(key);
+        QString display;
+        if (value.metaType().id() == QMetaType::QByteArray)
+            display = QStringLiteral("<二进制布局，%1 字节>").arg(value.toByteArray().size());
+        else if (value.metaType().id() == QMetaType::QStringList)
+            display = value.toStringList().join(QStringLiteral("；"));
+        else display = value.toString();
+        details << QStringLiteral("  %1 = %2").arg(key, display);
+    }
+    details << QString{} << QStringLiteral("排除规则：");
+    try {
+        Database db(toUtf8(db_path_));
+        const auto policy = db.exclusionPolicy();
+        const auto& rules = policy.rules();
+        details << QStringLiteral("  排除目录：%1").arg(rules.directories.empty() ? QStringLiteral("<无>") : fromUtf8(rules.directories.front()));
+        for (std::size_t i = 1; i < rules.directories.size(); ++i) details << QStringLiteral("    %1").arg(fromUtf8(rules.directories[i]));
+        details << QStringLiteral("  排除文件：%1").arg(rules.files.empty() ? QStringLiteral("<无>") : fromUtf8(rules.files.front()));
+        for (std::size_t i = 1; i < rules.files.size(); ++i) details << QStringLiteral("    %1").arg(fromUtf8(rules.files[i]));
+        details << QStringLiteral("  目录过滤器：%1").arg(fromUtf8(rules.folder_filter));
+        details << QStringLiteral("  文件过滤器：%1").arg(fromUtf8(rules.file_filter));
+        details << QString{} << QStringLiteral("数据库中的索引来源：");
+        for (const auto& source : db.sources()) details << QStringLiteral("  %1").arg(fromUtf8(source.root));
+    } catch (const std::exception& error) {
+        details << QStringLiteral("  读取失败：%1").arg(QString::fromUtf8(error.what()));
+    }
+    details << QString{} << QStringLiteral("数据库相关文件：");
+    const QFileInfo db_info(db_path_);
+    const auto files = QDir(db_info.absolutePath()).entryInfoList({db_info.fileName() + QStringLiteral("*")}, QDir::Files | QDir::Hidden, QDir::Name);
+    for (const auto& file : files) details << QStringLiteral("  %1（%2 字节）").arg(file.absoluteFilePath()).arg(file.size());
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("设置总览"));
+    dialog.resize(760, 620);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* text = new QPlainTextEdit(&dialog);
+    text->setObjectName(QStringLiteral("settingsOverviewText"));
+    text->setReadOnly(true);
+    text->setPlainText(details.join(QStringLiteral("\n")));
+    layout->addWidget(text);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.exec();
 }
 
 void MainWindow::showSearchDiagnostics() {

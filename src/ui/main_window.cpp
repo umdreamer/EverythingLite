@@ -914,7 +914,7 @@ void MainWindow::updateCachedStatus() {
     else if (!name_search_ready_) acceleration = QStringLiteral("    ·    名称加速索引未就绪");
     const auto state = normalizeGuiQuery(search_edit_->text()).isEmpty()
         ? QStringLiteral("输入关键词开始搜索")
-        : QStringLiteral("已加载 %1%2    ·    搜索用时 %3 ms")
+        : QStringLiteral("已加载 %1%2 条搜索结果    ·    搜索用时 %3 ms")
               .arg(model_->rowCount()).arg(results_have_more_ ? QStringLiteral("+") : QString{})
               .arg(last_search_elapsed_ms_, 0, 'f', 1);
     status_label_->setText(QStringLiteral("%1 个对象    ·    %2    ·    %3%4")
@@ -1106,7 +1106,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
                     + " elapsed_ms=" + std::to_string(self->last_search_elapsed_ms_));
 
                 const auto loaded = self->model_->rowCount();
-                self->status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3    ·    后台查询 %4 ms    ·    %5%6")
+                self->status_label_->setText(QStringLiteral("%1 个对象    ·    已加载 %2%3 条搜索结果    ·    搜索用时 %4 ms    ·    %5%6")
                     .arg(self->indexed_count_)
                     .arg(loaded)
                     .arg(self->results_have_more_ ? QStringLiteral("+") : QString{})

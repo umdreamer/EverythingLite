@@ -2,7 +2,7 @@
 
 ## 目标
 
-v0.4.4 是“搜索正确性优先”版本。根据真实 large项索引测试，部分中文关键词（例如“砀例甲”“示例工匠”）在 CLI 可以命中，但 GUI 的加速搜索路径可能返回 0。当前阶段先保证“存在就必须搜得到”，性能优化后置。
+v0.4.4 是“搜索正确性优先”版本。根据真实 262 万项索引测试，部分中文关键词（例如“研究生”“机器学习”）在 CLI 可以命中，但 GUI 的加速搜索路径可能返回 0。当前阶段先保证“存在就必须搜得到”，性能优化后置。
 
 ## 核心修改
 
@@ -20,16 +20,16 @@ v0.4.4 是“搜索正确性优先”版本。根据真实 large项索引测试�
 3. CLI 新增 `search-safe`。
 
 ```bash
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-safe '示例工匠' --limit 2000
+./build-macos/everything-lite-cli search-safe '研究生' --limit 2000
+./build-macos/everything-lite-cli search-safe '机器学习' --limit 2000
 ```
 
 该命令执行与 GUI 中文查询相同的正确性优先搜索路径。
 
 4. 新增回归测试：
-   - `砀例甲`
-   - `path:砀例甲`
-   - `示例工匠`
+   - `研究生`
+   - `path:研究生`
+   - `机器学习`
    - Reliable LIKE 中文名称搜索
 
 ## 当前策略
@@ -52,7 +52,7 @@ FTS5 / 快速搜索
 Reliable LIKE 复核
 ```
 
-这意味着部分中文查询在 large项索引上可能比 FTS5 慢，但不会为了速度接受“明明存在却搜索不到”的结果。
+这意味着部分中文查询在 262 万项索引上可能比 FTS5 慢，但不会为了速度接受“明明存在却搜索不到”的结果。
 
 ## 后续
 

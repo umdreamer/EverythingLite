@@ -87,13 +87,6 @@ QString utf8Hex(const QString& value) {
     return QString::fromLatin1(value.toUtf8().toHex(' '));
 }
 
-bool containsNonAscii(const QString& value) {
-    for (const QChar ch : value) {
-        if (ch.unicode() > 0x7f) return true;
-    }
-    return false;
-}
-
 QStringList defaultRoots() {
     QStringList roots;
     const auto home = QDir::homePath();
@@ -143,6 +136,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         cancelActiveSearch();
         results_have_more_ = false;
         search_timer_->start();
+    });
+    connect(search_edit_, &QLineEdit::returnPressed, this, [this] {
+        // v0.4.5: allow an explicit retry even when the text has not changed.
+        // A previous zero-result answer must never make the same keyword
+        // impossible to query again without editing the text.
+        search_timer_->stop();
+        runSearch();
     });
     connect(scope_combo_, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (scope_action_group_) {
@@ -283,7 +283,7 @@ void MainWindow::buildUi() {
     search_row->setSpacing(6);
 
     search_edit_ = new QLineEdit(this);
-    search_edit_->setPlaceholderText(QStringLiteral("搜索文件和文件夹…  例：report  ext:pdf  path:sample  size:>10m  modified:7d"));
+    search_edit_->setPlaceholderText(QStringLiteral("搜索文件和文件夹…  例：report  ext:pdf  path:research  size:>10m  modified:7d"));
     search_edit_->setClearButtonEnabled(true);
     search_edit_->setMinimumHeight(34);
 
@@ -684,49 +684,24 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
             timer.start();
             SearchEngine engine(toUtf8(db_path));
 
-            // v0.4.4 correctness-first policy:
-            // - Any non-ASCII query (Chinese/Japanese/Korean/accented text, etc.)
-            //   uses the canonical files table + LIKE path. We deliberately do
-            //   not depend on FTS5/trigram for correctness here.
-            // - ASCII queries may use the accelerated path, but a zero-result
-            //   answer is verified once with the reliable LIKE path.
-            // Performance tuning is intentionally secondary until false
-            // negatives are eliminated on the user's real 2.6M-item index.
-            const bool reliability_first = containsNonAscii(normalized_query);
-
+            // v0.4.5 correctness gate:
+            // The GUI asks the core for a correctness-first result. A zero is
+            // accepted only after the canonical files-table/instr path and the
+            // FTS path agree. This removes keyword-specific permanent misses
+            // without introducing a zero-result cache.
             if (item_scope == 0 && !match_path) {
-                if (reliability_first) {
-                    outcome.execution_mode = QStringLiteral("Reliable LIKE (non-ASCII)");
-                    outcome.results = engine.searchReliable(toUtf8(normalized_query), kPageSize + 1, offset);
-                } else {
-                    outcome.execution_mode = QStringLiteral("Fast search + reliable zero-result fallback");
-                    outcome.results = engine.search(toUtf8(normalized_query), kPageSize + 1, offset, cancel.get());
-                    if (outcome.results.empty() && !normalized_query.isEmpty() && !cancel->load(std::memory_order_relaxed)) {
-                        outcome.results = engine.searchReliable(toUtf8(normalized_query), kPageSize + 1, offset);
-                        outcome.execution_mode += QStringLiteral(" -> LIKE fallback");
-                    }
-                }
+                outcome.execution_mode = QStringLiteral("Correctness dual-path (INSTR + FTS)");
+                outcome.results = engine.searchCorrect(toUtf8(normalized_query), kPageSize + 1, offset);
             } else {
                 auto parsed = parseSearchQuery(toUtf8(normalized_query));
-
                 // Explicit type:file/type:dir in the query wins over the UI filter.
                 if (!parsed.files_only && !parsed.directories_only) {
                     if (item_scope == 1) parsed.files_only = true;
                     else if (item_scope == 2) parsed.directories_only = true;
                 }
                 if (match_path) parsed.match_path = true;
-
-                if (reliability_first) {
-                    outcome.execution_mode = QStringLiteral("Reliable LIKE + UI filters (non-ASCII)");
-                    outcome.results = engine.searchReliable(parsed, kPageSize + 1, offset);
-                } else {
-                    outcome.execution_mode = QStringLiteral("Fast search + UI filters + reliable zero-result fallback");
-                    outcome.results = engine.search(parsed, kPageSize + 1, offset, cancel.get());
-                    if (outcome.results.empty() && !normalized_query.isEmpty() && !cancel->load(std::memory_order_relaxed)) {
-                        outcome.results = engine.searchReliable(parsed, kPageSize + 1, offset);
-                        outcome.execution_mode += QStringLiteral(" -> LIKE fallback");
-                    }
-                }
+                outcome.execution_mode = QStringLiteral("Correctness dual-path + UI filters");
+                outcome.results = engine.searchCorrect(parsed, kPageSize + 1, offset);
             }
             outcome.raw_result_count = static_cast<int>(outcome.results.size());
             if (outcome.results.size() > kPageSize) {
@@ -825,7 +800,7 @@ void MainWindow::showIndexStatus() {
         !name_search_available_ ? QStringLiteral("unavailable") :
         !name_search_ready_ ? QStringLiteral("not ready") : QStringLiteral("ready"));
     if (name_search_ready_) {
-        details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（对 large项可能需要一些时间）");
+        details << QStringLiteral("深度一致性：可运行 CLI 的 check-search-index（对 262 万项可能需要一些时间）");
     }
     details << QStringLiteral("监听后端：%1").arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未启动"));
     if (!last_search_query_.isNull()) {
@@ -1144,12 +1119,12 @@ void MainWindow::showSearchSyntax() {
         "Everything Lite v0.4 搜索语法\n\n"
         "report                 名称包含 report\n"
         "ext:pdf                PDF 文件/文件夹名后缀过滤\n"
-        "path:sample          完整路径包含 sample\n"
+        "path:research          完整路径包含 research\n"
         "type:file              仅文件\n"
         "type:dir               仅文件夹\n"
         "size:>100m             大于 100 MB\n"
         "modified:7d            最近 7 天修改\n"
-        "\"Example Collection\"   短语\n\n"
+        "\"Analytical Chemistry\"   短语\n\n"
         "多个条件可组合。普通关键词默认只匹配名称；“搜索 → 匹配路径”开启后才匹配完整路径。\n"
         "Match Case / Whole Word / Regex 将在 v0.6 搜索兼容版实现。"));
     box.exec();

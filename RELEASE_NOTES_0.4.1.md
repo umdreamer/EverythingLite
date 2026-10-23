@@ -18,9 +18,9 @@
 ./scripts/run-macos.sh
 
 ./build-macos/everything-lite-cli db-path
-./build-macos/everything-lite-cli search '砀例甲' --limit 50
+./build-macos/everything-lite-cli search '研究生' --limit 50
 ./build-macos/everything-lite-cli stats
 ./build-macos/everything-lite-cli check-search-index
 ```
 
-GUI 中连续输入或使用中文输入法输入“砀例甲”，最终结果应与 CLI 对同一数据库的结果一致。
+GUI 中连续输入或使用中文输入法输入“研究生”，最终结果应与 CLI 对同一数据库的结果一致。

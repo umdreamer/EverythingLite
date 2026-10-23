@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="$ROOT_DIR/build-macos/everything-lite-cli"
-QUERY="${1:-砀例甲}"
+QUERY="${1:-研究生}"
 
 if [[ ! -x "$CLI" ]]; then
   echo "未找到 CLI：$CLI"

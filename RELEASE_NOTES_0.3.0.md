@@ -2,7 +2,7 @@
 
 ## 为什么做这一版
 
-v0.2 在真实 macOS Home 目录上索引 [private benchmark removed] 项后，结构化过滤非常快，但普通子串搜索明显失速：`ext:pdf` 约 100 ms、`modified:7d` 约 20 ms，而 `pdf` 约 [redacted]、`2026` 约 [redacted]、`path:sample` 约 [redacted]。
+v0.2 在真实 macOS Home 目录上索引 2624110 项后，结构化过滤非常快，但普通子串搜索明显失速：`ext:pdf` 约 100 ms、`modified:7d` 约 20 ms，而 `pdf` 约 18.15 s、`2026` 约 16.38 s、`path:research` 约 8.38 s。
 
 原因有两个：
 
@@ -68,7 +68,7 @@ v0.2 在真实 macOS Home 目录上索引 [private benchmark removed] 项后，�
 
 ```bash
 ./build-macos/everything-lite-cli benchmark "$HOME" \
-  'pdf' 'sample' 'ext:pdf' 'path:sample' 'modified:7d' 'size:>100m type:file'
+  'pdf' '2026' 'ext:pdf' 'path:research' 'modified:7d' 'size:>100m type:file'
 ```
 
-重点比较 `pdf` 和 `2026`。`path:sample` 当前仍没有独立路径 trigram，因此预计仍显著慢于名称搜索。
+重点比较 `pdf` 和 `2026`。`path:research` 当前仍没有独立路径 trigram，因此预计仍显著慢于名称搜索。

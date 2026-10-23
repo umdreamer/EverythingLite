@@ -27,17 +27,17 @@ int main() {
     fs::remove_all(base, ec);
     fs::remove_all(db_dir, ec);
     fs::remove_all(second, ec);
-    fs::create_directories(base / "nested" / "sample");
+    fs::create_directories(base / "nested" / "research");
     fs::create_directories(db_dir);
 
     std::ofstream(base / "AlphaReport.txt") << std::string(64, 'a');
     std::ofstream(base / "nested" / "data.csv") << "1,2,3";
-    std::ofstream(base / "nested" / "sample" / "ExampleFile.pdf") << std::string(2048, 'p');
-    std::ofstream(base / "nested" / "sample" / "unrelated.bin") << "x";
-    fs::create_directories(base / "砀例甲资料");
-    std::ofstream(base / "砀例甲示例文档.docx") << "sample text";
-    std::ofstream(base / "砀例甲资料" / "示例记录.txt") << "record";
-    std::ofstream(base / "示例工匠示例文件.pdf") << "sample text";
+    std::ofstream(base / "nested" / "research" / "Paper2026.pdf") << std::string(2048, 'p');
+    std::ofstream(base / "nested" / "research" / "unrelated.bin") << "x";
+    fs::create_directories(base / "研究生资料");
+    std::ofstream(base / "研究生培养方案.docx") << "graduate";
+    std::ofstream(base / "研究生资料" / "培养记录.txt") << "record";
+    std::ofstream(base / "机器学习课程资料.pdf") << "machine learning";
 
     const auto db = (db_dir / "index.db").string();
     IndexManager manager(db);
@@ -56,56 +56,66 @@ int main() {
     assert(containsName(results, "AlphaReport.txt"));
 
     results = engine.search("ext:pdf", 20);
-    assert(containsName(results, "ExampleFile.pdf"));
+    assert(containsName(results, "Paper2026.pdf"));
     assert(!containsName(results, "data.csv"));
 
     // v0.3: ordinary terms match the basename only. A parent directory name
     // must not make all descendants appear as false positives.
-    results = engine.search("sample", 20);
-    assert(containsName(results, "sample"));
+    results = engine.search("research", 20);
+    assert(containsName(results, "research"));
     assert(!containsName(results, "unrelated.bin"));
 
-    results = engine.search("path:sample", 20);
-    assert(containsName(results, "ExampleFile.pdf"));
+    results = engine.search("path:research", 20);
+    assert(containsName(results, "Paper2026.pdf"));
     assert(containsName(results, "unrelated.bin"));
 
-    auto match_path_query = parseSearchQuery("sample");
+    auto match_path_query = parseSearchQuery("research");
     match_path_query.match_path = true;
     results = engine.search(match_path_query, 20);
     assert(containsName(results, "unrelated.bin"));
 
     results = engine.search("size:>1k type:file", 20);
-    assert(containsName(results, "ExampleFile.pdf"));
+    assert(containsName(results, "Paper2026.pdf"));
     assert(!containsName(results, "AlphaReport.txt"));
 
-    results = engine.search("type:dir sample", 20);
-    assert(containsName(results, "sample"));
-    assert(!containsName(results, "ExampleFile.pdf"));
+    results = engine.search("type:dir research", 20);
+    assert(containsName(results, "research"));
+    assert(!containsName(results, "Paper2026.pdf"));
 
     // v0.4.1 regression: Chinese 3-character basename terms must use the
     // trigram path correctly; path: queries must also preserve UTF-8.
-    results = engine.search("砀例甲", 20);
-    assert(containsName(results, "砀例甲示例文档.docx"));
-    assert(containsName(results, "砀例甲资料"));
+    results = engine.search("研究生", 20);
+    assert(containsName(results, "研究生培养方案.docx"));
+    assert(containsName(results, "研究生资料"));
 
-    results = engine.search("path:砀例甲", 20);
-    assert(containsName(results, "示例记录.txt"));
+    results = engine.search("path:研究生", 20);
+    assert(containsName(results, "培养记录.txt"));
 
     // v0.4.4 correctness-first reference path: the canonical files table must
     // return Chinese terms independently of FTS5/trigram behavior.
-    results = engine.searchReliable("砀例甲", 20);
-    assert(containsName(results, "砀例甲示例文档.docx"));
-    assert(containsName(results, "砀例甲资料"));
+    results = engine.searchReliable("研究生", 20);
+    assert(containsName(results, "研究生培养方案.docx"));
+    assert(containsName(results, "研究生资料"));
 
-    results = engine.searchReliable("示例工匠", 20);
-    assert(containsName(results, "示例工匠示例文件.pdf"));
+    results = engine.searchReliable("机器学习", 20);
+    assert(containsName(results, "机器学习课程资料.pdf"));
+
+    // v0.4.5: the GUI-facing correctness gate must never accept a false zero
+    // from a single search implementation. Chinese keywords are verified by
+    // the direct INSTR path and can fall back to FTS if necessary.
+    results = engine.searchCorrect("研究生", 20);
+    assert(containsName(results, "研究生培养方案.docx"));
+    assert(containsName(results, "研究生资料"));
+
+    results = engine.searchCorrect("机器学习", 20);
+    assert(containsName(results, "机器学习课程资料.pdf"));
 
     // A cancelled GUI-style query must be interruptible instead of blocking
-    // the next request behind a potentially expensive LIKE scan.
+    // the next request behind a potentially expensive substring scan.
     std::atomic_bool cancelled{true};
     bool cancellation_observed = false;
     try {
-        (void)engine.search("砀", 20, 0, &cancelled);
+        (void)engine.search("研", 20, 0, &cancelled);
     } catch (const std::exception&) {
         cancellation_observed = true;
     }
@@ -119,9 +129,9 @@ int main() {
     assert(!second_page.empty());
     assert(first_page.front().file.path != second_page.front().file.path);
 
-    const auto parsed = parseSearchQuery("ext:PDF path:\"Sample Folder\" size:>=10m modified:7d type:file hello", 1'000'000);
+    const auto parsed = parseSearchQuery("ext:PDF path:\"Research Folder\" size:>=10m modified:7d type:file hello", 1'000'000);
     assert(parsed.extension && *parsed.extension == "pdf");
-    assert(parsed.path_term && *parsed.path_term == "sample folder");
+    assert(parsed.path_term && *parsed.path_term == "research folder");
     assert(parsed.min_size && *parsed.min_size == 10ULL * 1024ULL * 1024ULL);
     assert(parsed.modified_after && *parsed.modified_after == 1'000'000 - 7 * 86400);
     assert(parsed.files_only && !parsed.directories_only);

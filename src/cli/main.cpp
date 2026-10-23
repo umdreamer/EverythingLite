@@ -37,6 +37,7 @@ Usage:
   everything-lite-cli [--db PATH] index <root> [root...]
   everything-lite-cli [--db PATH] search <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] search-safe <query> [--limit N] [--offset N]
+  everything-lite-cli [--db PATH] search-correct <query> [--limit N] [--offset N]
   everything-lite-cli [--db PATH] stats
   everything-lite-cli [--db PATH] clear
   everything-lite-cli [--db PATH] optimize-search
@@ -45,7 +46,7 @@ Usage:
 
 Search syntax:
   ext:pdf              filter by extension
-  path:sample        path contains "sample"
+  path:research        path contains "research"
   size:>10m            file size; supports b/k/m/g/t and > >= < <=
   modified:7d          modified within the last 7 days (h/d/w)
   type:file | type:dir files or directories only
@@ -60,10 +61,10 @@ Database selection:
 
 Examples:
   everything-lite-cli db-path
-  everything-lite-cli search '砀例甲' --limit 50
-  everything-lite-cli --db '/path/to/everything-lite.db' search '砀例甲'
-  everything-lite-cli search 'ext:pdf example'
-  everything-lite-cli search 'path:sample size:>10m type:file'
+  everything-lite-cli search '研究生' --limit 50
+  everything-lite-cli --db '/path/to/everything-lite.db' search '研究生'
+  everything-lite-cli search 'ext:pdf transformer'
+  everything-lite-cli search 'path:research size:>10m type:file'
 )";
 }
 
@@ -113,7 +114,7 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        if (command == "search" || command == "search-safe") {
+        if (command == "search" || command == "search-safe" || command == "search-correct") {
             if (args.size() < 2) {
                 std::cerr << "search requires a query\n";
                 return 2;
@@ -137,7 +138,9 @@ int main(int argc, char** argv) {
             SearchEngine engine(db_path);
             const auto results = command == "search-safe"
                 ? engine.searchReliable(query_builder.str(), limit, offset)
-                : engine.search(query_builder.str(), limit, offset);
+                : command == "search-correct"
+                    ? engine.searchCorrect(query_builder.str(), limit, offset)
+                    : engine.search(query_builder.str(), limit, offset);
             for (const auto& result : results) {
                 std::cout << (result.file.is_directory ? "[D] " : "[F] ")
                           << result.file.name << "\t"
@@ -209,7 +212,7 @@ int main(int argc, char** argv) {
             const auto root = fs::absolute(fs::path(args[1])).lexically_normal().string();
             std::vector<std::string> queries;
             for (std::size_t i = 2; i < args.size(); ++i) queries.emplace_back(args[i]);
-            if (queries.empty()) queries = {"pdf", "sample", "type:file"};
+            if (queries.empty()) queries = {"pdf", "2026", "type:file"};
 
             const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
             const auto bench_dir = fs::temp_directory_path() / ("everything-lite-benchmark-" + std::to_string(stamp));

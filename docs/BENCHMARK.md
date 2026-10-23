@@ -2,17 +2,17 @@
 
 ## 1. 真实基线（v0.2.0）
 
-macOS 实测索引项：[private benchmark removed]。
+macOS 实测索引项：2624110。
 
 ```text
-Index time: [redacted] ms
-Index rate: [redacted] items/s
-pdf: [redacted] ms
-sample: [redacted] ms
-ext:pdf: [redacted] ms
-path:sample: [redacted] ms
-modified:7d: [redacted] ms
-size:>100m type:file: [redacted] ms
+Index time: 175479.6 ms
+Index rate: 14954 items/s
+pdf: 18153.846 ms
+2026: 16379.592 ms
+ext:pdf: 100.190 ms
+path:research: 8381.031 ms
+modified:7d: 20.281 ms
+size:>100m type:file: 20.967 ms
 ```
 
 这说明瓶颈不是 SQLite 本身，而是任意子串与完整路径扫描。
@@ -22,9 +22,9 @@ size:>100m type:file: [redacted] ms
 ```bash
 ./build-macos/everything-lite-cli benchmark "$HOME" \
   'pdf' \
-  'sample' \
+  '2026' \
   'ext:pdf' \
-  'path:sample' \
+  'path:research' \
   'modified:7d' \
   'size:>100m type:file'
 ```
@@ -50,7 +50,7 @@ size:>100m type:file: [redacted] ms
 ```bash
 time ./build-macos/everything-lite-cli search pdf --limit 1000
 time ./build-macos/everything-lite-cli search 2026 --limit 1000
-time ./build-macos/everything-lite-cli search 'path:sample' --limit 1000
+time ./build-macos/everything-lite-cli search 'path:research' --limit 1000
 ```
 
 深一点的结果窗口：
@@ -67,7 +67,7 @@ v0.3 的名称 trigram 主要优化：
 ```text
 pdf
 2026
-example
+transformer
 report
 ```
 

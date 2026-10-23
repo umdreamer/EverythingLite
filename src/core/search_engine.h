@@ -27,6 +27,12 @@ public:
     std::vector<SearchResult> searchReliable(const SearchQuery& query,
                                              std::size_t limit = 500,
                                              std::size_t offset = 0) const;
+    std::vector<SearchResult> searchCorrect(const std::string& query,
+                                            std::size_t limit = 500,
+                                            std::size_t offset = 0) const;
+    std::vector<SearchResult> searchCorrect(const SearchQuery& query,
+                                            std::size_t limit = 500,
+                                            std::size_t offset = 0) const;
 
 private:
     Database database_;

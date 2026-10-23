@@ -2,30 +2,32 @@
 
 Everything Lite 是一个面向 macOS、并保持跨平台架构的本地文件快速搜索工具。目标不是简单复制 Windows 外观，而是尽量保持 Everything 的搜索语义、主窗口结构和工作流，同时充分利用 macOS 的原生菜单栏、Finder 和 Quick Look。
 
-当前版本：`0.4.4`
+当前版本：`0.4.5`
 
 技术栈：C++17 + Qt 6 Widgets + SQLite + CMake；macOS 文件变化监听使用 FSEvents。
 
-## 1. v0.4.4 重点
+## 1. v0.4.5 重点
 
-### 搜索正确性优先
+### 搜索正确性优先：零结果必须“双重确认”
 
-v0.4.4 根据真实 large项索引反馈调整优先级：先解决“关键词明明存在但 GUI 搜不到”，再做极致性能。
+v0.4.5 根据真实 262 万项索引反馈继续收紧正确性策略。工程中没有“0 结果缓存”；同一关键词持续为空，说明它持续走同一条失效搜索路径。为此：
 
-- 中文/非 ASCII 普通查询默认走 `Reliable LIKE`，直接查询 canonical `files` 表，不依赖 FTS5 trigram。
-- ASCII 查询继续使用快速索引；若快速路径返回 0，会自动执行一次 Reliable LIKE 复核。
-- 可靠路径不安装 SQLite progress handler，减少 GUI 运行时与 CLI 的差异。
-- CLI 新增 `search-safe`，可直接验证 GUI 使用的正确性优先路径。
-- 自动测试新增 `砀例甲`、`示例工匠`、`path:砀例甲`。
+- `searchReliable` 从 SQLite `LIKE` 改为 `instr(search_name, ?)>0` 的直接子串匹配，减少 LIKE/通配符/排序规则带来的变量。
+- 新增 `searchCorrect`：非 ASCII 查询先走 canonical `files` 表 + `instr()`；若返回 0，再用 FTS5 搜索复核。ASCII 查询仍优先快速搜索，0 时再用 `instr()` 复核。
+- GUI 统一调用 `searchCorrect`。只有两条独立搜索路径都返回 0，界面才接受“没有结果”。
+- 搜索框按 Enter 可强制重新查询当前关键词，即使文字没有变化。
+- CLI 新增 `search-correct`，用于复现 GUI 的正确性搜索策略。
+- 自动测试继续覆盖 `研究生`、`机器学习`、`path:研究生`。
 
 例如：
 
 ```bash
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
-./build-macos/everything-lite-cli search-safe '示例工匠' --limit 2000
+./build-macos/everything-lite-cli search-correct '研究生' --limit 2000
+./build-macos/everything-lite-cli search-correct '机器学习' --limit 2000
+./build-macos/everything-lite-cli search-safe '研究生' --limit 2000
 ```
 
-完整说明见 `RELEASE_NOTES_0.4.4.md`。v0.4.0 已完成的 Everything 风格菜单、Quick Look、Finder Reveal、多选、分页和 CSV 导出均保留。
+完整说明见 `RELEASE_NOTES_0.4.5.md`。v0.4.0 已完成的 Everything 风格菜单、Quick Look、Finder Reveal、多选、分页和 CSV 导出均保留。
 
 ## 2. 安装与构建（macOS）
 
@@ -56,7 +58,7 @@ macOS 原生菜单栏
 名称                 所在位置              大小     修改时间
 ...
 ────────────────────────────────────────────────────────
-[private benchmark removed] 个对象 · 已加载 1000+ · 32 ms      全部 / 匹配路径
+2624110 个对象 · 已加载 1000+ · 32 ms      全部 / 匹配路径
 ```
 
 常用快捷键：
@@ -68,7 +70,7 @@ macOS 原生菜单栏
 - Command+,：Preferences
 - Command+Q：退出
 - Space：Quick Look
-- Return：打开当前项
+- Return：搜索框有焦点时强制重新查询当前关键词；结果表有焦点时打开当前项
 
 详见 `docs/UI_GUIDE.md`。
 
@@ -92,7 +94,7 @@ paper 2026
 例如：
 
 ```text
-path:sample
+path:research
 ```
 
 过滤文件 / 文件夹：
@@ -108,7 +110,7 @@ type:dir
 
 ```text
 ext:pdf
-path:sample
+path:research
 size:>100m
 modified:7d
 type:file
@@ -135,19 +137,19 @@ GUI 不把所有匹配项一次性复制到 Qt Model。每次加载 1000 条，�
 
 ## 6. 名称搜索性能
 
-v0.4.4 起，GUI 对中文/非 ASCII 关键词优先使用可靠 LIKE 查询，先保证不漏搜；ASCII 普通查询仍可使用 SQLite FTS5 trigram，并在 0 结果时自动回退 LIKE。性能优化安排在后续版本。
+v0.4.5 起，GUI 使用“正确性双路径”：中文/非 ASCII 先用 canonical `files` 表的 `instr()` 子串匹配，0 结果再由 FTS5 复核；ASCII 则优先 FTS5，0 结果再由 `instr()` 复核。只有两条路径都为 0，GUI 才显示无结果。性能优化继续后置。
 
-真实 v0.2 基线（约 [private benchmark removed] 项）：
+真实 v0.2 基线（约 2,624,110 项）：
 
 ```text
-Index time: [redacted] ms
-Index rate: [redacted] items/s
-pdf: [redacted] ms
-sample: [redacted] ms
-ext:pdf: [redacted] ms
-path:sample: [redacted] ms
-modified:7d: [redacted] ms
-size:>100m type:file: [redacted] ms
+Index time: 175479.6 ms
+Index rate: 14954 items/s
+pdf: 18153.846 ms
+2026: 16379.592 ms
+ext:pdf: 100.190 ms
+path:research: 8381.031 ms
+modified:7d: 20.281 ms
+size:>100m type:file: 20.967 ms
 ```
 
 v0.3 开始解决 `pdf / 2026` 这种名称任意子串全表扫描问题；v0.7 将进行 250 万～500 万项系统性性能优化。
@@ -199,9 +201,9 @@ v0.4 Bookmarks 保存：
 ```bash
 ./build-macos/everything-lite-cli benchmark "$HOME" \
   'pdf' \
-  'sample' \
+  '2026' \
   'ext:pdf' \
-  'path:sample' \
+  'path:research' \
   'modified:7d' \
   'size:>100m type:file'
 ```
@@ -211,6 +213,7 @@ v0.4 Bookmarks 保存：
 ## 11. 文档导航
 
 - `RELEASE_NOTES_0.4.4.md`：v0.4.4 正确性优先修复说明
+- `RELEASE_NOTES_0.4.5.md`：v0.4.5 零结果双重确认修复说明
 - `RELEASE_NOTES_0.4.0.md`：v0.4 主版本说明
 - `docs/ROADMAP.md`：v0.4 → v1.0 完整路线与验收目标
 - `docs/UI_GUIDE.md`：v0.4 菜单、主窗口和 Mac 快捷键

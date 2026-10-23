@@ -18,7 +18,7 @@
 ```text
 一个真实文件名
 ext:pdf
-path:sample
+path:research
 size:>10m type:file
 modified:7d
 ```
@@ -52,9 +52,9 @@ rm ~/Desktop/everything_v020_test_renamed.txt
 ```bash
 ./build-macos/everything-lite-cli benchmark "$HOME" \
   'pdf' \
-  'sample' \
+  '2026' \
   'ext:pdf' \
-  'path:sample' \
+  'path:research' \
   'modified:7d' \
   'size:>100m type:file'
 ```

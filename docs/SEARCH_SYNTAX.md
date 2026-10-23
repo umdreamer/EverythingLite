@@ -6,7 +6,7 @@
 paper
 pdf
 2026
-"Example Collection"
+"Analytical Chemistry"
 ```
 
 普通关键词默认只匹配当前项目自身的 basename，即“文件名或文件夹名”，不会因为某个父目录包含关键词而把它下面所有后代都返回。
@@ -14,10 +14,10 @@ pdf
 例如：
 
 ```text
-/Sample/unrelated.bin
+/Research/unrelated.bin
 ```
 
-搜索 `sample` 默认只会命中名为 `Sample` 的文件夹，不会命中 `unrelated.bin`。
+搜索 `research` 默认只会命中名为 `Research` 的文件夹，不会命中 `unrelated.bin`。
 
 ## 文件 / 文件夹范围
 
@@ -45,14 +45,14 @@ type:dir
 CLI 可使用：
 
 ```text
-matchpath: sample
+matchpath: research
 ```
 
 显式路径过滤仍支持：
 
 ```text
-path:sample
-path:"Sample Projects"
+path:research
+path:"Research Projects"
 ```
 
 ## 扩展名
@@ -86,10 +86,10 @@ modified:4w
 ## 组合
 
 ```text
-ext:pdf size:>10m modified:30d type:file example
+ext:pdf size:>10m modified:30d type:file transformer
 ```
 
-默认 example 只匹配文件名。如果需要完整路径也匹配 example，打开“匹配路径”。
+默认 transformer 只匹配文件名。如果需要完整路径也匹配 transformer，打开“匹配路径”。
 
 ## 性能说明
 
@@ -104,10 +104,28 @@ ext:pdf size:>10m modified:30d type:file example
 
 ## v0.4.4：正确性优先搜索
 
-GUI 对包含非 ASCII 字符的查询（如 `砀例甲`、`示例工匠`）默认使用 canonical `files` 表的 LIKE 子串匹配，暂时绕过 FTS5 trigram，以避免加速索引路径导致漏搜。ASCII 查询仍可使用快速路径，但 0 结果会自动用 LIKE 复核。
+v0.4.4 曾使用 LIKE 作为中文可靠路径；v0.4.5 已进一步改为 `instr(search_name, ?)>0` 的直接子串匹配，并引入双路径确认。
 
 CLI 可显式验证可靠路径：
 
 ```bash
-./build-macos/everything-lite-cli search-safe '砀例甲' --limit 2000
+./build-macos/everything-lite-cli search-safe '研究生' --limit 2000
 ```
+
+
+## v0.4.5：零结果双重确认
+
+GUI 使用 `searchCorrect`：
+
+- 中文/非 ASCII：先 INSTR，0 时再 FTS5；
+- ASCII：先快速搜索，0 时再 INSTR；
+- 两条路径都返回 0，才显示无结果。
+
+显式验证：
+
+```bash
+./build-macos/everything-lite-cli search-correct '研究生' --limit 2000
+./build-macos/everything-lite-cli search-correct '机器学习' --limit 2000
+```
+
+搜索框文字不变时可直接按 Enter 强制重新执行当前查询。

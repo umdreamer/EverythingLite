@@ -16,11 +16,11 @@ ctest --preset core-debug
 
 Core Debug 全套 CTest 20/20、GUI Debug 全套 CTest 25/25 通过。新增合成回归覆盖来源默认显示、`.app` 包内索引开关、旧包内记录清理、排除规则保存进度、重建进度窗口，以及命令行保存排除规则时保留 GUI 的程序包设置。Mac Release 构建生成 `EverythingLite.app` 和 `everything-lite-cli`；应用包版本为 0.4.16。合成 CLI 完整重建验证本地磁盘来源分类。
 
-这些检查未量测真实大索引的规则保存与重建耗时，也未完成 NAS、外置设备或 Finder 窗口的人工验收。测试使用隔离数据库，未修改日常索引。本版本仅在本地提交和标记，未推送到 GitHub。
+这些检查未量测真实大索引的规则保存与重建耗时，也未完成 NAS、外置设备或 Finder 窗口的人工验收。测试使用隔离数据库，未修改日常索引。源码和 `v0.4.16` 标签于 2026-10-24 推送至 GitHub。
 
 ## Mac 0.4.15-fixbug 本地核验（2026-10-23）
 
-Core Debug 全套 CTest 20/20 通过，GUI Debug 全套 CTest 25/25 通过。新增回归覆盖旧界面设置恢复、状态栏用时、未索引目录的拒绝与加入、点号隐藏路径、Finder 的 `UF_HIDDEN` 与 `FinderInfo` 标记、隐藏目录子项，以及紧凑索引中的标记读写。Mac Release 构建生成 `EverythingLite.app` 和 `everything-lite-cli`；二进制含 `0.4.15-fixbug` 版本字符串，应用包的系统数值版本为 0.4.15。本版本尚未推送到 GitHub。
+Core Debug 全套 CTest 20/20 通过，GUI Debug 全套 CTest 25/25 通过。新增回归覆盖旧界面设置恢复、状态栏用时、未索引目录的拒绝与加入、点号隐藏路径、Finder 的 `UF_HIDDEN` 与 `FinderInfo` 标记、隐藏目录子项，以及紧凑索引中的标记读写。Mac Release 构建生成 `EverythingLite.app` 和 `everything-lite-cli`；二进制含 `0.4.15-fixbug` 版本字符串，应用包的系统数值版本为 0.4.15。`v0.4.15-fixbug` 标签于 2026-10-24 推送至 GitHub。
 
 修正试用反馈后，macOS GUI Debug 全套 CTest 再次通过（1/1 入口，94.22 秒）；真实偏好文件在测试前后的 SHA-256 一致。Release 应用重新构建并启动；辅助功能检查确认窗口显示 12 个恢复的历史索引来源，“查看”菜单的状态栏、索引范围栏和过滤器栏均已勾选，“工具”菜单包含“设置总览…”。测试和启动验证不代表 12 个历史来源均仍为期望配置。
 

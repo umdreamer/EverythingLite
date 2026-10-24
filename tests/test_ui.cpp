@@ -1,6 +1,7 @@
 #include "ui/main_window.h"
 #include "ui/app_settings.h"
 #include "ui/search_result_model.h"
+#include "ui/result_presentation.h"
 #include "ui/search_worker.h"
 #include "ui/index_storage_dialog.h"
 #include "ui/exclusion_settings_dialog.h"
@@ -491,7 +492,8 @@ class UiTest : public QObject {
         Database db(window.db_path_.toStdString());
         QTRY_VERIFY_WITH_TIMEOUT(!db.search("good_sync.txt").empty(),4000);
         QTRY_VERIFY(!window.worker_thread_);
-        QVERIFY2(window.statusBar()->currentMessage().contains(QStringLiteral("同步")),"Incomplete snapshots must expose a synchronization error");
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引更新重试中"));
+        QVERIFY(window.sync_error_label_->toolTip().contains(QStringLiteral("保留缓存")));
         QVERIFY(QDir().mkpath(offline));
         QFile restored(offline+"/restored_sync.txt"); QVERIFY(restored.open(QIODevice::WriteOnly)); restored.close();
         QTRY_VERIFY_WITH_TIMEOUT(!db.search("restored_sync.txt").empty(),5000);
@@ -673,6 +675,44 @@ class UiTest : public QObject {
         QVERIFY(window.status_label_->displayText().endsWith(QChar(0x2026)));
         QVERIFY(window.statusBar()->height() <= window.fontMetrics().height() * 2 + 16);
     }
+    void optionalStatisticsFailureDoesNotReportSyncFailure() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        MainWindow window; window.watcher_->stop();
+        window.db_path_=dir.path(); // SQLite cannot open a directory as a database.
+        QString job_error=QStringLiteral("callback not called");
+        window.startWorker([]{}, {}, false, [&](const QString& error){job_error=error;});
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,3000);
+        QVERIFY(job_error.isEmpty());
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引同步待命"));
+        window.startWorker([]{throw std::runtime_error("synthetic job failure");}, {}, false,
+            [&](const QString& error){job_error=error;});
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,3000);
+        QVERIFY(job_error.contains(QStringLiteral("synthetic job failure")));
+    }
+    void syncRetryDoesNotRepeatFailureBanner() {
+        MainWindow window; window.watcher_->stop();
+        const auto root=QStringLiteral("/synthetic/retry-source");
+        window.reportSyncOutcome(root,root,true,QStringLiteral("synthetic scan failure"));
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引更新重试中"));
+        QVERIFY(!window.statusBar()->currentMessage().contains(QStringLiteral("失败")));
+        window.reportSyncOutcome(root,root,true,QStringLiteral("synthetic scan failure"));
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引更新重试中"));
+        window.reportSyncOutcome(root,root,true,QStringLiteral("synthetic scan failure"));
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("部分索引未更新 1"));
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("部分索引未更新")));
+        window.reportSyncOutcome(root,root,true,{});
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引同步成功"));
+    }
+    void failedSourceWithPriorSnapshotShowsCachedState() {
+        SearchResult row;
+        row.file.path="/synthetic/cached.txt";
+        row.file.name="cached.txt";
+        row.source_status=SourceStatus::Failed;
+        row.source_last_success=1700000000;
+        QCOMPARE(statusText(row),QStringLiteral("缓存结果（更新未完成）"));
+        row.source_last_success=0;
+        QCOMPARE(statusText(row),QStringLiteral("检查未完成"));
+    }
     void statusLabelsExplainListenerSyncAndSearch() {
         auto settings = makeAppSettings();
         settings.remove("index/syncRetryBaseMs");
@@ -752,7 +792,7 @@ class UiTest : public QObject {
         window.showSearchLog();
         auto* details = window.findChild<QPlainTextEdit*>(QStringLiteral("searchLogDetails"));
         QVERIFY(details);
-        QVERIFY(details->toPlainText().contains(QStringLiteral("同步失败 1")));
+        QVERIFY(details->toPlainText().contains(QStringLiteral("1 个范围正在重试或未更新")));
 
         window.setFolderScope(QStringLiteral("/synthetic/unindexed-folder"));
         window.runSearch();

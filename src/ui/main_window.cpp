@@ -1217,7 +1217,7 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
         } catch (const std::exception& e) {
             stats->error = QString::fromUtf8(e.what());
         } catch (...) {
-            stats->error = QStringLiteral("未知同步错误");
+            stats->error = QStringLiteral("未知索引任务错误");
         }
         // Counting the full index belongs on this worker, never the GUI callback.
         try {
@@ -1227,8 +1227,9 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
             stats->available = db.nameSearchIndexAvailable();
             stats->ready = db.nameSearchIndexReady();
             stats->valid = true;
-        } catch (const std::exception& e) {
-            if (stats->error.isEmpty()) stats->error = QString::fromUtf8(e.what());
+        } catch (const std::exception&) {
+            // This optional count refresh does not change whether the index
+            // job succeeded. Keep the previous count and report only job errors.
         }
     });
     connect(worker_thread_, &QThread::finished, this, [this, refresh_search_on_finish, stats, on_finished=std::move(on_finished)] {
@@ -1242,11 +1243,8 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
             name_search_available_ = stats->available;
             name_search_ready_ = stats->ready;
         }
-        if (!stats->error.isEmpty()) {
-            sync_error_label_->setText(QStringLiteral("索引同步失败"));
-            sync_error_label_->setToolTip(QStringLiteral("索引同步失败（保留缓存）：%1").arg(stats->error));
-            sync_error_label_->setStyleSheet(QStringLiteral("color: #b33"));
-        }
+        if (!stats->error.isEmpty() && !on_finished)
+            status_label_->setText(QStringLiteral("索引任务未完成：%1").arg(stats->error));
         if(on_finished) on_finished(stats->error);
         if(storage_maintenance_) {tryStartStorageMaintenance();return;}
         if (refresh_search_on_finish || count_changed) updateCachedStatus();
@@ -1691,7 +1689,7 @@ void MainWindow::showSearchLog() {
               << QStringLiteral("核心返回：%1").arg(entry.returned_count)
               << QStringLiteral("当前已加载：%1").arg(entry.loaded_count)
               << (entry.sync_failure_count > 0
-                      ? QStringLiteral("索引同步：同步失败 %1；缓存结果可能过期，详情见“工具 → 索引状态”").arg(entry.sync_failure_count)
+                      ? QStringLiteral("索引更新：%1 个范围正在重试或未更新；缓存结果可能过期，详情见“工具 → 索引状态”").arg(entry.sync_failure_count)
                       : QStringLiteral("索引同步：搜索开始时无失败记录"));
         if (!entry.detail.isEmpty()) lines << QStringLiteral("详情：%1").arg(entry.detail);
         details->setPlainText(lines.join(QLatin1Char('\n')));

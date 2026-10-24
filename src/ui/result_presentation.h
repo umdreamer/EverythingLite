@@ -25,7 +25,8 @@ inline QString statusText(const SearchResult& row) {
         case SourceStatus::Accessible: text = QStringLiteral("上次可用"); break;
         case SourceStatus::Offline: text = QStringLiteral("离线缓存"); break;
         case SourceStatus::Unverified: text = QStringLiteral("未核验"); break;
-        case SourceStatus::Failed: text = QStringLiteral("检查失败"); break;
+        case SourceStatus::Failed: text = row.source_last_success > 0
+            ? QStringLiteral("缓存结果（更新未完成）") : QStringLiteral("检查未完成"); break;
     }
     if (row.file.cloud_copy == CloudCopy::RemoteOnly) text += QStringLiteral(" · 仅云端（未下载）");
     else if (row.source_type == SourceType::Cloud) {

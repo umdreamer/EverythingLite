@@ -1,4 +1,4 @@
-# 测试范围与验证记录（截至本地 0.4.16）
+# 测试范围与验证记录（截至本地 0.4.16-fixbug）
 
 ## 验证范围
 
@@ -11,6 +11,12 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.4.16-fixbug 本地核验（2026-10-24）
+
+Core Debug 全套 CTest 20/20、GUI Debug 全套 CTest 25/25 通过。新增隔离 GUI 回归先确认：索引任务成功但统计读取失败会误报同步失败；首次扫描未完成会重复显示失败横幅；先前完整索引的缓存结果会显示“检查失败”。修正后同一回归及旧的离线恢复、固定状态栏和搜索日志测试通过。Mac Release 构建生成 `EverythingLite.app` 和 `everything-lite-cli`，GUI 显示版本为 0.4.16-fixbug。
+
+测试使用合成数据库和设置。真实索引中的扫描未完成仍需在目标机器核对原因；此修复没有把未完成的扫描标为成功，也没有修改日常索引。本版本仅在本地试用，未推送到 GitHub。
 
 ## Mac 0.4.16 本地核验（2026-10-23）
 

@@ -226,6 +226,7 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         updateFolderScopeLabel();
     }
     const auto key = failureKey(root, rescan ? root : path, rescan);
+    bool newly_exhausted = false;
     if (error.isEmpty()) {
         // A completed ancestor snapshot proves recovery for every failed scope
         // it covers in the same source. Unrelated and other-source failures stay.
@@ -257,6 +258,7 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
             ready_sync_retries_.remove(key);
             retry_deadlines_.insert(key, QDeadlineTimer(sync_retry_base_ms_ * attempts, Qt::PreciseTimer));
         } else {
+            newly_exhausted = attempts == 3;
             retry_deadlines_.remove(key);
             ready_sync_retries_.remove(key);
             if (rescan) dormant_rescan_roots_.insert(root);
@@ -264,15 +266,19 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         }
     }
     armRetryTimer();
+    int exhausted = 0;
+    for (auto it = sync_errors_.cbegin(); it != sync_errors_.cend(); ++it)
+        if (sync_attempts_.value(it.key()) >= 3) ++exhausted;
     const auto message = sync_errors_.isEmpty() ? QString{}
-        : QStringLiteral("索引同步失败（保留缓存；最多自动重试两次，新事件可重试）：%1")
+        : QStringLiteral("索引更新未完成（保留缓存；最多自动重试两次，相关新事件可重试）：%1")
             .arg(sync_errors_.values().join(QStringLiteral("；")));
-    sync_error_label_->setText(sync_errors_.isEmpty()
-        ? QStringLiteral("索引同步成功") : QStringLiteral("索引同步失败 %1").arg(sync_errors_.size()));
+    sync_error_label_->setText(sync_errors_.isEmpty() ? QStringLiteral("索引同步成功")
+        : exhausted ? QStringLiteral("部分索引未更新 %1").arg(exhausted)
+                    : QStringLiteral("索引更新重试中"));
     sync_error_label_->setToolTip(message.isEmpty() ? QStringLiteral("最近一次索引同步已完成；当前无失败范围") : message);
-    sync_error_label_->setStyleSheet(sync_errors_.isEmpty() ? QString{} : QStringLiteral("color: #b33"));
-    if (!message.isEmpty()) statusBar()->showMessage(QStringLiteral("索引同步失败；详情见“工具 → 索引状态”"), 10000);
-    else if (statusBar()->currentMessage().startsWith(QStringLiteral("索引同步失败"))) statusBar()->clearMessage();
+    sync_error_label_->setStyleSheet(exhausted ? QStringLiteral("color: #b33") : QString{});
+    if (newly_exhausted) statusBar()->showMessage(QStringLiteral("部分索引未更新；详情见“工具 → 索引状态”"), 10000);
+    else if (sync_errors_.isEmpty() && statusBar()->currentMessage().startsWith(QStringLiteral("部分索引未更新"))) statusBar()->clearMessage();
 }
 
 QString MainWindow::rootForPath(const QString& path) const {

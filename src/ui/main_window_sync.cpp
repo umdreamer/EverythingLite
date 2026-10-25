@@ -2,6 +2,7 @@
 #include "core/index_manager.h"
 #include "core/path_utils.h"
 #include "ui/index_update_journal.h"
+#include "ui/open_history_store.h"
 
 #include <QDir>
 #include <QLabel>
@@ -41,6 +42,8 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     const auto path = QString::fromUtf8(event.path.c_str());
     const auto normalized_path = QDir::cleanPath(path);
     if (index_journal_ && index_journal_->containsPath(normalized_path)) return;
+    const auto own_open_history = QDir::cleanPath(OpenHistoryStore::defaultPath());
+    if (normalized_path == own_open_history || normalized_path.startsWith(own_open_history + QLatin1Char('-'))) return;
     const auto own_database = QDir::cleanPath(db_path_);
     if (!event.needs_full_rescan &&
         (normalized_path == own_database || normalized_path.startsWith(own_database + QLatin1Char('-')))) return;

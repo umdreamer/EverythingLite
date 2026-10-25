@@ -205,6 +205,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(desktop_actions_, &DesktopActions::feedback, this, [this](const QString& message) {
         statusBar()->showMessage(message, 10000);
     });
+    connect(desktop_actions_, &DesktopActions::openRequestAccepted, this, [this](const QString& path) {
+        const auto at = QDateTime::currentSecsSinceEpoch();
+        QString error;
+        if (OpenHistoryStore(OpenHistoryStore::defaultPath()).record(path, at, &error))
+            model_->markOpenRequest(path, at);
+        else statusBar()->showMessage(QStringLiteral("无法保存打开记录：%1").arg(error), 10000);
+    });
     connect(desktop_actions_, &DesktopActions::previewFallback, this, [this](const QString& path) {
         (new FilePreview(path, this))->show();
     });

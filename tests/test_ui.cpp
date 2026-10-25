@@ -1084,6 +1084,23 @@ class UiTest : public QObject {
         window.openCurrent(); QCOMPARE(sink.urls.size(),before);
         QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("云端")));
     }
+    void acceptedOpenRequestUpdatesVisibleRowAndPersists() {
+        MainWindow window; window.watcher_->stop();
+        const auto path = fixture_root + QStringLiteral("/alpha.txt");
+        SearchResult row; row.file.path=path.toStdString(); row.file.name="alpha.txt";
+        row.source_status=SourceStatus::Accessible;
+        window.model_->setResults({row});
+        window.table_->selectRow(0);
+        window.table_->setCurrentIndex(window.model_->index(0,0));
+        UiUrlSink sink; QDesktopServices::setUrlHandler("file",&sink,"accept");
+        struct Unset {~Unset(){QDesktopServices::unsetUrlHandler("file");}} unset;
+        window.openCurrent();
+        QCOMPARE(sink.urls.size(),1);
+        QVERIFY(window.model_->data(window.model_->index(0,5)).toString()
+                    .contains(QStringLiteral("本应用上次请求打开")));
+        const auto found=OpenHistoryStore(OpenHistoryStore::defaultPath()).lookupMany({path});
+        QVERIFY(found.value(path)>0);
+    }
     void doubleClickOpensFileOrContainingFolderByColumn() {
         MainWindow window; window.watcher_->stop();
         SearchResult row;

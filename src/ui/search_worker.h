@@ -5,6 +5,8 @@
 #include "core/search_revision.h"
 
 #include <QObject>
+#include <QHash>
+#include <QString>
 
 #include <cstddef>
 #include <memory>
@@ -16,6 +18,7 @@ namespace everything_lite {
 
 struct BackgroundSearchResult {
     std::vector<SearchResult> results;
+    QHash<QString, qint64> opened_at;
     std::string error;
     double elapsed_ms = 0.0;
     bool cancelled = false;
@@ -28,7 +31,7 @@ struct BackgroundSearchResult {
 // off the GUI event loop. The caller owns each cancellation token across threads.
 class SearchWorker final : public QObject {
 public:
-    explicit SearchWorker(std::string db_path);
+    explicit SearchWorker(std::string db_path, QString open_history_path = {});
 
     BackgroundSearchResult search(const std::string& query,
                                   std::size_t limit,
@@ -39,6 +42,7 @@ public:
 
 private:
     std::string db_path_;
+    QString open_history_path_;
     std::unique_ptr<SearchService> service_;
     std::unique_ptr<SearchRevision> revision_;
 };

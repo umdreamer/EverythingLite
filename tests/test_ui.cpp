@@ -3,6 +3,7 @@
 #include "ui/search_result_model.h"
 #include "ui/result_presentation.h"
 #include "ui/search_worker.h"
+#include "ui/open_history_store.h"
 #include "ui/index_storage_dialog.h"
 #include "ui/index_update_journal.h"
 #include "ui/exclusion_settings_dialog.h"
@@ -350,11 +351,29 @@ class UiTest : public QObject {
         SearchResultModel model;model.setResults({offline,live});
         QCOMPARE(model.rowCount(),1);
         QCOMPARE(model.pathAt(0),QStringLiteral("/synthetic/shared.txt"));
-        QCOMPARE(model.data(model.index(0,5)).toString(),QStringLiteral("上次可用"));
+        QCOMPARE(model.data(model.index(0,5)).toString(),QStringLiteral("本应用无打开记录"));
         model.appendResults({offline,live});QCOMPARE(model.rowCount(),1);
         model.setResults({offline});model.sort(0,Qt::AscendingOrder);
         model.appendResults({live});QCOMPARE(model.rowCount(),1);
-        QCOMPARE(model.data(model.index(0,5)).toString(),QStringLiteral("上次可用"));
+        QCOMPARE(model.data(model.index(0,5)).toString(),QStringLiteral("本应用无打开记录"));
+    }
+    void workerLoadsOpenRequestsWithoutChangingIndex() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto index = dir.filePath(QStringLiteral("index.db"));
+        const auto history = dir.filePath(QStringLiteral("history.db"));
+        Database db(index.toStdString()); db.initialize();
+        const auto source = db.ensureSourceForRoot("/synthetic/history");
+        FileRecord file; file.root="/synthetic/history"; file.relative_path="known.txt";
+        file.path=file.root+"/"+file.relative_path; file.name=file.relative_path;
+        file.parent_path=file.root;
+        db.mergeSourceSnapshot(db.source(source),{file});
+        OpenHistoryStore store(history);
+        QVERIFY(store.record(QStringLiteral("/synthetic/history/known.txt"),1700000000));
+        SearchWorker worker(index.toStdString(),history);
+        const auto result=worker.search("known",10,0,SearchOptions{});
+        QVERIFY2(result.error.empty(),result.error.c_str());
+        QCOMPARE(result.results.size(),std::size_t(1));
+        QCOMPARE(result.opened_at.value(QStringLiteral("/synthetic/history/known.txt")),qint64(1700000000));
     }
     void workerRejectsChangedPageRevision() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); const auto path=dir.filePath("paging.db").toStdString();

@@ -2,6 +2,7 @@
 #include "ui/app_settings.h"
 #include "ui/index_storage_dialog.h"
 #include "ui/index_update_journal.h"
+#include "ui/open_history_store.h"
 #include "ui/exclusion_settings_dialog.h"
 #include "core/index_storage.h"
 #include <QDateTime>
@@ -232,7 +233,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // SearchWorker lazily creates SearchService on that thread, so even the
     // first-time database/FTS initialization cannot stall the GUI event loop.
     search_thread_ = new QThread(this);
-    search_worker_ = new SearchWorker(toUtf8(db_path_));
+    search_worker_ = new SearchWorker(toUtf8(db_path_), OpenHistoryStore::defaultPath());
     search_worker_->moveToThread(search_thread_);
     connect(search_thread_, &QThread::finished, search_worker_, &QObject::deleteLater);
     search_thread_->start();
@@ -1156,8 +1157,8 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
                 self->search_revision_ = outcome->revision;
                 self->pagination_signature_ = signature;
 
-                if (append) self->model_->appendResults(std::move(outcome->results));
-                else self->model_->setResults(std::move(outcome->results));
+                if (append) self->model_->appendResults(std::move(outcome->results), std::move(outcome->opened_at));
+                else self->model_->setResults(std::move(outcome->results), std::move(outcome->opened_at));
 
                 self->last_search_elapsed_ms_ = outcome->elapsed_ms;
                 self->last_search_result_count_ = self->model_->rowCount();

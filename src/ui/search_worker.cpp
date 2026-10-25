@@ -1,6 +1,7 @@
 #include "ui/search_worker.h"
 
 #include "core/search_trace.h"
+#include "ui/open_history_store.h"
 
 #include <chrono>
 #include <exception>
@@ -8,7 +9,8 @@
 
 namespace everything_lite {
 
-SearchWorker::SearchWorker(std::string db_path) : db_path_(std::move(db_path)) {}
+SearchWorker::SearchWorker(std::string db_path, QString open_history_path)
+    : db_path_(std::move(db_path)), open_history_path_(std::move(open_history_path)) {}
 
 BackgroundSearchResult SearchWorker::search(const std::string& query,
                                              std::size_t limit,
@@ -43,6 +45,13 @@ BackgroundSearchResult SearchWorker::search(const std::string& query,
                 outcome.snapshot_changed = true;
             } else {
                 outcome.revision = before;
+                if (!open_history_path_.isEmpty() && !outcome.results.empty()) {
+                    QStringList paths;
+                    paths.reserve(static_cast<qsizetype>(outcome.results.size()));
+                    for (const auto& row : outcome.results)
+                        paths.push_back(QString::fromUtf8(row.file.path.c_str()));
+                    outcome.opened_at = OpenHistoryStore(open_history_path_).lookupMany(paths);
+                }
             }
         }
     } catch (const std::exception& e) {

@@ -757,6 +757,27 @@ class UiTest : public QObject {
         row.source_last_success=0;
         QCOMPARE(statusText(row),QStringLiteral("检查未完成"));
     }
+    void appOpenHistoryStatusShowsTimeAndVerifiedMissingPath() {
+        SearchResult row;
+        row.file.path = "/synthetic/missing.txt";
+        row.file.name = "missing.txt";
+        row.source_type = SourceType::Local;
+        row.source_status = SourceStatus::Accessible;
+        SearchResultModel model;
+        model.setResults({row}, {{QStringLiteral("/synthetic/missing.txt"), qint64(1700000000)}});
+        const auto status = model.index(0, 5);
+        QVERIFY(model.data(status).toString().contains(QStringLiteral("本应用上次请求打开")));
+        QVERIFY(model.data(status).toString().contains(QStringLiteral("2023")));
+        model.markPathMissing(QStringLiteral("/synthetic/missing.txt"));
+        QCOMPARE(model.data(status).toString(), QStringLiteral("原位置不存在"));
+        model.markPathPresent(QStringLiteral("/synthetic/missing.txt"));
+        QVERIFY(model.data(status).toString().contains(QStringLiteral("本应用上次请求打开")));
+        model.markOpenRequest(QStringLiteral("/synthetic/missing.txt"), 1700000100);
+        QVERIFY(model.data(status).toString().contains(QStringLiteral("本应用上次请求打开")));
+        row.source_status = SourceStatus::Offline;
+        model.setResults({row});
+        QCOMPARE(model.data(status).toString(), QStringLiteral("离线缓存"));
+    }
     void statusLabelsExplainListenerSyncAndSearch() {
         auto settings = makeAppSettings();
         settings.remove("index/syncRetryBaseMs");

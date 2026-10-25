@@ -36,7 +36,7 @@ QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
                 ? QDateTime::fromSecsSinceEpoch(file.modified_time).toString(QStringLiteral("yyyy-MM-dd HH:mm"))
                 : QString{};
             case 4: return sourceText(row);
-            case 5: return statusText(row);
+            case 5: return statusFor(row);
             default: return {};
         }
     }
@@ -54,7 +54,7 @@ QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
     if (role == Qt::TextAlignmentRole && (index.column() == 2 || index.column() == 3)) {
         return static_cast<int>(Qt::AlignVCenter | Qt::AlignRight);
     }
-    if (role == Qt::ToolTipRole) return resultTooltip(row);
+    if (role == Qt::ToolTipRole) return resultTooltip(row, statusFor(row));
     if (role == Qt::UserRole) {
         switch (index.column()) {
             case 0: return QString::fromUtf8(file.name.c_str()).toCaseFolded();
@@ -62,7 +62,7 @@ QVariant SearchResultModel::data(const QModelIndex& index, int role) const {
             case 2: return QVariant::fromValue<qulonglong>(file.size);
             case 3: return QVariant::fromValue<qlonglong>(file.modified_time);
             case 4: return sourceText(row);
-            case 5: return statusText(row);
+            case 5: return statusFor(row);
             default: return {};
         }
     }
@@ -91,22 +91,25 @@ void SearchResultModel::sort(int column, Qt::SortOrder order) {
     emit layoutChanged();
 }
 
-void SearchResultModel::setResults(std::vector<SearchResult> results) {
+void SearchResultModel::setResults(std::vector<SearchResult> results, QHash<QString, qint64> open_times) {
     beginResetModel();
     results_.clear();
     membership_.clear();
     path_membership_.clear();
+    open_times_ = std::move(open_times);
+    verified_presence_.clear();
     appendUniqueResults(std::move(results));
     applySort();
     endResetModel();
 }
 
-void SearchResultModel::appendResults(std::vector<SearchResult> results) {
+void SearchResultModel::appendResults(std::vector<SearchResult> results, QHash<QString, qint64> open_times) {
     if (results.empty()) return;
     // Because users may have selected a local column sort, append and re-sort
     // the loaded window as one model update. Server-side global sorting can be
     // added later without changing the incremental-loading API.
     beginResetModel();
+    for (auto it = open_times.cbegin(); it != open_times.cend(); ++it) open_times_.insert(it.key(), it.value());
     appendUniqueResults(std::move(results));
     applySort();
     endResetModel();
@@ -117,7 +120,46 @@ void SearchResultModel::clearResults() {
     results_.clear();
     membership_.clear();
     path_membership_.clear();
+    open_times_.clear();
+    verified_presence_.clear();
     endResetModel();
+}
+
+QString SearchResultModel::statusFor(const SearchResult& row) const {
+    if (row.source_status != SourceStatus::Accessible || row.file.cloud_copy == CloudCopy::RemoteOnly)
+        return statusText(row);
+    const auto path = QString::fromUtf8(row.file.path.c_str());
+    if (verified_presence_.contains(path) && !verified_presence_.value(path)) {
+        return row.source_type == SourceType::Local || row.source_type == SourceType::Unknown
+            ? QStringLiteral("原位置不存在") : QStringLiteral("来源不可用或原位置未找到");
+    }
+    const auto opened = open_times_.value(path);
+    return opened > 0
+        ? QStringLiteral("本应用上次请求打开 %1").arg(QDateTime::fromSecsSinceEpoch(opened).toString(QStringLiteral("yyyy-MM-dd HH:mm")))
+        : QStringLiteral("本应用无打开记录");
+}
+
+void SearchResultModel::notifyStatusChanged(const QString& path) {
+    for (int row = 0; row < static_cast<int>(results_.size()); ++row) {
+        if (QString::fromUtf8(results_[static_cast<std::size_t>(row)].file.path.c_str()) != path) continue;
+        emit dataChanged(index(row, 5), index(row, 5), {Qt::DisplayRole, Qt::ToolTipRole, Qt::UserRole});
+    }
+}
+
+void SearchResultModel::markOpenRequest(const QString& path, qint64 at) {
+    if (path.isEmpty() || at <= 0) return;
+    open_times_.insert(path, at);
+    notifyStatusChanged(path);
+}
+
+void SearchResultModel::markPathMissing(const QString& path) {
+    verified_presence_.insert(path, false);
+    notifyStatusChanged(path);
+}
+
+void SearchResultModel::markPathPresent(const QString& path) {
+    verified_presence_.insert(path, true);
+    notifyStatusChanged(path);
 }
 
 void SearchResultModel::appendUniqueResults(std::vector<SearchResult> results) {
@@ -173,7 +215,7 @@ void SearchResultModel::applySort() {
     if (sort_column_ < 0) return;
     const auto column = sort_column_;
     const auto order = sort_order_;
-    std::stable_sort(results_.begin(), results_.end(), [column, order](const SearchResult& a, const SearchResult& b) {
+    std::stable_sort(results_.begin(), results_.end(), [this, column, order](const SearchResult& a, const SearchResult& b) {
         int cmp = 0;
         switch (column) {
             case 0: cmp = QString::fromUtf8(a.file.name.c_str()).compare(QString::fromUtf8(b.file.name.c_str()), Qt::CaseInsensitive); break;
@@ -181,7 +223,7 @@ void SearchResultModel::applySort() {
             case 2: cmp = a.file.size < b.file.size ? -1 : (a.file.size > b.file.size ? 1 : 0); break;
             case 3: cmp = a.file.modified_time < b.file.modified_time ? -1 : (a.file.modified_time > b.file.modified_time ? 1 : 0); break;
             case 4: cmp = sourceText(a).compare(sourceText(b), Qt::CaseInsensitive); break;
-            case 5: cmp = statusText(a).compare(statusText(b), Qt::CaseInsensitive); break;
+            case 5: cmp = statusFor(a).compare(statusFor(b), Qt::CaseInsensitive); break;
             default: break;
         }
         if (cmp == 0) cmp = a.file.path.compare(b.file.path);

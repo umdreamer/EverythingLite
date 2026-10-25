@@ -37,10 +37,11 @@ inline QString statusText(const SearchResult& row) {
 inline QString cachedTimestamp(std::int64_t time) {
     return time > 0 ? QDateTime::fromSecsSinceEpoch(time).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("无记录");
 }
-inline QString resultTooltip(const SearchResult& row) {
-    const auto plain = QStringLiteral("%1\n来源：%2\n状态：%3\n上次检查：%4\n上次可用：%5\n缓存信息不保证文件当前可访问。")
+inline QString resultTooltip(const SearchResult& row, const QString& app_status = {}) {
+    auto plain = QStringLiteral("%1\n来源：%2\n状态：%3\n上次检查：%4\n上次可用：%5\n缓存信息不保证文件当前可访问。")
         .arg(QString::fromUtf8(row.file.path.c_str()), sourceText(row), statusText(row),
              cachedTimestamp(row.source_last_check), cachedTimestamp(row.source_last_success));
+    if (!app_status.isEmpty()) plain += QStringLiteral("\n本应用记录：%1").arg(app_status);
     // Qt tooltips accept rich text. Escape the whole cached payload so legal
     // markup in a path/label stays literal and cannot load image resources.
     return QStringLiteral("<pre>%1</pre>").arg(plain.toHtmlEscaped());

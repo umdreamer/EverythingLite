@@ -1101,6 +1101,29 @@ class UiTest : public QObject {
         const auto found=OpenHistoryStore(OpenHistoryStore::defaultPath()).lookupMany({path});
         QVERIFY(found.value(path)>0);
     }
+    void selectedResultChecksPathWithoutReplacingSelection() {
+        MainWindow window; window.watcher_->stop();
+        SearchResult missing; missing.file.path="/synthetic/definitely-absent-0.5.0.txt";
+        missing.file.name="definitely-absent-0.5.0.txt";
+        missing.source_status=SourceStatus::Accessible;
+        missing.source_type=SourceType::Local;
+        SearchResult present=missing;
+        present.file.path=(fixture_root+QStringLiteral("/alpha.txt")).toStdString();
+        present.file.name="alpha.txt";
+        window.model_->setResults({missing,present});
+        const int missing_row=window.model_->pathAt(0)==QString::fromStdString(missing.file.path)?0:1;
+        const int present_row=1-missing_row;
+        window.table_->setCurrentIndex(window.model_->index(present_row,0));
+        window.table_->setCurrentIndex(window.model_->index(missing_row,0));
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->data(window.model_->index(missing_row,5)).toString(),
+                                  QStringLiteral("原位置不存在"),3000);
+        QCOMPARE(window.table_->currentIndex().row(),missing_row);
+        window.model_->markPathMissing(QString::fromStdString(present.file.path));
+        window.table_->setCurrentIndex(window.model_->index(present_row,0));
+        QTRY_COMPARE_WITH_TIMEOUT(window.model_->data(window.model_->index(present_row,5)).toString(),
+                                  QStringLiteral("本应用无打开记录"),3000);
+        QCOMPARE(window.table_->currentIndex().row(),present_row);
+    }
     void doubleClickOpensFileOrContainingFolderByColumn() {
         MainWindow window; window.watcher_->stop();
         SearchResult row;

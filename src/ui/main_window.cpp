@@ -68,6 +68,7 @@
 #include <QTableView>
 #include <QTextStream>
 #include <QThread>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -331,6 +332,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         const auto path = model_->pathAt(index.row());
         if (index.column() == 1) desktop_actions_->open(QFileInfo(path).absolutePath());
         else desktop_actions_->open(path);
+    });
+    connect(table_->selectionModel(), &QItemSelectionModel::currentRowChanged, this,
+            [this](const QModelIndex& current) {
+        if (!current.isValid() || !model_->canVerifyAt(current.row())) return;
+        const auto path = model_->pathAt(current.row());
+        if (path.isEmpty()) return;
+        const QPointer<MainWindow> window(this);
+        QThreadPool::globalInstance()->start([window, path] {
+            const bool exists = QFileInfo::exists(path);
+            if (auto* app = QCoreApplication::instance())
+                QMetaObject::invokeMethod(app, [window, path, exists] {
+                    if (!window) return;
+                    if (exists) window->model_->markPathPresent(path);
+                    else window->model_->markPathMissing(path);
+                }, Qt::QueuedConnection);
+        });
     });
     connect(table_, &QWidget::customContextMenuRequested, this, &MainWindow::showContextMenu);
     connect(table_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {

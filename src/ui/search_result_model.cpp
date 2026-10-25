@@ -139,6 +139,13 @@ QString SearchResultModel::statusFor(const SearchResult& row) const {
         : QStringLiteral("本应用无打开记录");
 }
 
+bool SearchResultModel::canVerifyAt(int row) const {
+    if (row < 0 || row >= static_cast<int>(results_.size())) return false;
+    const auto& result = results_[static_cast<std::size_t>(row)];
+    return result.source_status == SourceStatus::Accessible
+        && result.file.cloud_copy != CloudCopy::RemoteOnly;
+}
+
 void SearchResultModel::notifyStatusChanged(const QString& path) {
     for (int row = 0; row < static_cast<int>(results_.size()); ++row) {
         if (QString::fromUtf8(results_[static_cast<std::size_t>(row)].file.path.c_str()) != path) continue;

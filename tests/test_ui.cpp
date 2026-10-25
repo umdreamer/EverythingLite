@@ -956,6 +956,24 @@ class UiTest : public QObject {
         window.openCurrent(); QCOMPARE(sink.urls.size(),before);
         QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("云端")));
     }
+    void doubleClickOpensFileOrContainingFolderByColumn() {
+        MainWindow window; window.watcher_->stop();
+        SearchResult row;
+        row.file.path = (fixture_root + QStringLiteral("/alpha.txt")).toStdString();
+        row.file.name = "alpha.txt";
+        row.source_status = SourceStatus::Accessible;
+        window.model_->setResults({row});
+        UiUrlSink sink; QDesktopServices::setUrlHandler("file", &sink, "accept");
+        struct Unset { ~Unset() { QDesktopServices::unsetUrlHandler("file"); } } unset;
+        QVERIFY(QMetaObject::invokeMethod(window.table_, "doubleClicked", Qt::DirectConnection,
+            Q_ARG(QModelIndex, window.model_->index(0, 0))));
+        QCOMPARE(sink.urls.size(), 1);
+        QCOMPARE(sink.urls.back().toLocalFile(), fixture_root + QStringLiteral("/alpha.txt"));
+        QVERIFY(QMetaObject::invokeMethod(window.table_, "doubleClicked", Qt::DirectConnection,
+            Q_ARG(QModelIndex, window.model_->index(0, 1))));
+        QCOMPARE(sink.urls.size(), 2);
+        QCOMPARE(sink.urls.back().toLocalFile(), fixture_root);
+    }
     void sixColumnSortAndSettingsMigration() {
         QStandardItemModel old(0,4); QTableView oldTable; oldTable.setModel(&old);
         oldTable.setColumnWidth(0,222);

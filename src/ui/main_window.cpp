@@ -311,7 +311,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // Index changes do not replace visible search results or their selection.
 
-    connect(table_, &QTableView::doubleClicked, this, [this] { openCurrent(); });
+    connect(table_, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
+        if (!index.isValid() || !allowCachedAction(index.row())) return;
+        const auto path = model_->pathAt(index.row());
+        if (index.column() == 1) desktop_actions_->open(QFileInfo(path).absolutePath());
+        else desktop_actions_->open(path);
+    });
     connect(table_, &QWidget::customContextMenuRequested, this, &MainWindow::showContextMenu);
     connect(table_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
         auto* bar = table_->verticalScrollBar();

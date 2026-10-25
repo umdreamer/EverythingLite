@@ -266,19 +266,16 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         }
     }
     armRetryTimer();
-    int exhausted = 0;
-    for (auto it = sync_errors_.cbegin(); it != sync_errors_.cend(); ++it)
-        if (sync_attempts_.value(it.key()) >= 3) ++exhausted;
     const auto message = sync_errors_.isEmpty() ? QString{}
-        : QStringLiteral("索引更新未完成（保留缓存；最多自动重试两次，相关新事件可重试）：%1")
+        : QStringLiteral("待更新范围（保留已有缓存；最多自动重试两次，相关新事件可重试）：%1")
             .arg(sync_errors_.values().join(QStringLiteral("；")));
-    sync_error_label_->setText(sync_errors_.isEmpty() ? QStringLiteral("索引同步成功")
-        : exhausted ? QStringLiteral("部分索引未更新 %1").arg(exhausted)
-                    : QStringLiteral("索引更新重试中"));
-    sync_error_label_->setToolTip(message.isEmpty() ? QStringLiteral("最近一次索引同步已完成；当前无失败范围") : message);
-    sync_error_label_->setStyleSheet(exhausted ? QStringLiteral("color: #b33") : QString{});
-    if (newly_exhausted) statusBar()->showMessage(QStringLiteral("部分索引未更新；详情见“工具 → 索引状态”"), 10000);
-    else if (sync_errors_.isEmpty() && statusBar()->currentMessage().startsWith(QStringLiteral("部分索引未更新"))) statusBar()->clearMessage();
+    const auto label = sync_errors_.isEmpty() ? QStringLiteral("索引同步成功")
+        : QStringLiteral("待更新 %1 个范围").arg(sync_errors_.size());
+    if (sync_error_label_->text() != label) sync_error_label_->setText(label);
+    sync_error_label_->setToolTip(message.isEmpty() ? QStringLiteral("最近一次索引同步已完成；当前无待更新范围") : message);
+    sync_error_label_->setStyleSheet({});
+    if (newly_exhausted) statusBar()->showMessage(QStringLiteral("有索引范围待更新；详情见“工具 → 索引状态”"), 10000);
+    else if (sync_errors_.isEmpty() && statusBar()->currentMessage().startsWith(QStringLiteral("有索引范围待更新"))) statusBar()->clearMessage();
 }
 
 QString MainWindow::rootForPath(const QString& path) const {

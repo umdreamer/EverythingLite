@@ -492,8 +492,8 @@ class UiTest : public QObject {
         Database db(window.db_path_.toStdString());
         QTRY_VERIFY_WITH_TIMEOUT(!db.search("good_sync.txt").empty(),4000);
         QTRY_VERIFY(!window.worker_thread_);
-        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引更新重试中"));
-        QVERIFY(window.sync_error_label_->toolTip().contains(QStringLiteral("保留缓存")));
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("待更新 1 个范围"));
+        QVERIFY(window.sync_error_label_->toolTip().contains(QStringLiteral("保留已有缓存")));
         QVERIFY(QDir().mkpath(offline));
         QFile restored(offline+"/restored_sync.txt"); QVERIFY(restored.open(QIODevice::WriteOnly)); restored.close();
         QTRY_VERIFY_WITH_TIMEOUT(!db.search("restored_sync.txt").empty(),5000);
@@ -649,7 +649,7 @@ class UiTest : public QObject {
         MainWindow window; window.watcher_->stop(); window.roots_={dir.filePath("absent")};
         window.rebuildIndex(); QTRY_VERIFY(!window.worker_thread_);
         QVERIFY(!window.sync_errors_.isEmpty()); QVERIFY(!window.sync_error_label_->isHidden());
-        QVERIFY(window.sync_error_label_->toolTip().contains(QStringLiteral("保留缓存")));
+        QVERIFY(window.sync_error_label_->toolTip().contains(QStringLiteral("保留已有缓存")));
     }
     void syncFailureKeepsFixedSingleLineStatusSections() {
         MainWindow window;
@@ -693,15 +693,54 @@ class UiTest : public QObject {
         MainWindow window; window.watcher_->stop();
         const auto root=QStringLiteral("/synthetic/retry-source");
         window.reportSyncOutcome(root,root,true,QStringLiteral("synthetic scan failure"));
-        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引更新重试中"));
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("待更新 1 个范围"));
         QVERIFY(!window.statusBar()->currentMessage().contains(QStringLiteral("失败")));
         window.reportSyncOutcome(root,root,true,QStringLiteral("synthetic scan failure"));
-        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引更新重试中"));
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("待更新 1 个范围"));
         window.reportSyncOutcome(root,root,true,QStringLiteral("synthetic scan failure"));
-        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("部分索引未更新 1"));
-        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("部分索引未更新")));
+        QCOMPARE(window.sync_error_label_->text(),QStringLiteral("待更新 1 个范围"));
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("待更新")));
         window.reportSyncOutcome(root,root,true,{});
         QCOMPARE(window.sync_error_label_->text(),QStringLiteral("索引同步成功"));
+    }
+    void incompleteIndexUpdatesAreInformationWithExactScopes() {
+        MainWindow window; window.watcher_->stop();
+        const auto path = QStringLiteral("/synthetic/incomplete-source");
+        window.reportSyncOutcome(path, path, true, QStringLiteral("scan interrupted"));
+        QVERIFY(window.sync_error_label_->text().contains(QStringLiteral("待更新")));
+        QVERIFY(!window.sync_error_label_->text().contains(QStringLiteral("失败")));
+        QString details;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            details = dialog->text(); dialog->accept();
+        });
+        window.showIndexStatus();
+        QVERIFY(details.contains(path));
+        QVERIFY(details.contains(QStringLiteral("scan interrupted")));
+    }
+    void indexStatusShowsPersistedIncompleteSourcesAfterRestart() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto db_path = dir.filePath(QStringLiteral("index.db"));
+        const auto absent = dir.filePath(QStringLiteral("missing-root"));
+        IndexManager manager(db_path.toStdString());
+        QVERIFY(!manager.rebuildRoot(absent.toStdString()).completed);
+        sqlite3* raw = nullptr;
+        QCOMPARE(sqlite3_open(db_path.toStdString().c_str(), &raw), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(raw, "UPDATE sources SET status=3", nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+        MainWindow window; window.watcher_->stop();
+        window.db_path_ = db_path;
+        QVERIFY(window.sync_errors_.isEmpty());
+        QString details;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            details = dialog->text(); dialog->accept();
+        });
+        window.showIndexStatus();
+        QVERIFY(details.contains(absent));
+        QVERIFY(details.contains(QStringLiteral("上次扫描未完成")));
     }
     void failedSourceWithPriorSnapshotShowsCachedState() {
         SearchResult row;

@@ -77,6 +77,7 @@
 #include <sstream>
 #include <utility>
 #include <vector>
+#include <sqlite3.h>
 
 namespace everything_lite {
 namespace {
@@ -1512,9 +1513,43 @@ void MainWindow::showIndexStatus() {
     }
     details << QStringLiteral("监听后端：%1").arg(watcher_ ? fromUtf8(watcher_->backendName()) : QStringLiteral("未启动"));
     if (!watcher_error_.isEmpty()) details << QStringLiteral("监听错误：%1").arg(watcher_error_);
-    details << QStringLiteral("同步状态：%1").arg(sync_error_label_->text());
-    if (!sync_error_label_->toolTip().isEmpty())
-        details << QStringLiteral("同步详情：\n%1").arg(sync_error_label_->toolTip());
+    details << QStringLiteral("索引更新：%1").arg(sync_error_label_->text());
+    if (!sync_errors_.isEmpty()) {
+        details << QStringLiteral("待更新范围与原因：");
+        for (const auto& item : sync_errors_) details << QStringLiteral("  %1").arg(item);
+    }
+    // Read only the tiny source catalog so incomplete scans remain visible
+    // after restart. Do not initialize or count the multi-gigabyte index here.
+    sqlite3* catalog = nullptr;
+    const auto database_path = toUtf8(db_path_);
+    if (sqlite3_open_v2(database_path.c_str(), &catalog, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
+        sqlite3_busy_timeout(catalog, 100);
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(catalog,
+                "SELECT root,status,last_success FROM sources WHERE status IN (1,2,3)", -1,
+                &statement, nullptr) == SQLITE_OK) {
+            QStringList pending_sources;
+            while (sqlite3_step(statement) == SQLITE_ROW) {
+                const auto* root = sqlite3_column_text(statement, 0);
+                const auto status = static_cast<SourceStatus>(sqlite3_column_int(statement, 1));
+                const auto last_success = sqlite3_column_int64(statement, 2);
+                const auto state = status == SourceStatus::Failed ? QStringLiteral("上次扫描未完成")
+                    : status == SourceStatus::Offline ? QStringLiteral("来源离线") : QStringLiteral("待核验");
+                const auto last_updated = last_success > 0
+                    ? QDateTime::fromSecsSinceEpoch(last_success).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                    : QStringLiteral("无记录");
+                pending_sources << QStringLiteral("  %1：%2；上次完整更新：%3")
+                    .arg(root ? QString::fromUtf8(reinterpret_cast<const char*>(root)) : QString{},
+                         state, last_updated);
+            }
+            if (!pending_sources.isEmpty()) {
+                details << QStringLiteral("数据库保留的待更新来源：");
+                details << pending_sources;
+            }
+        }
+        sqlite3_finalize(statement);
+    }
+    if (catalog) sqlite3_close(catalog);
     if (!last_search_query_.isNull()) {
         details << QStringLiteral("最近查询：%1").arg(last_search_query_.isEmpty() ? QStringLiteral("<全部>") : last_search_query_);
         details << QStringLiteral("最近查询耗时：%1 ms").arg(last_search_elapsed_ms_, 0, 'f', 1);

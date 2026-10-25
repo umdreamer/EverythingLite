@@ -60,7 +60,7 @@ git diff --cached
 
 ## 版本与发布
 
-每项新需求先分类并建立独立 GitHub Issue：一个 Bug 对应一条 Bug Issue，一个新增功能对应一条功能 Issue。Issue 需写现象或需求、预期行为、修复或实现方案及验收条件。优先修复 Bug，再开发新增功能；只有重大架构变化才调整大版本。开发完成并验证后，提交信息使用真实 Issue 编号关联，推送后核验关联，再关闭已完成的 Issue。无法创建 Issue 时先保留本地草稿，不编造编号或关闭状态。流程跟踪见 [Issue #7](https://github.com/umdreamer/EverythingLite/issues/7)。
+每项新需求先分类并建立独立 GitHub Issue：一个 Bug 对应一条 Bug Issue，一个新增功能对应一条功能 Issue。Issue 需写现象或需求、预期行为、修复或实现方案及验收条件。优先修复 Bug，再开发新增功能；只有重大架构变化才调整大版本。一条 Issue 可以由 1 至 N 个小提交逐步完成；每个提交只关联一条 Issue，提交信息只出现该 Issue 的真实编号。一个提交应完成一个可独立审查和回退的最小改动，不为增加提交数量拆开不可运行的半成品。相关检查通过后提交；推送后核验提交与 Issue 的关联，再关闭已完成的 Issue。无法创建 Issue 时先保留本地草稿，不编造编号或关闭状态。此规则适用于后续提交；已推送的历史和版本标签不重写。流程跟踪见 [Issue #7](https://github.com/umdreamer/EverythingLite/issues/7)。
 
 版本格式为 `x.y.z`：重大架构变化增加 `x`，新增功能增加 `y`，仅修复 Bug 增加 `z`。每次开发前与维护者确认分类。Bug 修复版本只创建并推送 Git 标签，不单独创建 GitHub Release；新增功能版本可以创建 Release。自上次维护 Release 后累计五个 Bug 修复标签，再统一创建一次维护 Release。版本变更应同步 `CMakeLists.txt`、README 和 CHANGELOG；需要 GitHub Release 时再编写发布说明。发布验证需区分核心自动测试、GUI 产物、人工交互、性能与独立分发检查。源码不存在的版本不得依据发布说明补造提交或标签。
 

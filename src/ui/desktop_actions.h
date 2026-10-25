@@ -18,6 +18,7 @@ class DesktopActions final : public QObject {
   signals:
     void feedback(const QString& message);
     void previewFallback(const QString& path);
+    void openRequestAccepted(const QString& path);
 
   private:
     std::uint64_t reveal_sequence_ = 0;
@@ -25,7 +26,8 @@ class DesktopActions final : public QObject {
     bool launch(const QString& program, const QStringList& arguments);
 #ifdef Q_OS_MACOS
     void launchNative(const QString& program, const QStringList& arguments,
-                      std::function<bool()> is_current = {}, std::function<void()> on_failure = {});
+                      std::function<bool()> is_current = {}, std::function<void()> on_failure = {},
+                      std::function<void()> on_success = {});
 #endif
 };
 } // namespace everything_lite

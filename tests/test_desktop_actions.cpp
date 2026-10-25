@@ -67,6 +67,26 @@ class DesktopTest : public QObject {
         QCOMPARE(sink.urls.size(),1); QCOMPARE(sink.urls[0].toLocalFile(),path);
         QCOMPARE(sink.urls[0],QUrl::fromLocalFile(path));
     }
+    void onlyAcceptedOpenRequestsEmitHistorySignal() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto path = dir.filePath(QStringLiteral("accepted.txt"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        UrlSink sink;
+        QDesktopServices::setUrlHandler("file", &sink, "accept");
+        struct Unset { ~Unset(){QDesktopServices::unsetUrlHandler("file");} } unset;
+        DesktopActions actions;
+        QSignalSpy accepted(&actions, &DesktopActions::openRequestAccepted);
+        actions.open(path);
+        QCOMPARE(accepted.size(), 1);
+        QCOMPARE(accepted.front().front().toString(), path);
+        actions.open(QString{});
+        QCOMPARE(accepted.size(), 1);
+        QVERIFY(!actions.openWithExecutable(path, dir.filePath(QStringLiteral("missing-app"))));
+        QCOMPARE(accepted.size(), 1);
+    }
     void previewLimits() {
         QTemporaryDir dir;
         auto write = [&](const QString& name, const QByteArray& data) {
@@ -165,8 +185,10 @@ class DesktopTest : public QObject {
         file.close();
         DesktopActions actions;
         QSignalSpy feedback(&actions, &DesktopActions::feedback);
+        QSignalSpy accepted(&actions, &DesktopActions::openRequestAccepted);
         actions.openWithApplication(path, QStringLiteral("EverythingLiteSyntheticMissingApplication"));
         QTRY_COMPARE_WITH_TIMEOUT(feedback.size(), 1, 3000);
+        QCOMPARE(accepted.size(), 0);
     }
 #endif
 #ifdef Q_OS_LINUX

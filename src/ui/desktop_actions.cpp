@@ -20,7 +20,8 @@ bool DesktopActions::launch(const QString& program, const QStringList& arguments
 }
 #ifdef Q_OS_MACOS
 void DesktopActions::launchNative(const QString& program, const QStringList& arguments,
-                                  std::function<bool()> is_current, std::function<void()> on_failure) {
+                                  std::function<bool()> is_current, std::function<void()> on_failure,
+                                  std::function<void()> on_success) {
     // Native launchers can fail after exec succeeds.
     // It owns its cleanup independently, so deleting the window cancels only
     // UI callbacks rather than killing an unrelated system application.
@@ -44,11 +45,11 @@ void DesktopActions::launchNative(const QString& program, const QStringList& arg
         if (error == QProcess::FailedToStart)
             process->deleteLater();
     });
-    connect(process, &QProcess::finished, this, [process, report](int code, QProcess::ExitStatus status) {
+    connect(process, &QProcess::finished, this, [process, report, on_success](int code, QProcess::ExitStatus status) {
         if (code != 0 || status != QProcess::NormalExit) {
             const auto reason = QString::fromUtf8(process->readAllStandardError().left(4096)).trimmed();
             report(reason.isEmpty() ? QStringLiteral("退出代码：%1").arg(code) : reason);
-        }
+        } else if (on_success) on_success();
     });
     connect(process, &QProcess::finished, process, &QObject::deleteLater);
     process->start(program, arguments);
@@ -57,6 +58,7 @@ void DesktopActions::launchNative(const QString& program, const QStringList& arg
 void DesktopActions::open(const QString& path) {
     if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
         emit feedback(QStringLiteral("系统未接受打开请求：%1").arg(path));
+    else emit openRequestAccepted(path);
 }
 bool DesktopActions::openWithExecutable(const QString& path, const QString& executable) {
     const QFileInfo info(executable);
@@ -65,11 +67,14 @@ bool DesktopActions::openWithExecutable(const QString& path, const QString& exec
         return false;
     }
     // Never pass a command line or .desktop Exec string to a shell.
-    return launch(info.absoluteFilePath(), {path});
+    if (!launch(info.absoluteFilePath(), {path})) return false;
+    emit openRequestAccepted(path);
+    return true;
 }
 void DesktopActions::openWithApplication(const QString& path, const QString& application) {
 #ifdef Q_OS_MACOS
-    launchNative(QStringLiteral("/usr/bin/open"), {QStringLiteral("-a"), application, path});
+    launchNative(QStringLiteral("/usr/bin/open"), {QStringLiteral("-a"), application, path}, {}, {},
+                 [this, path] { emit openRequestAccepted(path); });
 #else
     openWithExecutable(path, application);
 #endif

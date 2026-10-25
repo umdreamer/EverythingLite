@@ -375,6 +375,25 @@ class UiTest : public QObject {
         QCOMPARE(result.results.size(),std::size_t(1));
         QCOMPARE(result.opened_at.value(QStringLiteral("/synthetic/history/known.txt")),qint64(1700000000));
     }
+    void workerKeepsFirstPageWhenIndexRevisionChanges() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto path=dir.filePath(QStringLiteral("revision.db")).toStdString();
+        Database db(path); db.initialize();
+        const auto source=db.ensureSourceForRoot("/synthetic/revision");
+        FileRecord file; file.root="/synthetic/revision"; file.relative_path="sample.txt";
+        file.path=file.root+"/"+file.relative_path; file.name=file.relative_path;
+        file.parent_path=file.root;
+        db.mergeSourceSnapshot(db.source(source),{file});
+        int reads=0;
+        SearchWorker worker(path,{},[&reads] { return static_cast<std::uint64_t>(++reads); });
+        const auto result=worker.search("sample",10,0,SearchOptions{});
+        QVERIFY(result.error.empty());
+        QCOMPARE(reads,2);
+        QVERIFY(!result.snapshot_changed);
+        QCOMPARE(result.results.size(),std::size_t(1));
+        QCOMPARE(result.results.front().file.name,std::string("sample.txt"));
+        QCOMPARE(result.revision,std::optional<std::uint64_t>(1));
+    }
     void workerRejectsChangedPageRevision() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); const auto path=dir.filePath("paging.db").toStdString();
         Database db(path); db.initialize(); const auto source=db.ensureSourceForRoot("/synthetic/paging");
@@ -398,6 +417,14 @@ class UiTest : public QObject {
         QVERIFY(second.error.empty()); QVERIFY(!second.snapshot_changed);
         QCOMPARE(second.results.size(),std::size_t(3));
         QVERIFY(first.results.back().file.name<second.results.front().file.name);
+        int revision_reads=0;
+        SearchWorker changed_during_page(path,{},[&revision_reads] {
+            return static_cast<std::uint64_t>(++revision_reads);
+        });
+        const auto incomplete=changed_during_page.search("page",3,3,SearchOptions{},nullptr,1);
+        QCOMPARE(revision_reads,2);
+        QVERIFY(incomplete.snapshot_changed);
+        QVERIFY(incomplete.results.empty());
         // Raw writers do not increment the source revision. data_version must
         // still notice their commits on the same monitoring connection.
         sqlite3* raw=nullptr; QCOMPARE(sqlite3_open(path.c_str(),&raw),SQLITE_OK);

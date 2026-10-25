@@ -9,6 +9,7 @@
 #include <QString>
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -31,7 +32,8 @@ struct BackgroundSearchResult {
 // off the GUI event loop. The caller owns each cancellation token across threads.
 class SearchWorker final : public QObject {
 public:
-    explicit SearchWorker(std::string db_path, QString open_history_path = {});
+    explicit SearchWorker(std::string db_path, QString open_history_path = {},
+                          std::function<std::uint64_t()> revision_reader = {});
 
     BackgroundSearchResult search(const std::string& query,
                                   std::size_t limit,
@@ -43,6 +45,7 @@ public:
 private:
     std::string db_path_;
     QString open_history_path_;
+    std::function<std::uint64_t()> revision_reader_;
     std::unique_ptr<SearchService> service_;
     std::unique_ptr<SearchRevision> revision_;
 };

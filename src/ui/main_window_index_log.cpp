@@ -1,5 +1,6 @@
 #include "ui/main_window.h"
 #include "ui/index_update_journal.h"
+#include "ui/app_settings.h"
 
 #include <QComboBox>
 #include <QDateTime>
@@ -7,11 +8,24 @@
 #include <QDir>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
 
 namespace everything_lite {
+
+void MainWindow::applyIndexLogRetention(bool force) {
+    const auto today = QDate::currentDate();
+    if (!force && last_log_retention_day_ == today) return;
+    last_log_retention_day_ = today;
+    if (!index_journal_ || log_retention_days_ <= 0) return;
+    QString error;
+    const auto removed = index_journal_->prune(log_retention_days_, today, &error);
+    if (removed < 0) index_journal_error_ = error;
+    else index_journal_error_.clear();
+    if (removed != 0) refreshIndexUpdateLogDialog();
+}
 
 void MainWindow::recordIndexUpdate(const QString& kind, const QString& root, const QString& path,
                                    const QString& reason, int attempt) {
@@ -88,6 +102,20 @@ void MainWindow::showIndexUpdateLog() {
     auto* refresh = new QPushButton(QStringLiteral("刷新"), dialog);
     row->addWidget(refresh);
     layout->addLayout(row);
+    auto* retention_row = new QHBoxLayout;
+    retention_row->addWidget(new QLabel(QStringLiteral("自动保留："), dialog));
+    auto* retention = new QComboBox(dialog);
+    retention->setObjectName(QStringLiteral("indexLogRetention"));
+    retention->addItem(QStringLiteral("不自动删除"), 0);
+    for (const int days : {7, 30, 90, 365})
+        retention->addItem(QStringLiteral("保留 %1 天").arg(days), days);
+    retention->setCurrentIndex(retention->findData(log_retention_days_));
+    retention_row->addWidget(retention);
+    retention_row->addStretch();
+    auto* remove = new QPushButton(QStringLiteral("删除所选日期…"), dialog);
+    remove->setObjectName(QStringLiteral("removeIndexLogDate"));
+    retention_row->addWidget(remove);
+    layout->addLayout(retention_row);
     auto* history = new QPlainTextEdit(dialog);
     history->setObjectName(QStringLiteral("indexUpdateHistory"));
     history->setReadOnly(true);
@@ -99,6 +127,24 @@ void MainWindow::showIndexUpdateLog() {
     layout->addLayout(buttons);
     connect(dates, &QComboBox::currentIndexChanged, dialog, [this] { refreshIndexUpdateLogDialog(); });
     connect(refresh, &QPushButton::clicked, dialog, [this] { refreshIndexUpdateLogDialog(); });
+    connect(retention, &QComboBox::currentIndexChanged, dialog, [this, retention] {
+        log_retention_days_ = retention->currentData().toInt();
+        auto settings = makeAppSettings();
+        settings.setValue(QStringLiteral("logs/retentionDays"), log_retention_days_);
+        settings.sync();
+        applyIndexLogRetention(true);
+    });
+    connect(remove, &QPushButton::clicked, dialog, [this, dialog, dates] {
+        const auto date = QDate::fromString(dates->currentText(), Qt::ISODate);
+        if (!date.isValid()) return;
+        if (QMessageBox::question(dialog, QStringLiteral("删除索引更新日志"),
+                                  QStringLiteral("确定删除 %1 的索引更新日志？此操作不可撤销。").arg(date.toString(Qt::ISODate)),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        QString error;
+        if (!index_journal_->removeDate(date, &error))
+            QMessageBox::warning(dialog, QStringLiteral("无法删除日志"), error);
+        refreshIndexUpdateLogDialog();
+    });
     connect(close, &QPushButton::clicked, dialog, &QDialog::close);
     refreshIndexUpdateLogDialog();
     dialog->show();

@@ -210,6 +210,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     buildMenus();
     loadSettings();
+    log_retention_timer_ = new QTimer(this);
+    log_retention_timer_->setInterval(60 * 60 * 1000);
+    connect(log_retention_timer_, &QTimer::timeout, this, [this] { applyIndexLogRetention(); });
+    log_retention_timer_->start();
+    applyIndexLogRetention(true);
     if (searchTraceEnabled()) {
         searchTrace("GUI", "settings scope=" + std::to_string(scope_combo_->currentIndex())
             + " match_path=" + std::to_string(match_path_check_->isChecked() ? 1 : 0)
@@ -377,6 +382,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     search_timer_->stop();
     event_timer_->stop();
     retry_timer_->stop();
+    log_retention_timer_->stop();
     saveSettings();
     saveBookmarks();
     QMainWindow::closeEvent(event);
@@ -699,6 +705,9 @@ void MainWindow::buildMenus() {
 void MainWindow::loadSettings() {
     auto settings = makeAppSettings();
     sync_retry_base_ms_ = std::clamp(settings.value(QStringLiteral("index/syncRetryBaseMs"), 5000).toInt(), 1000, 60000);
+    log_retention_days_ = settings.value(QStringLiteral("logs/retentionDays"), 0).toInt();
+    if (log_retention_days_ != 0 && log_retention_days_ != 7 && log_retention_days_ != 30
+        && log_retention_days_ != 90 && log_retention_days_ != 365) log_retention_days_ = 0;
     roots_ = settings.value(QStringLiteral("index/roots")).toStringList();
     if (roots_.isEmpty()) roots_ = defaultRoots();
     scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
@@ -736,6 +745,7 @@ void MainWindow::loadSettings() {
 void MainWindow::saveSettings() {
     auto settings = makeAppSettings();
     settings.setValue(QStringLiteral("index/roots"), roots_);
+    settings.setValue(QStringLiteral("logs/retentionDays"), log_retention_days_);
     settings.setValue(QStringLiteral("search/itemScope"), scope_combo_->currentIndex());
     settings.setValue(QStringLiteral("search/matchPath"), match_path_check_->isChecked());
     settings.setValue(QStringLiteral("search/includeHidden"), include_hidden_check_->isChecked());

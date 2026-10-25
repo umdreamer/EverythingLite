@@ -9,6 +9,7 @@
 #include <QSet>
 #include <QHash>
 #include <QDeadlineTimer>
+#include <QDate>
 #include <QString>
 #include <QStringList>
 
@@ -106,6 +107,9 @@ private:
     std::unique_ptr<IndexUpdateJournal> index_journal_;
     QPointer<QDialog> index_update_log_dialog_;
     QString index_journal_error_;
+    QTimer* log_retention_timer_ = nullptr;
+    int log_retention_days_ = 0;
+    QDate last_log_retention_day_;
 
     QString db_path_;
     QStringList roots_;
@@ -232,6 +236,7 @@ private:
     void refreshIndexUpdateLogDialog();
     void recordIndexUpdate(const QString& kind, const QString& root, const QString& path,
                            const QString& reason = {}, int attempt = 0);
+    void applyIndexLogRetention(bool force = false);
     void refreshSearchLogDialog();
     void finishSearchLog(std::uint64_t request_id, const QString& state, const QString& detail,
                          double elapsed_ms, int returned_count, int loaded_count);

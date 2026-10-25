@@ -151,6 +151,7 @@ class UiTest : public QObject {
         settings.setValue("view/statusBar", true);
         settings.setValue("view/scopeBar", true);
         settings.setValue("view/filterBar", true);
+        settings.setValue("logs/retentionDays", 0);
     }
     void storageMenuOpensAsyncReport() {
         MainWindow window; window.watcher_->stop();
@@ -877,6 +878,56 @@ class UiTest : public QObject {
         QVERIFY(!current->toPlainText().contains(QStringLiteral("synthetic incomplete scan")));
         QVERIFY(history->toPlainText().contains(QStringLiteral("恢复")));
         dialog->close();
+    }
+    void logRetentionPersistsAndManualDeleteNeedsConfirmation() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto today = QDate::currentDate();
+        const auto old_day = today.addDays(-8);
+        {
+            MainWindow window;
+            window.watcher_->stop();
+            window.index_journal_ = std::make_unique<IndexUpdateJournal>(temp.filePath(QStringLiteral("logs")));
+            const auto record = [&window](const QDate& day) {
+                return window.index_journal_->append({QStringLiteral("完成"), {}, {}, {}, 0,
+                    QDateTime(day, QTime(9, 0), QTimeZone::utc())});
+            };
+            QVERIFY(record(today));
+            QVERIFY(record(old_day));
+            window.showIndexUpdateLog();
+            auto* dialog = window.findChild<QDialog*>(QStringLiteral("indexUpdateLogDialog"));
+            QVERIFY(dialog);
+            auto* retention = dialog->findChild<QComboBox*>(QStringLiteral("indexLogRetention"));
+            auto* dates = dialog->findChild<QComboBox*>(QStringLiteral("indexUpdateDates"));
+            auto* remove = dialog->findChild<QPushButton*>(QStringLiteral("removeIndexLogDate"));
+            QVERIFY(retention && dates && remove);
+            QCOMPARE(retention->currentData().toInt(), 0);
+            retention->setCurrentIndex(retention->findData(7));
+            QCOMPARE(makeAppSettings().value("logs/retentionDays").toInt(), 7);
+            QCOMPARE(window.index_journal_->dates(), QStringList{today.toString(Qt::ISODate)});
+            QCOMPARE(dates->currentText(), today.toString(Qt::ISODate));
+            const auto today_path = QDir(window.index_journal_->directory()).filePath(
+                QStringLiteral("index-update-") + today.toString(Qt::ISODate) + QStringLiteral(".jsonl"));
+            QTimer::singleShot(0, [&] {
+                auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                QVERIFY(box);
+                box->button(QMessageBox::No)->click();
+            });
+            remove->click();
+            QVERIFY(QFile::exists(today_path));
+            QTimer::singleShot(0, [&] {
+                auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                QVERIFY(box);
+                box->button(QMessageBox::Yes)->click();
+            });
+            remove->click();
+            QVERIFY(!QFile::exists(today_path));
+            QVERIFY(window.log_retention_timer_->isActive());
+            dialog->close();
+        }
+        MainWindow reopened;
+        reopened.watcher_->stop();
+        QCOMPARE(reopened.log_retention_days_, 7);
     }
     void unchangedFilesystemSyncDoesNotRepeatSearch() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

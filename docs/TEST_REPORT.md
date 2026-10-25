@@ -1,4 +1,4 @@
-# 测试范围与验证记录（截至 0.5.0）
+# 测试范围与验证记录（截至 0.5.1）
 
 ## 验证范围
 
@@ -11,6 +11,12 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.5.1 本地核验（2026-10-25）
+
+macOS GUI Debug 全套 CTest 27/27、Core Debug 全套 CTest 20/20 通过。Mac Release 构建生成 `EverythingLite.app` 和 `everything-lite-cli`，应用包短版本与构建版本均为 0.5.1。新增合成回归先复现索引变化后已显示的 1000 条结果被清空，再验证修复后结果和选中行保留、超过 800 ms 仍不自动重搜、下一次主动搜索读取更新后的索引。可控版本变化回归验证首页结果保留，同时确保不同索引版本的追加页不会混入当前列表。
+
+测试未使用日常索引或真实搜索词；未在真实大型索引、NAS 或 Linux 桌面上验收此并发时序。本版本只修复 Bug，按维护规则仅创建 Git 标签。
 
 ## Mac 0.5.0 本地核验（2026-10-25）
 

@@ -2,13 +2,13 @@
 
 > **Vibe Coding 项目**：本项目通过提示驱动的 AI 生成、修改与迭代形成，非个人逐行手工编写。该开发方式不等于代码已经得到全面验证；功能实现、自动测试、交互验收与性能验证应分别评估。
 
-Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前源码版本为 **0.5.0**。技术栈为 C++17、Qt 6 Widgets、SQLite、PCRE2 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
+Everything Lite 是用于本地文件名、路径及文件属性搜索的桌面工具，当前源码版本为 **0.5.1**。技术栈为 C++17、Qt 6 Widgets、SQLite、PCRE2 和 CMake。项目仓库：[umdreamer/EverythingLite](https://github.com/umdreamer/EverythingLite)。
 
 ## 功能
 
 CLI 与 GUI 共用 `SearchService`。普通关键词默认只匹配文件或文件夹名称；`path:` 或 Match Path 显式启用完整路径匹配。支持 `ext:`、`size:`、`modified:` 与 `type:file` / `type:dir`，并在 SQLite 支持且名称索引就绪时使用 FTS5 trigram 加速。
 
-GUI 在最后一次编辑后等待 800 ms 提交查询，中文输入法组词期间暂停自动搜索。`SearchWorker` 在专用 `QThread` 中初始化并复用搜索服务；过期 request ID 的结果被丢弃。后台索引变化不自动重跑当前搜索；切换指定文件夹范围时立即清空旧结果。结果每批加载 1000 条，表头排序及 CSV 导出作用于已加载结果。书签、窗口布局及索引目录配置使用 QSettings 保存。
+GUI 在最后一次编辑后等待 800 ms 提交查询，中文输入法组词期间暂停自动搜索。`SearchWorker` 在专用 `QThread` 中初始化并复用搜索服务；被新输入替代的旧查询结果会丢弃。后台索引变化不重跑当前搜索，也不清空已显示结果；下一次主动搜索读取新索引。分页遇到索引版本变化时停止追加，防止混合两代结果。切换指定文件夹范围时立即清空旧结果。结果每批加载 1000 条，表头排序及 CSV 导出作用于已加载结果。书签、窗口布局及索引目录配置使用 QSettings 保存。
 
 macOS 使用 FSEvents，Linux 使用递归 inotify 监听文件变化。两平台共用搜索核心和 Qt 主窗口；文件定位、打开方式与快速查看由平台适配。Linux 以 Ubuntu 24.04 LTS 为基线，Debian 系发行版需在目标环境构建及验证。项目不提供文件正文全文搜索。
 

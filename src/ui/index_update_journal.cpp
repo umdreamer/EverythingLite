@@ -124,6 +124,7 @@ bool IndexUpdateJournal::append(const IndexUpdateEvent& event, QString* error) c
 
 QStringList IndexUpdateJournal::dates() const {
     QStringList result;
+    if (QFileInfo(directory_).isSymLink()) return result;
     const QDir dir(directory_);
     for (const auto& info : dir.entryInfoList(QDir::Files | QDir::NoSymLinks, QDir::Name | QDir::Reversed)) {
         if (!isJournalName(info.fileName())) continue;
@@ -134,7 +135,7 @@ QStringList IndexUpdateJournal::dates() const {
 
 QVector<IndexUpdateEvent> IndexUpdateJournal::read(const QDate& date) const {
     QVector<IndexUpdateEvent> result;
-    if (!date.isValid()) return result;
+    if (!date.isValid() || QFileInfo(directory_).isSymLink()) return result;
     const auto path = filePath(date);
     const QFileInfo info(path);
     if (info.isSymLink() || !info.isFile()) return result;
@@ -153,6 +154,43 @@ QVector<IndexUpdateEvent> IndexUpdateJournal::read(const QDate& date) const {
                           QDateTime::fromString(object.value(QStringLiteral("at")).toString(), Qt::ISODateWithMs)});
     }
     return result;
+}
+
+bool IndexUpdateJournal::removeDate(const QDate& date, QString* error) const {
+    if (!date.isValid() || QFileInfo(directory_).isSymLink()) {
+        setError(error, QStringLiteral("日志日期或目录无效"));
+        return false;
+    }
+    const auto path = filePath(date);
+    const QFileInfo info(path);
+    if (!isJournalName(info.fileName()) || info.isSymLink() || !info.isFile()) {
+        setError(error, QStringLiteral("只允许删除应用的普通日志文件"));
+        return false;
+    }
+    if (!QFile::remove(path)) {
+        setError(error, QStringLiteral("无法删除日志文件"));
+        return false;
+    }
+    if (error) error->clear();
+    return true;
+}
+
+int IndexUpdateJournal::prune(int retention_days, const QDate& today, QString* error) const {
+    if (error) error->clear();
+    if (retention_days <= 0) return 0;
+    if (!today.isValid() || QFileInfo(directory_).isSymLink()) {
+        setError(error, QStringLiteral("当前日期或日志目录无效"));
+        return -1;
+    }
+    const auto cutoff = today.addDays(1 - retention_days);
+    int removed = 0;
+    for (const auto& day : dates()) {
+        const auto date = QDate::fromString(day, Qt::ISODate);
+        if (!date.isValid() || date >= cutoff || date == today) continue;
+        if (!removeDate(date, error)) return -1;
+        ++removed;
+    }
+    return removed;
 }
 
 } // namespace everything_lite

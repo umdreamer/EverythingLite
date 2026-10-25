@@ -27,6 +27,8 @@ public:
     QStringList dates() const;
     QVector<IndexUpdateEvent> read(const QDate& date) const;
     bool containsPath(const QString& path) const;
+    bool removeDate(const QDate& date, QString* error = nullptr) const;
+    int prune(int retention_days, const QDate& today, QString* error = nullptr) const;
 
 private:
     QString directory_;

@@ -85,6 +85,8 @@ if(BUILD_GUI)
             src/ui/main_window_sync.cpp
             src/ui/index_storage_dialog.cpp
             src/ui/index_storage_dialog.h
+            src/ui/index_update_journal.cpp
+            src/ui/index_update_journal.h
             src/ui/exclusion_settings_dialog.cpp
             src/ui/exclusion_settings_dialog.h
             src/ui/result_presentation.h
@@ -152,6 +154,10 @@ if(BUILD_TESTS)
         set_tests_properties(directory_sync_setup PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
         add_executable(test_desktop_actions tests/test_desktop_actions.cpp)
         target_link_libraries(test_desktop_actions PRIVATE everything_ui Qt6::Test)
+        add_executable(test_index_update_journal tests/test_index_update_journal.cpp)
+        target_link_libraries(test_index_update_journal PRIVATE everything_ui Qt6::Test)
+        add_test(NAME index_update_journal COMMAND test_index_update_journal)
+        set_tests_properties(index_update_journal PROPERTIES TIMEOUT 30)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             find_program(DBUS_RUN_SESSION dbus-run-session REQUIRED)
             add_test(NAME desktop_actions COMMAND ${DBUS_RUN_SESSION} -- $<TARGET_FILE:test_desktop_actions>)

@@ -1,10 +1,12 @@
-# 架构（0.4.16）
+# 架构（0.5.0）
 
 ## 组件职责
 
 Core 使用 C++17、SQLite 与 PCRE2，不依赖 Qt。`FileScanner` 读取文件系统属性，`IndexManager` 管理完整扫描和增量同步，`Database` 保存记录与名称加速索引。`ExclusionPolicy` 编译和执行排除规则。`SearchQuery` 解析过滤条件，`SearchEngine` 执行查询，`SearchService` 为 CLI 与 GUI 提供共同的应用级入口。
 
 GUI 使用 Qt Widgets 与 `SearchResultModel`。`MainWindow` 负责输入、菜单、分页、结果显示和存储维护调度，`SearchWorker` 负责后台搜索；`IndexStorageDialog` 使用独立线程读取存储统计。维护操作与扫描共享工作线程入口，并使用跨进程维护锁。QSettings 保存索引目录、窗口状态和书签，与 SQLite 索引数据库分工不同。
+
+`IndexUpdateJournal` 在应用数据目录按日写入索引任务事件，不写搜索关键词。`OpenHistoryStore` 在独立 SQLite 文件中保存本应用已接受的打开请求；`SearchWorker` 在后台批量读取对应结果的时间。选中结果的路径核验使用线程池，只修改该行状态，不重置搜索模型。两种运行数据均不属于可重建的搜索索引。
 
 ## 搜索链路
 

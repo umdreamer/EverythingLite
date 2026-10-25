@@ -146,10 +146,10 @@ private:
     QTimer* search_timer_ = nullptr;
     QTimer* event_timer_ = nullptr;
     QTimer* retry_timer_ = nullptr;
-    QTimer* filesystem_refresh_timer_ = nullptr;
     QThread* worker_thread_ = nullptr;
     QPointer<IndexStorageDialog> storage_dialog_;
     bool storage_maintenance_=false;
+    bool maintenance_search_requested_ = false;
     bool storage_optimize_=false;
     std::vector<std::string> storage_cleanup_selection_;
     std::shared_ptr<std::atomic_bool> storage_cancellation_;
@@ -181,7 +181,6 @@ private:
     bool search_ime_composing_ = false;
     bool search_in_flight_ = false;
     bool search_pending_ = false;
-    bool filesystem_results_dirty_ = false;
     bool closing_ = false;
     bool normal_events_due_ = false;
     std::shared_ptr<std::atomic_bool> active_search_cancellation_;
@@ -248,7 +247,6 @@ private:
     void setBusy(bool busy, const QString& message = {});
     void startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish = true,
                      std::function<void(const QString&)> on_finished = {});
-    void scheduleFilesystemResultRefresh();
     void newWindow();
     void resetColumns();
     void addCurrentBookmark();

@@ -309,30 +309,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     retry_timer_->setTimerType(Qt::PreciseTimer);
     connect(retry_timer_, &QTimer::timeout, this, &MainWindow::processDueRetries);
 
-    // v0.4.2: filesystem churn must never pre-empt a user search. FSEvents can
-    // fire continuously under ~/Library; v0.4.1 restarted the foreground query
-    // after every sync batch, so slower queries could be cancelled forever.
-    // The first change fixes a bounded refresh deadline; later changes cannot
-    // postpone it indefinitely. Active user queries and edits retain priority.
-    filesystem_refresh_timer_ = new QTimer(this);
-    filesystem_refresh_timer_->setSingleShot(true);
-    filesystem_refresh_timer_->setInterval(1800);
-    connect(filesystem_refresh_timer_, &QTimer::timeout, this, [this] {
-        if (!filesystem_results_dirty_ || closing_) return;
-        // A filesystem refresh never supersedes an active user query or the
-        // latest UI state waiting for its input debounce / IME commit.
-        if (search_in_flight_ || search_pending_ || search_ime_composing_
-            || search_timer_->isActive()) {
-            filesystem_refresh_timer_->start(1800);
-            return;
-        }
-        if (normalizeGuiQuery(search_edit_->text()).isEmpty()) {
-            filesystem_results_dirty_ = false;
-            return;
-        }
-        filesystem_results_dirty_ = false;
-        runSearch();
-    });
+    // Index changes do not replace visible search results or their selection.
 
     connect(table_, &QTableView::doubleClicked, this, [this] { openCurrent(); });
     connect(table_, &QWidget::customContextMenuRequested, this, &MainWindow::showContextMenu);
@@ -391,7 +368,6 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if (storage_cancellation_) storage_cancellation_->store(true);
     cancelActiveSearch();
     search_timer_->stop();
-    filesystem_refresh_timer_->stop();
     event_timer_->stop();
     retry_timer_->stop();
     saveSettings();
@@ -963,7 +939,12 @@ QString MainWindow::currentSearchSignature() const {
 }
 
 void MainWindow::runSearch() {
-    if(storage_maintenance_) {search_pending_=true;pending_search_query_=normalizeGuiQuery(search_edit_->text());return;}
+    if(storage_maintenance_) {
+        search_pending_=true;
+        maintenance_search_requested_=true;
+        pending_search_query_=normalizeGuiQuery(search_edit_->text());
+        return;
+    }
     if (closing_ || search_ime_composing_ || (indexing_.load() && indexed_count_ == 0)) return;
     search_timer_->stop();
     if (!folder_scope_.isEmpty() && (rootForPath(folder_scope_).isEmpty()
@@ -1122,18 +1103,15 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
                         self->search_timer_->start(kSearchIdleDelayMs);
                 }
             } else if (outcome->snapshot_changed) {
-                self->finishSearchLog(request_id, QStringLiteral("待重试"), QStringLiteral("索引版本已变化"),
+                self->finishSearchLog(request_id, QStringLiteral("待重试"), QStringLiteral("索引版本已变化；可重新搜索"),
                                       outcome->elapsed_ms, 0, 0);
                 self->resetPaging();
-                self->model_->clearResults();
-                self->last_search_elapsed_ms_ = outcome->elapsed_ms;
-                self->last_search_raw_result_count_ = 0;
-                self->last_search_result_count_ = 0;
-                self->status_label_->setText(QStringLiteral("索引已变化，等待重新加载…"));
-                self->search_metrics_label_->setText(QStringLiteral("索引变化"));
-                // Reuse the user-search debounce so repeated commits coalesce
-                // and cannot cause an immediate restart loop on a busy index.
-                self->search_timer_->start(kSearchIdleDelayMs);
+                if (append) {
+                    self->model_->clearResults();
+                    self->search_timer_->start(kSearchIdleDelayMs);
+                } else {
+                    self->status_label_->setText(QStringLiteral("索引已变化；请重新搜索"));
+                }
             } else if (!outcome->error.empty()) {
                 self->finishSearchLog(request_id, QStringLiteral("失败"), QString::fromUtf8(outcome->error.c_str()),
                                       outcome->elapsed_ms, 0, self->model_->rowCount());
@@ -1201,6 +1179,7 @@ void MainWindow::cancelActiveSearch() {
 
 void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish,
                              std::function<void(const QString&)> on_finished) {
+    Q_UNUSED(refresh_search_on_finish)
     if (worker_thread_ || storage_maintenance_ || closing_) return;
     setBusy(true, start_message);
     struct Stats {
@@ -1233,12 +1212,11 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
             // job succeeded. Keep the previous count and report only job errors.
         }
     });
-    connect(worker_thread_, &QThread::finished, this, [this, refresh_search_on_finish, stats, on_finished=std::move(on_finished)] {
+    connect(worker_thread_, &QThread::finished, this, [this, start_message, stats, on_finished=std::move(on_finished)] {
         worker_thread_->deleteLater();
         worker_thread_ = nullptr;
         setBusy(false);
         if (closing_) return;
-        const bool count_changed = stats->valid && indexed_count_ != stats->count;
         if (stats->valid) {
             indexed_count_ = stats->count;
             name_search_available_ = stats->available;
@@ -1248,9 +1226,8 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
             status_label_->setText(QStringLiteral("索引任务未完成：%1").arg(stats->error));
         if(on_finished) on_finished(stats->error);
         if(storage_maintenance_) {tryStartStorageMaintenance();return;}
-        if (refresh_search_on_finish || count_changed) updateCachedStatus();
-        // Manual rebuilds and event batches share the same user-query protection.
-        if (refresh_search_on_finish) scheduleFilesystemResultRefresh();
+        if (!start_message.isEmpty()) updateCachedStatus();
+        // Keep visible results and the selected row until the next user search.
         // Continue only queues whose own deadlines have already elapsed.
         // A completed worker never advances a fresh normal event or retry.
         if (normal_events_due_ || !ready_sync_retries_.isEmpty()) {
@@ -1300,7 +1277,6 @@ void MainWindow::showExclusionSettings() {
                 }
                 if(safe) safe->finishSaved();
                 statusBar()->showMessage(QStringLiteral("排除规则已保存，清理 %1 项。放宽规则后请重建索引。").arg(*removed),15000);
-                if(model_->rowCount() || !search_edit_->text().isEmpty()) runSearch();
                 if(!previous_rules.index_app_bundle_contents && rules.index_app_bundle_contents)
                     QTimer::singleShot(0,this,&MainWindow::rebuildIndex);
             });
@@ -1323,9 +1299,10 @@ void MainWindow::showIndexStorage() {
 void MainWindow::requestStorageMaintenance(bool optimize,const std::vector<std::string>& cleanup_selection) {
     if(closing_ || storage_maintenance_)return;
     storage_maintenance_=true;storage_optimize_=optimize;storage_cleanup_selection_=cleanup_selection;
+    maintenance_search_requested_=false;
     storage_cancellation_=std::make_shared<std::atomic_bool>(false);
     cancelActiveSearch();++search_request_id_;resetPaging();
-    search_timer_->stop();filesystem_refresh_timer_->stop();
+    search_timer_->stop();
     search_pending_=true;pending_search_query_=normalizeGuiQuery(search_edit_->text());
     if(storage_dialog_)storage_dialog_->beginOperation();
     tryStartStorageMaintenance();
@@ -1389,15 +1366,11 @@ void MainWindow::tryStartStorageMaintenance() {
         if(storage_dialog_)storage_dialog_->finishOperation(result->message,result->sizes?&result->before:nullptr,result->sizes?&result->after:nullptr);
         // Keep the latest controls and watcher/retry queues; never replay an old query.
         search_pending_=false;resetPaging();
-        if(!search_ime_composing_)search_timer_->start(kSearchIdleDelayMs);
+        if (maintenance_search_requested_ && !search_ime_composing_)
+            search_timer_->start(kSearchIdleDelayMs);
+        maintenance_search_requested_=false;
         if(normal_events_due_ || !ready_sync_retries_.isEmpty())QTimer::singleShot(0,this,&MainWindow::dispatchSyncJobs);
     });worker_thread_->start();
-}
-
-void MainWindow::scheduleFilesystemResultRefresh() {
-    if (!filesystem_refresh_timer_ || closing_) return;
-    filesystem_results_dirty_ = true;
-    if (!filesystem_refresh_timer_->isActive()) filesystem_refresh_timer_->start(1800);
 }
 
 void MainWindow::rebuildIndex() {

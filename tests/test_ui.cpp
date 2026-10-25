@@ -463,22 +463,23 @@ class UiTest : public QObject {
         struct Release { QSemaphore& semaphore; ~Release() { semaphore.release(); } } guard{release};
         window.search_edit_->setText("alpha"); window.runSearch();
         const auto id=window.search_request_id_;
-        window.scheduleFilesystemResultRefresh();
+        window.reportSyncOutcome(fixture_root, fixture_root, true, {});
         QTest::qWait(1900);
         QCOMPARE(window.search_request_id_,id);
         QVERIFY(window.search_in_flight_);
         release.release(); QTRY_COMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
     }
-    void continuousResultChangesRefreshBeforeQuiet() {
+    void indexChangesKeepSearchAndSelectionUntilNextRequest() {
         MainWindow window; window.watcher_->stop();
         window.search_edit_->setText("alpha"); window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
         const auto id=window.search_request_id_;
-        QTimer changes; changes.setInterval(100);
-        connect(&changes,&QTimer::timeout,&window,[&]{window.scheduleFilesystemResultRefresh();});
-        changes.start(); window.scheduleFilesystemResultRefresh();
-        QTRY_VERIFY_WITH_TIMEOUT(window.search_request_id_>id,2400);
-        QVERIFY(changes.isActive()); changes.stop();
-        QTRY_VERIFY(!window.search_in_flight_);
+        window.table_->selectRow(0);
+        const auto selected=window.model_->pathAt(0);
+        window.reportSyncOutcome(fixture_root, fixture_root, true, {});
+        QTest::qWait(2100);
+        QCOMPARE(window.search_request_id_,id);
+        QCOMPARE(window.table_->selectionModel()->selectedRows().size(),1);
+        QCOMPARE(window.model_->pathAt(window.table_->selectionModel()->selectedRows().front().row()),selected);
     }
     void failedRootDoesNotLoseOtherJobsAndRecovers() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -519,6 +520,8 @@ class UiTest : public QObject {
         Database db(window.db_path_.toStdString());
         const auto oldScope = std::string("path:\"") + old.toStdString() + "\"";
         QTRY_VERIFY_WITH_TIMEOUT(db.search(oldScope).empty(),1800);
+        QCOMPARE(window.model_->pathAt(0), old + "/" + filename);
+        window.runSearch();
         QTRY_COMPARE_WITH_TIMEOUT(window.model_->pathAt(0),fresh+"/"+filename,4000);
         UiUrlSink sink; QDesktopServices::setUrlHandler("file",&sink,"accept");
         struct Unset { ~Unset(){QDesktopServices::unsetUrlHandler("file");} } unset;
@@ -872,8 +875,12 @@ class UiTest : public QObject {
         QVERIFY(second.open(QIODevice::WriteOnly)); second.close();
         window.scheduleFileEvent({second.fileName().toStdString(), false, {}});
         window.processPendingEvents();
+        QTRY_VERIFY(!window.worker_thread_);
+        QTest::qWait(2100);
+        QCOMPARE(window.model_->rowCount(), 1);
+        QCOMPARE(window.search_log_entries_.size(), initial_log_count);
+        window.runSearch();
         QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(), 2, 5000);
-        QCOMPARE(window.search_log_entries_.size(), initial_log_count + 1);
     }
     void ownIndexDatabaseEventsDoNotScheduleSync() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

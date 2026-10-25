@@ -185,17 +185,13 @@ void MainWindow::dispatchSyncJobs() {
     ready_sync_retries_.clear();
     if (jobs.empty()) return;
     const auto db_path = db_path_;
-    auto changed = std::make_shared<std::atomic_bool>(false);
-    sync_error_label_->setText(QStringLiteral("索引同步中"));
-    sync_error_label_->setToolTip(QStringLiteral("正在将索引目录的文件变化写入索引"));
-    startWorker([this, db_path, jobs, changed] {
+    startWorker([this, db_path, jobs] {
         auto process = [&](const QString& root, const QString& path, bool rescan) {
             QString error;
             try {
                 IndexManager manager(native(db_path));
                 const auto stats = rescan ? manager.rebuildRoot(native(root))
                     : manager.applyPathChange(native(root), native(path));
-                if (stats.changed) changed->store(true, std::memory_order_relaxed);
                 if (!stats.completed) {
                     error = stats.cancelled ? QStringLiteral("同步已取消")
                         : stats.error.empty() ? QStringLiteral("扫描未完整完成") : QString::fromUtf8(stats.error.c_str());
@@ -210,9 +206,7 @@ void MainWindow::dispatchSyncJobs() {
             }, Qt::QueuedConnection);
         };
         for (const auto& job : jobs) process(job.root, job.path, job.rescan);
-    }, {}, false, [this, changed](const QString&) {
-        if (changed->load(std::memory_order_relaxed)) scheduleFilesystemResultRefresh();
-    });
+    }, {}, false);
 }
 
 void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool requested_rescan, const QString& error) {
@@ -224,6 +218,7 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         folder_scope_index_pending_ = false;
         folder_scope_index_failed_ = !error.isEmpty();
         updateFolderScopeLabel();
+        if (error.isEmpty() && !search_ime_composing_) search_timer_->start(kSearchIdleDelayMs);
     }
     const auto key = failureKey(root, rescan ? root : path, rescan);
     bool newly_exhausted = false;

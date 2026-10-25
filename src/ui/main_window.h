@@ -56,6 +56,7 @@ class DesktopActions;
 class SearchResultModel;
 class SearchWorker;
 class IndexStorageDialog;
+class IndexUpdateJournal;
 
 
 struct SearchBookmark {
@@ -102,6 +103,9 @@ private:
     };
     std::vector<SearchLogEntry> search_log_entries_;
     QPointer<QDialog> search_log_dialog_;
+    std::unique_ptr<IndexUpdateJournal> index_journal_;
+    QPointer<QDialog> index_update_log_dialog_;
+    QString index_journal_error_;
 
     QString db_path_;
     QStringList roots_;
@@ -224,6 +228,10 @@ private:
     void showSettingsOverview();
     void showSearchDiagnostics();
     void showSearchLog();
+    void showIndexUpdateLog();
+    void refreshIndexUpdateLogDialog();
+    void recordIndexUpdate(const QString& kind, const QString& root, const QString& path,
+                           const QString& reason = {}, int attempt = 0);
     void refreshSearchLogDialog();
     void finishSearchLog(std::uint64_t request_id, const QString& state, const QString& detail,
                          double elapsed_ms, int returned_count, int loaded_count);

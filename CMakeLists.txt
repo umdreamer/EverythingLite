@@ -83,6 +83,7 @@ if(BUILD_GUI)
             src/ui/directory_sync_permissions.cpp
             src/ui/main_window.cpp
             src/ui/main_window_sync.cpp
+            src/ui/main_window_index_log.cpp
             src/ui/index_storage_dialog.cpp
             src/ui/index_storage_dialog.h
             src/ui/index_update_journal.cpp

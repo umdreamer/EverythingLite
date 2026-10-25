@@ -1,6 +1,7 @@
 #include "ui/main_window.h"
 #include "core/index_manager.h"
 #include "core/path_utils.h"
+#include "ui/index_update_journal.h"
 
 #include <QDir>
 #include <QLabel>
@@ -39,6 +40,7 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     if (event.path.empty()) return;
     const auto path = QString::fromUtf8(event.path.c_str());
     const auto normalized_path = QDir::cleanPath(path);
+    if (index_journal_ && index_journal_->containsPath(normalized_path)) return;
     const auto own_database = QDir::cleanPath(db_path_);
     if (!event.needs_full_rescan &&
         (normalized_path == own_database || normalized_path.startsWith(own_database + QLatin1Char('-')))) return;
@@ -184,6 +186,12 @@ void MainWindow::dispatchSyncJobs() {
     }
     ready_sync_retries_.clear();
     if (jobs.empty()) return;
+    for (const auto& job : jobs) {
+        const auto key = failureKey(job.root, job.path, job.rescan);
+        const auto attempt = sync_attempts_.value(key);
+        recordIndexUpdate(attempt > 0 ? QStringLiteral("重试") : QStringLiteral("开始"),
+                          job.root, job.path, {}, attempt);
+    }
     const auto db_path = db_path_;
     startWorker([this, db_path, jobs] {
         auto process = [&](const QString& root, const QString& path, bool rescan) {
@@ -221,6 +229,7 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         if (error.isEmpty() && !search_ime_composing_) search_timer_->start(kSearchIdleDelayMs);
     }
     const auto key = failureKey(root, rescan ? root : path, rescan);
+    const bool previously_failed = sync_failure_scopes_.contains(key);
     bool newly_exhausted = false;
     if (error.isEmpty()) {
         // A completed ancestor snapshot proves recovery for every failed scope
@@ -261,6 +270,9 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
         }
     }
     armRetryTimer();
+    recordIndexUpdate(error.isEmpty()
+                          ? (previously_failed ? QStringLiteral("恢复") : QStringLiteral("完成"))
+                          : QStringLiteral("待更新"), root, path, error, sync_attempts_.value(key));
     const auto message = sync_errors_.isEmpty() ? QString{}
         : QStringLiteral("待更新范围（保留已有缓存；最多自动重试两次，相关新事件可重试）：%1")
             .arg(sync_errors_.values().join(QStringLiteral("；")));

@@ -1,6 +1,7 @@
 #include "ui/main_window.h"
 #include "ui/app_settings.h"
 #include "ui/index_storage_dialog.h"
+#include "ui/index_update_journal.h"
 #include "ui/exclusion_settings_dialog.h"
 #include "core/index_storage.h"
 #include <QDateTime>
@@ -195,6 +196,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // an existing v0.4 database so upgrading never creates a silent empty DB.
     db_path_ = fromUtf8(defaultDatabasePath());
     QDir().mkpath(QFileInfo(db_path_).absolutePath());
+    index_journal_ = std::make_unique<IndexUpdateJournal>(IndexUpdateJournal::defaultDirectory());
     searchTrace("GUI", "MainWindow db=\"" + toUtf8(db_path_) + "\"");
 
     buildUi();
@@ -668,6 +670,9 @@ void MainWindow::buildMenus() {
 
     auto* status_action = tools_menu->addAction(QStringLiteral("索引状态…"));
     connect(status_action, &QAction::triggered, this, &MainWindow::showIndexStatus);
+
+    auto* update_log_action = tools_menu->addAction(QStringLiteral("索引更新日志…"));
+    connect(update_log_action, &QAction::triggered, this, &MainWindow::showIndexUpdateLog);
 
     auto* overview_action = tools_menu->addAction(QStringLiteral("设置总览…"));
     connect(overview_action, &QAction::triggered, this, &MainWindow::showSettingsOverview);

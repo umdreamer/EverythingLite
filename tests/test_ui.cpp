@@ -4,6 +4,7 @@
 #include "ui/result_presentation.h"
 #include "ui/search_worker.h"
 #include "ui/index_storage_dialog.h"
+#include "ui/index_update_journal.h"
 #include "ui/exclusion_settings_dialog.h"
 #include "core/index_manager.h"
 #include <QAction>
@@ -840,6 +841,42 @@ class UiTest : public QObject {
         window.runSearch();
         QCOMPARE(window.search_log_entries_.back().state, QStringLiteral("未执行"));
         QVERIFY(window.search_log_entries_.back().detail.contains(QStringLiteral("未索引")));
+    }
+    void indexUpdateLogShowsPendingHistoryAndIgnoresItsOwnFiles() {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        MainWindow window;
+        window.watcher_->stop();
+        window.index_journal_ = std::make_unique<IndexUpdateJournal>(temp.filePath(QStringLiteral("index-logs")));
+        const auto root = fixture_root;
+        const auto path = root + QStringLiteral("/synthetic-change");
+        window.reportSyncOutcome(root, path, false, QStringLiteral("synthetic incomplete scan"));
+        QCOMPARE(window.index_journal_->dates().size(), 1);
+        const auto today = QDate::currentDate();
+        const auto pending = window.index_journal_->read(today);
+        QCOMPARE(pending.size(), 1);
+        QCOMPARE(pending.front().kind, QStringLiteral("待更新"));
+        QCOMPARE(pending.front().path, path);
+        const auto log_file = QDir(window.index_journal_->directory()).filePath(
+            QStringLiteral("index-update-") + today.toString(Qt::ISODate) + QStringLiteral(".jsonl"));
+        window.scheduleFileEvent(FileEvent{log_file.toStdString(), false, {}});
+        QVERIFY(window.pending_paths_.isEmpty());
+        QVERIFY(!window.event_timer_->isActive());
+
+        window.showIndexUpdateLog();
+        auto* dialog = window.findChild<QDialog*>(QStringLiteral("indexUpdateLogDialog"));
+        QVERIFY(dialog);
+        auto* current = dialog->findChild<QPlainTextEdit*>(QStringLiteral("indexUpdateCurrent"));
+        auto* history = dialog->findChild<QPlainTextEdit*>(QStringLiteral("indexUpdateHistory"));
+        QVERIFY(current && history);
+        QVERIFY(current->toPlainText().contains(QStringLiteral("synthetic incomplete scan")));
+        QVERIFY(history->toPlainText().contains(QStringLiteral("待更新")));
+
+        window.reportSyncOutcome(root, path, false, {});
+        QCOMPARE(window.index_journal_->read(today).back().kind, QStringLiteral("恢复"));
+        QVERIFY(!current->toPlainText().contains(QStringLiteral("synthetic incomplete scan")));
+        QVERIFY(history->toPlainText().contains(QStringLiteral("恢复")));
+        dialog->close();
     }
     void unchangedFilesystemSyncDoesNotRepeatSearch() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

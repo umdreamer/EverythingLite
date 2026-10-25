@@ -60,23 +60,6 @@ git diff --cached
 
 ## 版本与发布
 
-每项新需求先分类并建立独立 GitHub Issue：一个 Bug 对应一条 Bug Issue，一个新增功能对应一条功能 Issue。Issue 需写现象或需求、预期行为、修复或实现方案及验收条件。优先修复 Bug，再开发新增功能；只有重大架构变化才调整大版本。一条 Issue 可以由 1 至 N 个小提交逐步完成；每个提交只关联一条 Issue，提交信息只出现该 Issue 的真实编号。一个提交应完成一个可独立审查和回退的最小改动，不为增加提交数量拆开不可运行的半成品。相关检查通过后提交；推送后核验提交与 Issue 的关联，再关闭已完成的 Issue。无法创建 Issue 时先保留本地草稿，不编造编号或关闭状态。此规则适用于后续提交；已推送的历史和版本标签不重写。流程跟踪见 [Issue #7](https://github.com/umdreamer/EverythingLite/issues/7)。
-
-开发前先把需求分别列为架构、功能、Bug，并与维护者确认目标版本。重大架构变化进入下一个 `x.0.0`，新增功能进入下一个 `x.y.0`，纯 Bug 修复进入下一个 `x.y.z`；混合需求先完成 Bug 版本，再规划功能或架构版本。产品版本从最新 `main` 建立 `release/vX.Y.Z` 分支，在每条 Issue 中写目标版本和分支链接。一个版本分支可包含多条同版本 Issue；一条 Issue 可包含多次小提交。只更改开发流程且不改变应用时，使用 `process/issue-N-主题` 分支，不增加应用版本号。
-
-每次提交只解决一条 Issue 的一个可验证小步骤。先运行对应测试用例，确认通过，再暂存和提交；失败时修复并重跑，不提交失败状态。提交消息必须只引用一个 Issue，并记录实际执行的测试命令和结果。仓库提供 `scripts/check_commit_policy.py` 与 `.githooks/commit-msg`；用 `git config core.hooksPath .githooks` 启用本地检查。示例：
-
-```text
-fix(mac): keep selected result after index update (refs #123)
-
-Tests: QT_QPA_PLATFORM=offscreen build/gui-debug/test_ui selectedResultRemainsVisible
-Test-Result: PASS
-```
-
-提交级证据是该提交的针对性测试用例、命令和通过结果。Issue 级证据覆盖该 Issue 的全部验收条件和必要回归，结果记在 Issue 评论中。分支级证据覆盖目标平台的完整 Debug 测试、构建及适用的打包检查，结果记在合并说明中。任一层级有相关测试未通过时，不提交、不关闭 Issue、不合并或发布。文档提交也需执行相应的文档检查；“未运行测试”不得记为 PASS。
-
-所有 Issue 完成且分支级测试通过后，核对分支只含目标版本内容，并审阅每条提交只关联一条 Issue。若 `main` 前进，先更新分支并重跑受影响测试。以快进合并保留原始细粒度提交，避免把多条 Issue 压成一个提交。核验远端 `main` 后按版本规则创建标签或 GitHub Release，随后删除已合并的远端和本地开发分支，并在 Issue 中记录最终结果。
-
-版本格式为 `x.y.z`：重大架构变化增加 `x`，新增功能增加 `y`，仅修复 Bug 增加 `z`。每次开发前与维护者确认分类。Bug 修复版本只创建并推送 Git 标签，不单独创建 GitHub Release；新增功能版本可以创建 Release。自上次维护 Release 后累计五个 Bug 修复标签，再统一创建一次维护 Release。版本变更应同步 `CMakeLists.txt`、README 和 CHANGELOG；需要 GitHub Release 时再编写发布说明。发布验证需区分核心自动测试、GUI 产物、人工交互、性能与独立分发检查。源码不存在的版本不得依据发布说明补造提交或标签。
+需求分类、版本选择、Issue/分支/提交关系、三级测试门槛及发布节奏以[开发流程规范](DEVELOPMENT_WORKFLOW.md)为准。构建和测试命令见本指南前文。版本变更应同步 `CMakeLists.txt`、README、CHANGELOG 和适用的打包标签；发布验证需分别记录核心自动测试、GUI 产物、人工交互、性能与独立分发检查。源码不存在的版本不得依据发布说明补造提交或标签。
 
 历史重写后应重新克隆，旧克隆的分支不可直接合并回新历史。普通后续开发不移动现有版本标签；隐私历史处理应由维护者统一协调，见 [隐私说明](PRIVACY.md)。

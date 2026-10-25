@@ -7,11 +7,24 @@ from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENTS = (ROOT / "CONTRIBUTING.md", ROOT / "docs" / "DEVELOPMENT.md")
+POLICY = ROOT / "docs" / "DEVELOPMENT_WORKFLOW.md"
+GUIDES = (ROOT / "CONTRIBUTING.md", ROOT / "docs" / "DEVELOPMENT.md")
+DOCUMENTS = (*GUIDES, POLICY)
 LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 
 
 class WorkflowDocsTest(unittest.TestCase):
+    def test_guides_link_to_canonical_policy(self):
+        for document in GUIDES:
+            with self.subTest(document=document.name):
+                targets = LINK.findall(document.read_text(encoding="utf-8"))
+                resolved = [
+                    (document.parent / unquote(target.split("#", 1)[0])).resolve()
+                    for target in targets
+                    if not target.startswith(("https://", "http://", "#"))
+                ]
+                self.assertIn(POLICY, resolved)
+
     def test_relative_document_links_exist(self):
         for document in DOCUMENTS:
             with self.subTest(document=document.name):

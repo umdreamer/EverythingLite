@@ -20,7 +20,7 @@ ctest --preset core-debug
 
 每项 Bug 或新增功能先建立独立 Issue，并在其中写明方案和验收条件。一条 Issue 可以对应多次提交；一个提交只能关联一条 Issue，提交信息只写该 Issue 的真实编号。每次提交完成一个小而可验证的改动，保持可审查和可回退。同步维护相关测试与文档；运行适当检查，审阅 `git diff` 和暂存内容，只暂存本次文件，再创建本地提交。提交使用真实身份与当前时间，不伪造作者或开发历史。检查类任务保持只读，不产生修改或提交。
 
-产品开发先确认架构、功能、Bug 分类及目标版本，从 `main` 创建 `release/vX.Y.Z` 分支。一个版本分支可包含多条 Issue，每条 Issue 可包含多次提交。每次提交前运行针对性测试，并在提交消息中写 `Tests:` 命令及 `Test-Result: PASS`；测试未通过时不得提交。Issue 完成时在 Issue 中记录验收结果；版本分支合并前运行适用的完整测试。启用本地提交检查：`git config core.hooksPath .githooks`。详细流程见[开发指南](docs/DEVELOPMENT.md)。
+产品开发先确认架构、功能、Bug 分类及目标版本，从 `main` 创建 `release/vX.Y.Z` 分支。提交、Issue 和分支分别通过对应测试后才能进入下一阶段。启用本地提交检查：`git config core.hooksPath .githooks`。完整规则见[开发流程规范](docs/DEVELOPMENT_WORKFLOW.md)，构建命令见[开发指南](docs/DEVELOPMENT.md)。
 
 Pull Request 应描述具体问题、修改后的行为、验证命令及结果，以及尚未验证的部分。涉及搜索策略时，应比较同一合成数据集上的匹配集合与分页行为，不能只比较速度。GUI 结果与 CLI 的比较还需对齐数据库、规范化查询、范围、Match Path、limit 和 offset。
 
@@ -28,4 +28,4 @@ Pull Request 应描述具体问题、修改后的行为、验证命令及结果�
 
 示例使用合成名称、通用相对路径或 `$HOME/示例`。不提交数据库、日志、构建产物、个人配置及归档资料，也不把原始诊断输出粘贴到 Issue。隐私检查范围包括文字、截图、提交消息、作者邮箱与旧 Git 历史，详见 [隐私说明](docs/PRIVACY.md)。
 
-版本变更应同步 CMake、README、CHANGELOG、发布说明和 Docker Compose 标签。源码版本缺失时只能说明证据边界，不能按发布说明生成所谓历史源码。远程推送、历史重写与正式发布应由维护者协调，普通贡献不能覆盖现有版本标签。
+版本变更应同步 CMake、README、CHANGELOG 和适用的 Docker Compose 标签；需要 GitHub Release 时再写发布说明。源码版本缺失时只能说明证据边界，不能按发布说明生成所谓历史源码。远程推送、历史重写与正式发布应由维护者协调，普通贡献不能覆盖现有版本标签。

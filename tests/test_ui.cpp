@@ -1363,22 +1363,30 @@ class UiTest : public QObject {
         window.include_hidden_check_->setChecked(true); window.runSearch();
         QTRY_COMPARE(window.model_->rowCount(),1);
     }
-    void paginationRefreshesChangedSnapshot() {
+    void paginationKeepsCurrentResultsUntilNextSearch() {
         MainWindow window; window.watcher_->stop();
         QCOMPARE(window.table_->horizontalHeader()->sortIndicatorOrder(),Qt::AscendingOrder);
         window.search_edit_->setText("item"); window.runSearch();
         QTRY_COMPARE(window.model_->rowCount(),1000); QTRY_VERIFY(!window.search_in_flight_);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("item0000.txt"));
+        window.table_->selectRow(0);
+        window.table_->setCurrentIndex(window.model_->index(0,0));
+        const auto old_size=window.model_->data(window.model_->index(0,2),Qt::UserRole).toULongLong();
         sqlite3* raw=nullptr; QCOMPARE(sqlite3_open(window.db_path_.toStdString().c_str(),&raw),SQLITE_OK);
         const auto changed=sqlite3_exec(raw,"UPDATE files SET size=size+1 WHERE name='item0000.txt'",nullptr,nullptr,nullptr);
         sqlite3_close(raw); QCOMPARE(changed,SQLITE_OK);
         window.loadMoreResults(); QTRY_VERIFY(!window.search_in_flight_);
-        QCOMPARE(window.model_->rowCount(),0);
-        QVERIFY(!window.results_have_more_); QVERIFY(window.search_timer_->isActive());
+        QCOMPARE(window.model_->rowCount(),1000);
+        QCOMPARE(window.table_->currentIndex().row(),0);
+        QCOMPARE(window.model_->data(window.model_->index(0,2),Qt::UserRole).toULongLong(),old_size);
+        QVERIFY(!window.results_have_more_); QVERIFY(!window.search_timer_->isActive());
         const auto rejectedId=window.search_request_id_;
-        QTest::qWait(100); QCOMPARE(window.search_request_id_,rejectedId);
-        QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(),1000,3000);
-        QVERIFY(window.search_request_id_>rejectedId);
+        QTest::qWait(900); QCOMPARE(window.search_request_id_,rejectedId);
+        QCOMPARE(window.model_->rowCount(),1000);
+        window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.model_->rowCount(),1000);
+        QCOMPARE(window.model_->data(window.model_->index(0,2),Qt::UserRole).toULongLong(),old_size+1);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("item0000.txt"));
         window.loadMoreResults(); QTRY_COMPARE(window.model_->rowCount(),1005);
         QVERIFY(!window.results_have_more_);

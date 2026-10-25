@@ -1148,12 +1148,15 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
                         self->search_timer_->start(kSearchIdleDelayMs);
                 }
             } else if (outcome->snapshot_changed) {
-                self->finishSearchLog(request_id, QStringLiteral("待重试"), QStringLiteral("索引版本已变化；可重新搜索"),
-                                      outcome->elapsed_ms, 0, 0);
+                self->finishSearchLog(request_id, append ? QStringLiteral("未追加") : QStringLiteral("待重试"),
+                                      append ? QStringLiteral("索引版本已变化；当前结果保留，后续主动搜索读取新索引")
+                                             : QStringLiteral("索引版本已变化；可重新搜索"),
+                                      outcome->elapsed_ms, 0, self->model_->rowCount());
                 self->resetPaging();
                 if (append) {
-                    self->model_->clearResults();
-                    self->search_timer_->start(kSearchIdleDelayMs);
+                    self->status_label_->setText(QStringLiteral("当前搜索结果已保留"));
+                    self->search_metrics_label_->setText(QStringLiteral("搜索结果 %1 条 · %2 ms")
+                        .arg(self->model_->rowCount()).arg(self->last_search_elapsed_ms_, 0, 'f', 1));
                 } else {
                     self->status_label_->setText(QStringLiteral("索引已变化；请重新搜索"));
                 }

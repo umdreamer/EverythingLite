@@ -1,4 +1,4 @@
-# 测试范围与验证记录（截至本地 0.4.16-fixbug）
+# 测试范围与验证记录（截至本地 0.4.17）
 
 ## 验证范围
 
@@ -11,6 +11,12 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.4.17 本地核验（2026-10-25）
+
+macOS GUI Debug 全套 CTest 25/25 通过。新增隔离 GUI 回归覆盖待更新范围及原因、应用重启后数据库中保留的未完成来源、后台索引变化不重跑搜索且保留选中行、用户重新搜索后显示新路径，以及双击文件和所在目录。Mac Release 构建生成 `EverythingLite.app` 与 `everything-lite-cli`；应用包数值版本为 0.4.17。测试未读取或改写日常索引，未对真实 NAS 或大索引做人工性能验收。
+
+本版本按 Bug 修复只打 Git 标签，不单独创建 GitHub Release。每日索引日志、日志清理及打开历史不属于 0.4.17。
 
 ## Mac 0.4.16-fixbug 本地核验（2026-10-24）
 

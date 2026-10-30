@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21.1)
-project(EverythingLite VERSION 0.5.1 LANGUAGES CXX)
+project(EverythingLite VERSION 0.5.2 LANGUAGES CXX)
 set(EVERYTHING_LITE_DISPLAY_VERSION "${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)

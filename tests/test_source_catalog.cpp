@@ -435,6 +435,7 @@ int main() {
     const auto permission_failure=protected_manager.rebuildRoot(protected_root.string());
     fs::permissions(protected_root/"denied",fs::perms::owner_all);
     assert(!permission_failure.completed && !permission_failure.error.empty());
+    assert(permission_failure.error.find((protected_root/"denied").string())!=std::string::npos);
     assert(permission_failure.partial_complete && permission_failure.removed==3);
     assert(protected_manager.database().source(protected_id).status==SourceStatus::Failed);
     assert(protected_manager.database().source(protected_id).last_success==last_complete);

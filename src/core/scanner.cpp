@@ -330,6 +330,11 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(!flush() || stopped())return stats;
         stats.partial_complete=!stats.protected_paths.empty();
         stats.completed=!stats.partial_complete;
+        if(stats.partial_complete) {
+            stats.error+=" at "+stats.protected_paths.front();
+            if(stats.protected_paths.size()>1)
+                stats.error+=" ("+std::to_string(stats.protected_paths.size())+" unreadable paths)";
+        }
     } catch(const std::exception& error){stats.error=error.what();}
       catch(...){stats.error="scan callback or directory check failed";}
     return stats;

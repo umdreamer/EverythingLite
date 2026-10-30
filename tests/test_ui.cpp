@@ -1037,6 +1037,29 @@ class UiTest : public QObject {
         window.runSearch();
         QTRY_COMPARE_WITH_TIMEOUT(window.model_->rowCount(), 2, 5000);
     }
+    void searchUsesOnlyConfiguredSourcesWithoutDeletingRetainedCache() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto active=dir.filePath(QStringLiteral("active"));
+        const auto retained=dir.filePath(QStringLiteral("retained"));
+        QVERIFY(QDir().mkpath(active)); QVERIFY(QDir().mkpath(retained));
+        for(const auto& root:{active,retained}) {
+            QFile file(root+QStringLiteral("/shared-needle.txt"));
+            QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        }
+        const auto db_path=dir.filePath(QStringLiteral("index.db"));
+        IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoots({active.toStdString(),retained.toStdString()}).completed);
+        auto settings=makeAppSettings(); settings.setValue("index/roots",QStringList{active});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        window.search_edit_->setText(QStringLiteral("shared-needle")); window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.model_->rowCount(),1);
+        QCOMPARE(window.model_->pathAt(0),active+QStringLiteral("/shared-needle.txt"));
+        QCOMPARE(manager.database().search("shared-needle").size(),std::size_t{2});
+        window.roots_.append(retained); window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),2);
+    }
     void ownIndexDatabaseEventsDoNotScheduleSync() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         const auto db_path = dir.filePath(QStringLiteral("index.db"));

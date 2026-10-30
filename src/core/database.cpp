@@ -729,6 +729,14 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         }
     }
     if (query.source_id) where.emplace_back("files.source_id = ?");
+    if (!query.source_roots.empty()) {
+        std::string placeholders;
+        for(std::size_t i=0;i<query.source_roots.size();++i) {
+            if(i)placeholders+=',';
+            placeholders+='?';
+        }
+        where.emplace_back("sources.root IN ("+placeholders+")");
+    }
     if (query.source_status) where.emplace_back("sources.status = ?");
     if (query.extension) where.emplace_back("files.ext = ? COLLATE NOCASE");
     if (query.path_term) {
@@ -832,6 +840,7 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         }
     }
     if (query.source_id) sqlite3_bind_int64(stmt.get(), bind_index++, *query.source_id);
+    for(const auto& root:query.source_roots)bindText(stmt.get(),bind_index++,root);
     if (query.source_status) sqlite3_bind_int(stmt.get(), bind_index++, static_cast<int>(*query.source_status));
     if (query.extension) bindText(stmt.get(), bind_index++, *query.extension);
     if (query.path_term) {

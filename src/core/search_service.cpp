@@ -31,13 +31,15 @@ std::vector<SearchResult> SearchService::search(const std::string& query,
     // The common/default case deliberately calls the exact same SearchEngine
     // string overload used by the CLI historically. This is the reference
     // behavior for GUI/CLI consistency.
-    if (options.scope == SearchItemScope::All && !options.match_path && !options.folder_scope && options.include_hidden) {
+    if (options.scope == SearchItemScope::All && !options.match_path && !options.folder_scope &&
+        options.include_hidden && options.source_roots.empty()) {
         auto results = engine_.search(query, limit, offset, cancellation);
         searchTrace("SearchService", "default branch result_count=" + std::to_string(results.size()));
         return results;
     }
 
     auto parsed = parseSearchQuery(query);
+    for(const auto& root:options.source_roots)parsed.source_roots.push_back(normalizePath(root));
     if (options.folder_scope) {
         if(options.folder_scope->empty() || !utf8ToPath(*options.folder_scope).is_absolute())
             throw std::invalid_argument("folder scope must be an absolute directory path");

@@ -980,7 +980,8 @@ QString MainWindow::currentSearchSignature() const {
         + QLatin1Char('\x1f') + QString::number(scope_combo_->currentIndex())
         + QLatin1Char('\x1f') + QString::number(match_path_check_->isChecked() ? 1 : 0)
         + QLatin1Char('\x1f') + QString::number(include_hidden_check_->isChecked() ? 1 : 0)
-        + QLatin1Char('\x1f') + folder_scope_;
+        + QLatin1Char('\x1f') + folder_scope_
+        + QLatin1Char('\x1f') + roots_.join(QLatin1Char('\x1e'));
 }
 
 void MainWindow::runSearch() {
@@ -1091,6 +1092,7 @@ void MainWindow::launchSearch(const QString& query, std::size_t offset, bool app
     options.match_path = match_path;
     options.include_hidden = include_hidden_check_->isChecked();
     if (!folder_scope.isEmpty()) options.folder_scope = toUtf8(folder_scope);
+    for(const auto& root:roots_)options.source_roots.push_back(toUtf8(root));
 
     active_search_cancellation_ = std::make_shared<std::atomic_bool>(false);
     const auto cancellation = active_search_cancellation_;

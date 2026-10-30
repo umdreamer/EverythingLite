@@ -10,6 +10,7 @@ namespace everything_lite {
 
 struct SearchQuery {
     std::optional<std::int64_t> source_id;
+    std::vector<std::string> source_roots;
     std::optional<SourceStatus> source_status;
     std::vector<std::string> terms;
     std::optional<std::string> extension;

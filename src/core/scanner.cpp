@@ -223,15 +223,21 @@ bool FileScanner::readSingle(const std::string& path,FileRecord& r,const Exclusi
 IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& callback,
     const std::atomic_bool* cancelled,const ExclusionPolicy* policy,const ScanBoundary* boundary) const {
     IndexStats stats;std::vector<FileRecord> batch;batch.reserve(batch_size_);
+    const auto scope=normalizePath(root);
     auto stopped=[&] {if(cancelled && cancelled->load()){stats.cancelled=true;return true;}return false;};
     auto fail=[&](const char* message){stats.error=message;return false;};
+    auto protect=[&](const std::string& path,const char* message) {
+        if(!boundary || !boundary->allow_partial || path==scope)return fail(message);
+        if(stats.error.empty())stats.error=message;
+        stats.protected_paths.push_back(path);
+        return true;
+    };
     auto flush=[&] {
         if(stopped())return false;if(batch.empty())return true;
         const auto count=batch.size();
         if(!callback(std::move(batch))){stats.cancelled=true;return false;}
         stats.indexed+=count;batch.clear();batch.reserve(batch_size_);return true;
     };
-    const auto scope=normalizePath(root);
     auto prune=[&](const std::string& path) {
         if(boundary)for(const auto& candidate:boundary->prune_roots)
             if(normalizePath(candidate)!=scope && pathIsWithin(path,candidate))return true;
@@ -259,7 +265,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         std::unique_ptr<Descriptor> root_fd;
         if(S_ISDIR(root_st.st_mode) || follow_root) {
             root_fd=std::make_unique<Descriptor>(open(scope.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|(follow_root?0:O_NOFOLLOW)));
-            if(root_fd->fd<0 && follow_root && !boundary && errno==ENOTDIR) {
+            if(root_fd->fd<0 && follow_root && errno==ENOTDIR) {
                 // Legacy file-link scope: enumerate the link itself, without
                 // obtaining its target's metadata or attempting file reads.
                 root_fd.reset();
@@ -275,23 +281,30 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(!append(scope,root_st,root_hidden))return stats;
         std::function<bool(int,const std::string&,bool)> walk=[&](int fd,const std::string& path,bool parent_hidden) {
             int copy=dup(fd);if(copy<0)return fail("unable to duplicate directory");
-            DIR* opened=fdopendir(copy);if(!opened){close(copy);return fail("unable to enumerate directory");}
+            DIR* opened=fdopendir(copy);if(!opened){close(copy);return protect(path,"unable to enumerate directory");}
             std::unique_ptr<DIR,int(*)(DIR*)> directory(opened,closedir);
             for(;;) {
                 if(stopped())return false;
                 errno=0;dirent* entry=readdir(opened);
-                if(!entry){if(errno)return fail("directory enumeration failed");break;}
+                if(!entry){if(errno)return protect(path,"directory enumeration failed");break;}
                 const std::string name=entry->d_name;if(name=="." || name=="..")continue;
                 const auto child=path=="/"?"/"+name:path+"/"+name;
                 // Whole subtree boundaries are applied before even metadata.
                 if(prune(child) || (entry->d_type==DT_DIR && policy && policy->excludes(child,true))){++stats.skipped;continue;}
                 struct stat st{};
-                if(!metadata(child) || fstatat(fd,name.c_str(),&st,AT_SYMLINK_NOFOLLOW)!=0)return fail("unable to read file metadata");
+                if(!metadata(child))return fail("directory metadata boundary check failed");
+                if(fstatat(fd,name.c_str(),&st,AT_SYMLINK_NOFOLLOW)!=0) {
+                    if(!protect(child,"unable to read file metadata"))return false;
+                    continue;
+                }
                 const bool child_hidden=parent_hidden || finderInvisible(child,st);
                 if(S_ISDIR(st.st_mode)) {
                     if(policy && policy->excludes(child,true)){++stats.skipped;continue;}
                     Descriptor nested(openat(fd,name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
-                    if(nested.fd<0)return fail("unable to open child directory");
+                    if(nested.fd<0) {
+                        if(!protect(child,"unable to open child directory"))return false;
+                        continue;
+                    }
                     struct stat held{};if(fstat(nested.fd,&held)!=0 || !sameDirectory(st,held))return fail("directory changed before entry");
                     const auto decision=enter(child,nested.fd);
                     if(decision==DirectoryDecision::Prune){++stats.skipped;continue;}
@@ -314,7 +327,9 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(root_fd && !(policy && !policy->indexAppBundleContents() &&
                         appBundleName(pathToUtf8(utf8ToPath(scope).filename()))) &&
            !walk(root_fd->fd,scope,root_hidden))return stats;
-        if(!flush() || stopped())return stats;stats.completed=true;
+        if(!flush() || stopped())return stats;
+        stats.partial_complete=!stats.protected_paths.empty();
+        stats.completed=!stats.partial_complete;
     } catch(const std::exception& error){stats.error=error.what();}
       catch(...){stats.error="scan callback or directory check failed";}
     return stats;

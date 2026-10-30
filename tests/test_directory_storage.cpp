@@ -185,6 +185,21 @@ static void hiddenCompact(const fs::path& base) {
     db.upsertBatch({hidden},root,0);
     assert(db.search(visible_only).size()==1);
 }
+static void partialCompact(const fs::path& base) {
+    const auto path=base/"partial.sqlite";Database db(path.string());db.initialize();
+    const std::string root="/synthetic/partial";const auto id=db.ensureSourceForRoot(root);
+    db.mergeSourceSnapshot(db.source(id),{file(root,".",true),file(root,"blocked",true),
+        file(root,"blocked/cached.txt"),file(root,"healthy",true),file(root,"healthy/gone.txt")});
+    optimize(path);
+    const auto success=db.source(id).last_success;
+    const std::vector<std::string> unreadable{root+"/blocked"};
+    const auto delta=db.mergeSourceSnapshot(db.source(id),{file(root,".",true),
+        file(root,"blocked",true),file(root,"healthy",true)},"",nullptr,&unreadable);
+    assert(delta.removed==1 && db.search("gone.txt").empty());
+    assert(db.search("cached.txt").size()==1);
+    assert(db.source(id).status==SourceStatus::Failed && db.source(id).last_success==success);
+    db.verifyNameSearchIndex();
+}
 static void setTrace(bool enabled) {
 #ifdef _WIN32
     _putenv_s("EVERYTHING_LITE_SEARCH_TRACE",enabled?"1":"0");
@@ -248,6 +263,6 @@ int main() {
 #if defined(__APPLE__)
     cancellationAfterVacuum(base);
 #endif
-    writeApis(base);hiddenCompact(base);performanceAndQueries(base);
+    writeApis(base);hiddenCompact(base);partialCompact(base);performanceAndQueries(base);
     fs::remove_all(base);std::cout<<"Directory storage guards passed\n";
 }

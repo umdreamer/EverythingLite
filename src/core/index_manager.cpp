@@ -43,6 +43,7 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
     if(expected.type==SourceType::Unknown && subtree_relative.empty())
         type_probe.emplace(beginSourceProbe(expected));
     ScanBoundary boundary; boundary.allow_root_symlink=subtree_relative.empty();
+    boundary.allow_partial=true;
     for(const auto& child:descendants) {
         if(pathIsWithin(scan_path,child.root)) {
             IndexStats stats; stats.error="scan scope belongs to nested source"; return stats;
@@ -57,13 +58,16 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
         snapshot.insert(snapshot.end(), std::make_move_iterator(batch.begin()), std::make_move_iterator(batch.end()));
         if (progress) progress(expected.root, reported);
         return !(cancelled && cancelled->load());
-    }, cancelled, &policy, boundary.prune_roots.empty()?nullptr:&boundary);
-    if (stats.completed && !(cancelled && cancelled->load())) {
+    }, cancelled, &policy, &boundary);
+    const bool snapshot_ready=(stats.completed || stats.partial_complete) && !(cancelled && cancelled->load());
+    if (snapshot_ready) {
         try {
-            const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative, &descendants);
+            const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative,
+                &descendants, stats.partial_complete ? &stats.protected_paths : nullptr);
             stats.removed = merged.removed;
             stats.changed = merged.changed;
-            if(type_probe) {
+            stats.indexed = merged.indexed;
+            if(type_probe && stats.completed) {
                 const auto before=type_probe->result(), after=type_probe->finish();
                 if((before.type==SourceType::Local || before.type==SourceType::NAS || before.type==SourceType::External) &&
                    before.type==after.type && !before.mount_fingerprint.empty() &&
@@ -85,9 +89,11 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
                 }
             }
         } catch (const std::exception& error) {
-            stats.completed = false; stats.error = error.what(); stats.indexed = 0;
+            stats.completed = false; stats.partial_complete = false;
+            stats.error = error.what(); stats.indexed = 0;
         }
-    } else {
+    }
+    if (!snapshot_ready) {
         stats.completed = false;
         stats.indexed = 0;
         if (cancelled && cancelled->load()) stats.cancelled = true;

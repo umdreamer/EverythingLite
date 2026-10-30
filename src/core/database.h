@@ -45,7 +45,8 @@ public:
     IndexStats mergeSourceSnapshot(const SourceRecord& expected,
                                   const std::vector<FileRecord>& records,
                                   const std::string& subtree_relative = {},
-                                  const std::vector<SourceRecord>* expected_descendants = nullptr) const;
+                                  const std::vector<SourceRecord>* expected_descendants = nullptr,
+                                  const std::vector<std::string>* unreadable_paths = nullptr) const;
     // Read-only staging SQLite: snapshot_metadata(complete=1), snapshot_files
     // columns follow FileRecord (path,parent_path,name,ext,root,size,
     // modified_time,is_dir,scan_generation,source_id,relative_path,cloud_copy).

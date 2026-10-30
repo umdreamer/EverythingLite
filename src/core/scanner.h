@@ -20,6 +20,9 @@ namespace everything_lite {
 enum class DirectoryDecision { Enter, Prune, Error };
 struct ScanBoundary {
     std::vector<std::string> prune_roots;
+    // IndexManager may reconcile fully enumerated siblings while retaining
+    // unreadable descendants. Snapshot helpers keep this disabled.
+    bool allow_partial = false;
     std::function<DirectoryDecision(const std::string&, int)> enter_directory;
     std::function<bool(const std::string&)> metadata_guard;
     // No boundary keeps legacy bound-root traversal; a configured subtree

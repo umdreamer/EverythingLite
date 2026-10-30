@@ -413,26 +413,44 @@ int main() {
     compat.upsertBatch({item},(base/"root").string(),2);
     assert(compat.deleteStaleForRoot((base/"root").string(),2)==0);
     assert(compat.totalFileCount()==1);
-    // Traversal permission failures preserve the complete previous snapshot.
+    // An unreadable child retains its cache while verified siblings and
+    // missing top-level children are reconciled.
     const auto protected_root=base/"protected";
     fs::create_directories(protected_root/"denied");
+    fs::create_directories(protected_root/"healthy");
+    fs::create_directories(protected_root/"obsolete");
     std::ofstream(protected_root/"denied"/"kept.txt")<<"kept";
+    std::ofstream(protected_root/"healthy"/"stale.txt")<<"stale";
+    std::ofstream(protected_root/"obsolete"/"old.txt")<<"old";
     IndexManager protected_manager((base/"protected.db").string());
     protected_manager.rebuildRoot(protected_root.string());
     const auto protected_count=protected_manager.database().totalFileCount();
+    const auto protected_id=protected_manager.database().sources().front().id;
+    const auto last_complete=protected_manager.database().source(protected_id).last_success;
 #if !defined(_WIN32)
     if(geteuid()!=0) {
+    fs::remove(protected_root/"healthy"/"stale.txt");
+    fs::remove_all(protected_root/"obsolete");
     fs::permissions(protected_root/"denied",fs::perms::none);
     const auto permission_failure=protected_manager.rebuildRoot(protected_root.string());
     fs::permissions(protected_root/"denied",fs::perms::owner_all);
     assert(!permission_failure.completed && !permission_failure.error.empty());
-    assert(protected_manager.database().totalFileCount()==protected_count);
+    assert(permission_failure.partial_complete && permission_failure.removed==3);
+    assert(protected_manager.database().source(protected_id).status==SourceStatus::Failed);
+    assert(protected_manager.database().source(protected_id).last_success==last_complete);
+    assert(protected_manager.database().search("stale.txt").empty());
+    assert(protected_manager.database().search("old.txt").empty());
+    assert(protected_manager.database().search("kept.txt").size()==1);
+    assert(protected_manager.database().totalFileCount()==protected_count-3);
     fs::permissions(protected_root/"denied",fs::perms::none);
     const auto event_failure=protected_manager.applyPathChange(protected_root.string(),(protected_root/"denied").string());
     fs::permissions(protected_root/"denied",fs::perms::owner_all);
-    assert(!event_failure.completed && protected_manager.database().totalFileCount()==protected_count);
+    assert(!event_failure.completed && protected_manager.database().totalFileCount()==protected_count-3);
+    assert(protected_manager.rebuildRoot(protected_root.string()).completed);
+    assert(protected_manager.database().source(protected_id).status==SourceStatus::Accessible);
     } else std::cout << "permission-denied checks skipped for privileged user; traversal failure checked independently\n";
 #endif
+    const auto protected_after=protected_manager.database().totalFileCount();
     // Removing the scan root after its first callback deterministically fails
     // directory iteration, including in privileged Linux containers.
     FileScanner changing(1);
@@ -440,7 +458,7 @@ int main() {
         fs::rename(protected_root,base/"moved-protected"); return true;
     });
     assert(!interrupted.completed && !interrupted.error.empty());
-    assert(protected_manager.database().totalFileCount()==protected_count);
+    assert(protected_manager.database().totalFileCount()==protected_after);
     fs::rename(base/"moved-protected",protected_root);
     // Atomic implicit-source creation must not create path ambiguity.
     Database concurrent((base/"concurrent.db").string()); concurrent.initialize();

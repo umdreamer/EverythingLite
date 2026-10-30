@@ -473,8 +473,14 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
                          const std::string& scope,
                          const std::function<void(sqlite3*)>& admission={},
                          const ExclusionPolicy* captured_policy=nullptr,
-                         const std::vector<std::string>* protected_scopes=nullptr) {
+                         const std::vector<std::string>* protected_scopes=nullptr,
+                         bool partial=false) {
     validateScope(scope);
+    if(protected_scopes)for(const auto& protected_scope:*protected_scopes) {
+        validateScope(protected_scope);
+        if(protected_scope==scope)
+            throw std::invalid_argument("invalid protected snapshot scope");
+    }
     // Snapshot membership grows with the source. Keep its temporary B-tree on
     // disk, while the record transfer remains bounded to batches of 1000.
     conn.exec("PRAGMA temp_store=FILE;");
@@ -501,6 +507,8 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
                 if(record.source_id!=0 && record.source_id!=s.id) throw std::invalid_argument("wrong source record");
                 if(!record.relative_path.empty() && record.relative_path!=relative) throw std::invalid_argument("relative path mismatch");
                 if(!relativeWithin(relative,scope)) throw std::invalid_argument("record outside snapshot scope");
+                if(protected_scopes && std::any_of(protected_scopes->begin(),protected_scopes->end(),
+                    [&](const std::string& protected_scope){return relativeWithin(relative,protected_scope);}))continue;
                 if(policy.excludes(record.path,record.is_directory)) continue;
                 accepted.push_back(record);
                 sqlite3_reset(keys.get()); sqlite3_clear_bindings(keys.get());
@@ -572,12 +580,13 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             removeMissing("DELETE FROM files WHERE source_id=? AND relative_path=?"+missing,{scope});
             removeMissing("DELETE FROM files WHERE source_id=? AND relative_path>=? AND relative_path<?"+missing,{scope+"/",scope+"0"});
         }
-        auto update=prepare(conn.get(),full ?
+        auto update=prepare(conn.get(),partial ?
+            "UPDATE sources SET status=3,last_check=strftime('%s','now'),revision=revision+1 WHERE id=?" : full ?
             "UPDATE sources SET status=0,last_check=strftime('%s','now'),last_success=strftime('%s','now'),revision=revision+1 WHERE id=?" :
             "UPDATE sources SET last_check=strftime('%s','now'),revision=revision+1 WHERE id=?");
         sqlite3_bind_int64(update.get(),1,s.id);
         if(sqlite3_step(update.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
-        if(full) {
+        if(full && !partial) {
             auto root=prepare(conn.get(),"INSERT INTO roots(root,generation,last_scan_time,file_count) VALUES(?,0,strftime('%s','now'),?) ON CONFLICT(root) DO UPDATE SET last_scan_time=excluded.last_scan_time,file_count=excluded.file_count");
             bindText(root.get(),1,s.root); sqlite3_bind_int64(root.get(),2,count+retained_count);
             if(sqlite3_step(root.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
@@ -587,7 +596,8 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             if(compact)conn.exec("INSERT INTO files_name_fts(files_name_fts,rank) VALUES('integrity-check',1);");
             installFtsTriggers(conn); setMetadataFlag(conn.get(),"name_fts_ready",true);
         }
-        stats.changed = content_changed || stats.removed > 0 || (full && s.status != SourceStatus::Accessible);
+        stats.changed = content_changed || stats.removed > 0 ||
+            (partial && s.status != SourceStatus::Failed) || (full && !partial && s.status != SourceStatus::Accessible);
         conn.exec("COMMIT;"); return stats;
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
@@ -1203,8 +1213,11 @@ SourceOwnershipSnapshot Database::captureSourceDescendants(const SourceRecord& e
 IndexStats Database::mergeSourceSnapshot(const SourceRecord& expected,
                                         const std::vector<FileRecord>& records,
                                         const std::string& subtree_relative,
-                                        const std::vector<SourceRecord>* expected_descendants) const {
+                                        const std::vector<SourceRecord>* expected_descendants,
+                                        const std::vector<std::string>* unreadable_paths) const {
     std::vector<std::string> protected_scopes;
+    if(unreadable_paths)for(const auto& path:*unreadable_paths)
+        protected_scopes.push_back(relativeTo(path,expected.root));
     if(expected_descendants)for(const auto& child:*expected_descendants)
         if(!ownsSuccessfulSnapshot(child))protected_scopes.push_back(relativeTo(child.root,expected.root));
     SqliteConnection conn(db_path_); std::size_t offset=0;
@@ -1226,7 +1239,8 @@ IndexStats Database::mergeSourceSnapshot(const SourceRecord& expected,
             normalizePath(pathToUtf8(utf8ToPath(expected.root)/utf8ToPath(subtree_relative)));
         for(const auto& child:*expected_descendants)
             if(pathIsWithin(scope,child.root))throw std::invalid_argument("scan scope belongs to nested source");
-    },nullptr,expected_descendants?&protected_scopes:nullptr);
+    },nullptr,(expected_descendants || unreadable_paths)?&protected_scopes:nullptr,
+       unreadable_paths && !unreadable_paths->empty());
 }
 IndexStats Database::mergeSourceSnapshotFile(const SourceRecord& expected,
                                             const std::string& snapshot_database,

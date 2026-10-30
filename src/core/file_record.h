@@ -3,6 +3,7 @@
 #include "core/source_catalog.h"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace everything_lite {
 
@@ -41,9 +42,11 @@ struct SearchResult {
 
 struct IndexStats {
     bool completed = false;
+    bool partial_complete = false;
     bool cancelled = false;
     bool changed = false;
     std::string error;
+    std::vector<std::string> protected_paths;
     std::uint64_t scanned = 0;
     std::uint64_t indexed = 0;
     std::uint64_t skipped = 0;

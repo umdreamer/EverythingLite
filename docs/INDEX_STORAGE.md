@@ -75,3 +75,7 @@ Core API 支持通过 atomic_bool 取消，覆盖分批备份、SQLite 锁等待
 - [SQLite — VACUUM](https://www.sqlite.org/lang_vacuum.html)
 - [SQLite — Online Backup API](https://www.sqlite.org/backup.html)
 - [SQLite — FTS5 Extension](https://www.sqlite.org/fts5.html)
+
+## 周期更新队列
+
+0.6.0 将待更新范围保存在活动索引旁的 `<数据库文件名>.deferred.sqlite`，SQLite 可能生成 `-wal`、`-shm` 或 `-journal` 辅助文件。它只保存来源、路径、截止时间与代次，不是文件索引副本，也不保存搜索关键词。普通启动不重建已有文件索引；完成对应代次后才清理队列项。数据与存储页显示实际位置，更新策略页可查看计划范围。

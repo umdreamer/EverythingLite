@@ -1,4 +1,14 @@
-# 测试范围与验证记录（截至 0.5.5）
+# 测试范围与验证记录（截至 0.6.0）
+
+## Mac 0.6.0 发布核验（2026-11-01）
+
+最终版本号下 Core Debug 全套 CTest 22/22、GUI Debug 全套 CTest 29/29 通过。执行 `cmake --preset core-debug`、`cmake --build --preset core-debug --parallel 4`、`ctest --preset core-debug`；GUI 使用 `cmake --preset gui-debug -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase)"`、`cmake --build --preset gui-debug --parallel 4`、`QT_QPA_PLATFORM=offscreen ctest --preset gui-debug`。两套测试顺序执行。升版期间一次检查发现源码版本与尚未重建的应用包不一致；重建后的整套回归通过。
+
+分级更新回归覆盖实时与周期范围、祖先事件、有限删除核对、覆盖规则、持久队列、代次确认、重启恢复、多个连接、并发事件合并、失败保留及显式完整扫描。新隐藏范围误删缓存和保留项来源计数偏少均先复现失败，再验证修复；传统与紧凑索引使用同一组保护测试。Finder 隐藏属性使用合成文件真实设置 `UF_HIDDEN`。
+
+统一设置回归覆盖菜单定位、设置保存与重启、空目录、活动目录与历史缓存、旧编辑状态保护、排除重复保存、长状态文本、隐藏日志页不重复读取及保存更新策略不在 GUI 线程执行全库文件计数。保存后当前查询和选择保持。最终设置截图使用合成数据生成并检查布局。
+
+`BUILD_DIR=build-macos ./scripts/build-macos.sh` 成功生成 `EverythingLite.app` 与 `everything-lite-cli`，应用包短版本和构建版本均为 0.6.0。独立合成数据库的 CLI 索引、指定文件夹搜索及三秒 offscreen GUI 启动检查通过。真实用户索引与设置未用于测试；未验收真实大索引性能、NAS/外设现场、Linux 桌面、中文输入法人工操作或独立 Qt 依赖部署、签名和公证。Release 构建不代替 Debug 断言测试。
 
 ## 验证范围
 

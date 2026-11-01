@@ -7,6 +7,7 @@
 #include "ui/index_storage_dialog.h"
 #include "ui/index_update_journal.h"
 #include "ui/exclusion_settings_dialog.h"
+#include "ui/root_settings_dialog.h"
 #include "core/index_manager.h"
 #include <QAction>
 #include <QAbstractButton>
@@ -43,6 +44,8 @@
 #include <QSemaphore>
 #include <QSettings>
 #include <QTableView>
+#include <QTableWidget>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QElapsedTimer>
@@ -140,10 +143,42 @@ class UiTest : public QObject {
         QVERIFY(report.contains(QStringLiteral("数据库")));
         QVERIFY(report.contains(QStringLiteral("偏好设置文件")));
     }
+    void indexSettingsExposePeriodicIntervalAndOverrides() {
+        RootSettingsDialog dialog({fixture_root});
+        auto* interval=dialog.findChild<QSpinBox*>("periodicMinutes");
+        auto* rules=dialog.findChild<QTableWidget*>("updateRules");
+        QVERIFY(interval); QVERIFY(rules);
+        QCOMPARE(interval->value(),15);
+    }
+    void periodicSettingsPersistAcrossWindows() {
+        MainWindow window; window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
+            auto* interval=dialog->findChild<QSpinBox*>("periodicMinutes"); QVERIFY(interval); interval->setValue(60);
+            auto* rules=dialog->findChild<QTableWidget*>("updateRules"); QVERIFY(rules);
+            rules->insertRow(0);rules->setItem(0,0,new QTableWidgetItem(fixture_root+"/.cache/important"));
+            auto* mode=new QComboBox(rules);mode->addItems({QStringLiteral("实时"),QStringLiteral("周期")});
+            rules->setCellWidget(0,1,mode);dialog->accept();
+        });
+        window.editRoots();window.watcher_->stop();
+        auto settings=makeAppSettings();QCOMPARE(settings.value("index/periodicMinutes").toInt(),60);
+        QCOMPARE(settings.beginReadArray("index/updateRules"),1);
+        settings.setArrayIndex(0);QCOMPARE(settings.value("path").toString(),fixture_root+"/.cache/important");
+        QCOMPARE(settings.value("cadence").toInt(),0);settings.endArray();
+        MainWindow reopened;reopened.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
+            QCOMPARE(dialog->findChild<QSpinBox*>("periodicMinutes")->value(),60);
+            QCOMPARE(dialog->findChild<QTableWidget*>("updateRules")->rowCount(),1);dialog->reject();
+        });
+        reopened.editRoots();
+    }
     void init() {
         auto settings = makeAppSettings();
         settings.setValue("index/syncRetryBaseMs", 1500);
         settings.setValue("index/roots", QStringList{fixture_root});
+        settings.remove("index/periodicMinutes");
+        settings.remove("index/updateRules");
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
         settings.setValue("search/includeHidden", true);

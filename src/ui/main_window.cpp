@@ -735,6 +735,17 @@ void MainWindow::loadSettings() {
         && log_retention_days_ != 90 && log_retention_days_ != 365) log_retention_days_ = 0;
     roots_ = settings.value(QStringLiteral("index/roots")).toStringList();
     if (roots_.isEmpty()) roots_ = defaultRoots();
+    periodic_minutes_=std::clamp(settings.value(QStringLiteral("index/periodicMinutes"),15).toInt(),1,10080);
+    update_rules_.clear();QSet<QString> seen_rules;
+    const int rule_count=settings.beginReadArray(QStringLiteral("index/updateRules"));
+    for(int i=0;i<rule_count;++i) {
+        settings.setArrayIndex(i);
+        const auto path=QDir::cleanPath(settings.value(QStringLiteral("path")).toString());
+        const int mode=settings.value(QStringLiteral("cadence"),0).toInt();
+        if(!QDir::isAbsolutePath(path) || seen_rules.contains(path) || (mode!=0 && mode!=1))continue;
+        seen_rules.insert(path);update_rules_.push_back({toUtf8(path),mode==1?UpdateCadence::Periodic:UpdateCadence::Realtime});
+    }
+    settings.endArray();
     scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
     match_path_check_->setChecked(settings.value(QStringLiteral("search/matchPath"), false).toBool());
     include_hidden_check_->setChecked(settings.value(QStringLiteral("search/includeHidden"), true).toBool());
@@ -770,6 +781,13 @@ void MainWindow::loadSettings() {
 void MainWindow::saveSettings() {
     auto settings = makeAppSettings();
     settings.setValue(QStringLiteral("index/roots"), roots_);
+    settings.setValue(QStringLiteral("index/periodicMinutes"),periodic_minutes_);
+    settings.beginWriteArray(QStringLiteral("index/updateRules"),static_cast<int>(update_rules_.size()));
+    for(int i=0;i<static_cast<int>(update_rules_.size());++i) {
+        settings.setArrayIndex(i);settings.setValue(QStringLiteral("path"),fromUtf8(update_rules_[i].path));
+        settings.setValue(QStringLiteral("cadence"),update_rules_[i].cadence==UpdateCadence::Periodic?1:0);
+    }
+    settings.endArray();
     settings.setValue(QStringLiteral("logs/retentionDays"), log_retention_days_);
     settings.setValue(QStringLiteral("search/itemScope"), scope_combo_->currentIndex());
     settings.setValue(QStringLiteral("search/matchPath"), match_path_check_->isChecked());
@@ -1513,9 +1531,10 @@ void MainWindow::rebuildIndex() {
 
 void MainWindow::editRoots() {
     if(storage_maintenance_){status_label_->setText(QStringLiteral("索引维护进行中；完成后可修改索引目录。"));return;}
-    RootSettingsDialog dialog(roots_, this);
+    RootSettingsDialog dialog(roots_, this, periodic_minutes_, update_rules_);
     if (dialog.exec() != QDialog::Accepted) return;
     roots_ = dialog.roots();
+    periodic_minutes_=dialog.periodicMinutes();update_rules_=dialog.updateRules();
     saveSettings();
     updateScopeLabel();
     restartWatcher();

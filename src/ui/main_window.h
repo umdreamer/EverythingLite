@@ -1,4 +1,5 @@
 #pragma once
+#include "core/update_policy.h"
 
 #include "core/file_record.h"
 #include "platform/file_watcher.h"
@@ -113,6 +114,8 @@ private:
 
     QString db_path_;
     QStringList roots_;
+    int periodic_minutes_=15;
+    std::vector<UpdateRule> update_rules_;
     std::unique_ptr<FileWatcher> watcher_;
     SearchWorker* search_worker_ = nullptr;
     QThread* search_thread_ = nullptr;

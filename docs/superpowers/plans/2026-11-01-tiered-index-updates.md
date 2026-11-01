@@ -27,14 +27,18 @@
 
 **Files:** `src/ui/root_settings_dialog.*`, `src/ui/main_window.*`, `src/ui/main_window_sync.cpp`, `src/core/deferred_updates.*`, `tests/test_ui.cpp`.
 
-- [ ] Add interval control and editable/selectable directory overrides; validate normalized absolute paths and persist settings.
-- [ ] Classify events without blocking the GUI on remote metadata; write periodic paths to the persistent queue, ignore only exact application-owned paths, and process ordinary events through the current realtime queue.
-- [ ] Dispatch due generations on the existing worker; acknowledge only after successful processing. Preserve generations on failure and coalesce event storms without losing changes. Recover pending generations on restart and coordinate separate windows.
-- [ ] Use tests with isolated directories and short controlled deadlines to cover realtime, delayed and overridden paths, failure, repeated events during a scan, multiple windows, restart, overflow and manual rebuild. Verify no background update replaces current results.
+- [x] Add interval control and editable/selectable directory overrides; validate normalized absolute paths and persist settings.
+- [x] Classify events without blocking the GUI on remote metadata; write periodic paths to the persistent queue, ignore only exact application-owned paths, and process ordinary events through the current realtime queue.
+- [x] Dispatch due generations on the existing worker; acknowledge only after successful processing. Preserve generations on failure and coalesce event storms without losing changes. Recover pending generations on restart and coordinate separate windows.
+- [x] Use tests with isolated directories and short controlled deadlines to cover realtime, delayed and overridden paths, failure, repeated events during a scan, multiple windows, restart, overflow and manual rebuild. Verify no background update replaces current results.
 
 ### 4. Delivery
 
 **Files:** `CMakeLists.txt`, `README.md`, `CHANGELOG.md`, relevant `docs/` and tests.
 
-- [ ] Update version and documentation after implementation; run complete Core Debug and GUI Debug CTest suites and Mac build. Check each commit contains one Issue and actual test results.
-- [ ] Inspect privacy-sensitive diff, merge the version branch, push the feature release and verify remote artifacts. Close Issue #16 only after the tested version is delivered.
+- [x] Update version and documentation after implementation; run complete Core Debug and GUI Debug CTest suites and Mac build. Check each commit contains one Issue and actual test results.
+Delivery gate: inspect the privacy-sensitive diff, merge the version branch, push the feature release and verify remote artifacts. Record delivery evidence and closure in Issue #16 after remote verification; the Issue is the authoritative delivery record.
+
+## Verification record
+
+Core Debug 22/22 and GUI Debug 29/29 passed with version 0.6.0. The Mac Release bundle and isolated CLI/GUI startup smoke checks passed. New hidden-scope deletion and retained-row count regressions were reproduced before correction; legacy and directory storage formats are covered. Tests did not use the daily user index or a live NAS. Final commands and limits are recorded in `docs/TEST_REPORT.md`.

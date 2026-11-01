@@ -1077,6 +1077,10 @@ class UiTest : public QObject {
         QCOMPARE(window.model_->rowCount(),1);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("nested-needle.txt"));
         QCOMPARE(manager.database().search("needle").size(),std::size_t{2});
+        QFile added(child+"/fresh-nested.txt"); QVERIFY(added.open(QIODevice::WriteOnly)); added.close();
+        window.rebuildIndex(); QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        window.search_edit_->setText("fresh-nested"); window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_); QCOMPARE(window.model_->rowCount(),1);
     }
     void ownIndexDatabaseEventsDoNotScheduleSync() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

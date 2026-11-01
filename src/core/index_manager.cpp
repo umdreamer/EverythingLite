@@ -15,6 +15,22 @@
 
 namespace everything_lite {
 
+namespace {
+bool sameVolumeLegacyChild(const std::string& parent,const SourceRecord& child) {
+#if !defined(_WIN32)
+    struct stat parent_stat{},child_stat{};
+    return child.status!=SourceStatus::Offline &&
+        (child.type==SourceType::Local || child.type==SourceType::Unknown) &&
+        child.identity.empty() && child.mount_fingerprint.empty() &&
+        lstat(parent.c_str(),&parent_stat)==0 && S_ISDIR(parent_stat.st_mode) &&
+        lstat(child.root.c_str(),&child_stat)==0 && S_ISDIR(child_stat.st_mode) &&
+        parent_stat.st_dev==child_stat.st_dev;
+#else
+    (void)parent;(void)child;return false;
+#endif
+}
+}
+
 IndexManager::IndexManager(std::string db_path) : database_(std::move(db_path)), scanner_(1000) {
     database_.initialize();
 }
@@ -137,6 +153,17 @@ IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
         if (!seen.insert(normalized).second) continue;
         configured.emplace_back(normalized,database_.ensureSourceForRoot(normalized));
     }
+    const auto explicitly_configured=configured;
+    const auto sources=database_.sources();
+    for(const auto& source:sources) {
+        if(seen.count(source.root))continue;
+        if(std::count_if(sources.begin(),sources.end(),[&](const auto& other){return other.root==source.root;})!=1)continue;
+        for(const auto& parent:explicitly_configured) {
+            if(pathIsWithin(source.root,parent.first) && sameVolumeLegacyChild(parent.first,source)) {
+                seen.insert(source.root);configured.emplace_back(source.root,source.id);break;
+            }
+        }
+    }
     // Register the complete ownership topology before any traversal. Children
     // establish their snapshots first, so one rebuild can retire old overlaps.
     std::stable_sort(configured.begin(),configured.end(),[](const auto& left,const auto& right) {
@@ -144,7 +171,9 @@ IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
     });
     for(const auto& entry:configured) {
         if (cancelled && cancelled->load()) { total.completed = false; total.cancelled = true; break; }
-        const auto stats = rebuildSource(entry.second, progress, cancelled);
+        const auto already_scanned=total.scanned;
+        const auto stats = rebuildSource(entry.second, progress ? ProgressCallback(
+            [&](const std::string& root,std::uint64_t count){progress(root,already_scanned+count);}) : ProgressCallback{}, cancelled);
         total.scanned += stats.scanned; total.indexed += stats.indexed;
         total.skipped += stats.skipped; total.removed += stats.removed;
         total.changed = total.changed || stats.changed;
@@ -179,16 +208,8 @@ IndexStats IndexManager::applyPathChange(const std::string& root, const std::str
             if(!owner || child.root.size()>owner->root.size())owner=child;
         }
         if(owner) {
-#if !defined(_WIN32)
-            struct stat parent_stat{},child_stat{};
-            if(owner->status!=SourceStatus::Offline &&
-               (owner->type==SourceType::Local || owner->type==SourceType::Unknown) &&
-               owner->identity.empty() && owner->mount_fingerprint.empty() &&
-               lstat(normalized_root.c_str(),&parent_stat)==0 && S_ISDIR(parent_stat.st_mode) &&
-               lstat(owner->root.c_str(),&child_stat)==0 && S_ISDIR(child_stat.st_mode) &&
-               parent_stat.st_dev==child_stat.st_dev)
+            if(sameVolumeLegacyChild(normalized_root,*owner))
                 return applyPathChange(owner->root,scan_path);
-#endif
             IndexStats stats; stats.error="scan scope belongs to nested source requiring verification"; return stats;
         }
     } catch(const std::exception& error) { IndexStats stats; stats.error=error.what(); return stats; }

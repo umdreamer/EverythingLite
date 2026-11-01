@@ -218,6 +218,12 @@ static void nestedSourceOwnership(const fs::path& base) {
     assert(db.search("unverified-event").empty());
     fs::remove(child/"unverified-event.txt");
     network_child=db.source(child_id);network_child.type=SourceType::Local;db.saveSource(network_child);
+    std::ofstream(child/"nested-rebuild.txt")<<"new";
+    assert(manager.rebuildRoots({parent.string()}).completed);
+    assert(db.search("nested-rebuild").size()==1 && sourceRows(db,parent_id).size()==2);
+    fs::remove(child/"nested-rebuild.txt");
+    assert(manager.rebuildRoots({parent.string()}).completed);
+    assert(db.search("nested-rebuild").empty());
 #if !defined(_WIN32)
     if(geteuid()!=0) {
         fs::permissions(child,fs::perms::none);

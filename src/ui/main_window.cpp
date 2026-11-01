@@ -1488,7 +1488,7 @@ void MainWindow::rebuildIndex() {
             const auto& root=configured.at(i);
             QString error;
             try {
-                const auto stats = manager.rebuildRoot(toUtf8(root), [scanned,completed_scanned](const std::string&, std::uint64_t count) {
+                const auto stats = manager.rebuildRoots({toUtf8(root)}, [scanned,completed_scanned](const std::string&, std::uint64_t count) {
                     scanned->store(completed_scanned+count,std::memory_order_relaxed);
                 });
                 completed_scanned+=stats.scanned;

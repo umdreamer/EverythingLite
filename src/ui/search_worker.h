@@ -48,6 +48,7 @@ private:
     std::function<std::uint64_t()> revision_reader_;
     std::unique_ptr<SearchService> service_;
     std::unique_ptr<SearchRevision> revision_;
+    std::optional<SearchOptions> paging_options_;
 };
 
 } // namespace everything_lite

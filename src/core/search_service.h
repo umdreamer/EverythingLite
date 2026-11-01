@@ -24,6 +24,7 @@ struct SearchOptions {
     std::optional<std::string> folder_scope;
     // GUI configured sources. Empty keeps the CLI/library default of all sources.
     std::vector<std::string> source_roots;
+    bool source_roots_resolved = false;
 };
 
 // The single application-level search entry point used by both CLI and GUI.
@@ -32,6 +33,7 @@ struct SearchOptions {
 class SearchService {
 public:
     explicit SearchService(std::string db_path);
+    SearchOptions resolveOptions(const SearchOptions& options) const;
 
     std::vector<SearchResult> search(const std::string& query,
                                      std::size_t limit = 500,

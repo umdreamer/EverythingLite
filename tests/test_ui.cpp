@@ -1082,6 +1082,22 @@ class UiTest : public QObject {
         window.search_edit_->setText("fresh-nested"); window.runSearch();
         QTRY_VERIFY(!window.search_in_flight_); QCOMPARE(window.model_->rowCount(),1);
     }
+    void nestedSourceAvailabilityStaysFixedDuringPagination() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), child=root+"/child";
+        QVERIFY(QDir().mkpath(child));
+        for(const auto& name:{"page-needle-a.txt","page-needle-b.txt"}) {
+            QFile file(child+"/"+name); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        }
+        const auto db_path=dir.filePath("index.db"); IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoots({root.toStdString(),child.toStdString()}).completed);
+        SearchWorker worker(db_path.toStdString()); SearchOptions options; options.source_roots={root.toStdString()};
+        auto first=worker.search("page-needle",1,0,options); QCOMPARE(first.results.size(),std::size_t{1}); QVERIFY(first.revision);
+        QVERIFY(QDir().rename(child,dir.filePath("offline")));
+        auto next=worker.search("page-needle",1,1,options,nullptr,first.revision);
+        QCOMPARE(next.results.size(),std::size_t{1}); QVERIFY(!next.snapshot_changed);
+        auto fresh=worker.search("page-needle",1,0,options); QVERIFY(fresh.results.empty());
+    }
     void ownIndexDatabaseEventsDoNotScheduleSync() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         const auto db_path = dir.filePath(QStringLiteral("index.db"));

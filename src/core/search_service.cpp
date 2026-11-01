@@ -14,6 +14,26 @@ namespace everything_lite {
 
 SearchService::SearchService(std::string db_path) : db_path_(db_path), engine_(std::move(db_path)) {}
 
+SearchOptions SearchService::resolveOptions(const SearchOptions& options) const {
+    if(options.source_roots_resolved)return options;
+    auto resolved=options;
+    for(auto& root:resolved.source_roots)root=normalizePath(root);
+    if(!resolved.source_roots.empty()) {
+        const auto configured=resolved.source_roots;
+        for(const auto& source:Database(db_path_).sources()) {
+            if(source.status==SourceStatus::Offline ||
+               std::find(configured.begin(),configured.end(),source.root)!=configured.end())continue;
+            if(!std::any_of(configured.begin(),configured.end(),[&](const auto& root){return pathIsWithin(source.root,root);}))continue;
+            std::error_code ec;
+            const bool present=std::filesystem::exists(utf8ToPath(source.root),ec);
+            if(present || (ec && ec!=std::errc::no_such_file_or_directory && ec!=std::errc::not_a_directory))
+                resolved.source_roots.push_back(source.root);
+        }
+    }
+    resolved.source_roots_resolved=true;
+    return resolved;
+}
+
 std::vector<SearchResult> SearchService::search(const std::string& query,
                                                  std::size_t limit,
                                                  std::size_t offset,
@@ -42,19 +62,7 @@ std::vector<SearchResult> SearchService::search(const std::string& query,
     }
 
     auto parsed = parseSearchQuery(query);
-    for(const auto& root:options.source_roots)parsed.source_roots.push_back(normalizePath(root));
-    if(!parsed.source_roots.empty()) {
-        const auto configured=parsed.source_roots;
-        for(const auto& source:Database(db_path_).sources()) {
-            if(source.status==SourceStatus::Offline ||
-               std::find(configured.begin(),configured.end(),source.root)!=configured.end())continue;
-            if(!std::any_of(configured.begin(),configured.end(),[&](const auto& root){return pathIsWithin(source.root,root);}))continue;
-            std::error_code ec;
-            const bool present=std::filesystem::exists(utf8ToPath(source.root),ec);
-            if(present || (ec && ec!=std::errc::no_such_file_or_directory && ec!=std::errc::not_a_directory))
-                parsed.source_roots.push_back(source.root);
-        }
-    }
+    parsed.source_roots=resolveOptions(options).source_roots;
     if (options.folder_scope) {
         if(options.folder_scope->empty() || !utf8ToPath(*options.folder_scope).is_absolute())
             throw std::invalid_argument("folder scope must be an absolute directory path");

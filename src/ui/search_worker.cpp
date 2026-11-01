@@ -39,10 +39,11 @@ BackgroundSearchResult SearchWorker::search(const std::string& query,
         if (!revision_ && !revision_reader_) revision_ = std::make_unique<SearchRevision>(db_path_);
         const auto read_revision = [this] { return revision_reader_ ? revision_reader_() : revision_->read(); };
         const auto before = read_revision();
-        if ((offset > 0 && !expected_revision) || (expected_revision && *expected_revision != before)) {
+        if ((offset > 0 && (!expected_revision || !paging_options_)) || (expected_revision && *expected_revision != before)) {
             outcome.snapshot_changed = true;
         } else {
-            outcome.results = service_->search(query, limit, offset, options, cancellation);
+            if(offset==0)paging_options_=service_->resolveOptions(options);
+            outcome.results = service_->search(query, limit, offset, *paging_options_, cancellation);
             // A completed first page is a valid search result even if an index
             // writer commits afterward. Only an appended page can mix two
             // revisions into one visible result list.

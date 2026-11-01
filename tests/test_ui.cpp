@@ -171,6 +171,30 @@ class UiTest : public QObject {
         window.search_edit_->setText("retained-folder-entry");window.runSearch();
         QTRY_COMPARE(window.model_->rowCount(),1);
     }
+    void catalogErrorRecoversAfterSuccessfulManualRebuild() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        const auto first=dir.filePath("first"),second=dir.filePath("second"),path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(first));QVERIFY(QDir().mkpath(second));
+        QFile item(first+"/catalog-recovery.txt");QVERIFY(item.open(QIODevice::WriteOnly));item.close();
+        IndexManager manager(path.toStdString());QVERIFY(manager.rebuildRoots({first.toStdString(),second.toStdString()}).completed);
+        manager.database().synchronizeConfiguredRoots({second.toStdString()});
+        SourceRecord duplicate;duplicate.root=first.toStdString();const auto duplicate_id=manager.database().saveSource(duplicate);
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{second});
+        const auto original=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",original);window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* question=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());QVERIFY(question);
+            question->button(QMessageBox::Yes)->click();
+        });window.selectFolderScope(first);window.watcher_->stop();
+        QTRY_VERIFY_WITH_TIMEOUT(window.folder_scope_index_failed_,5000);
+        QTRY_VERIFY(!window.worker_thread_);
+        manager.database().forgetSource(duplicate_id);
+        window.rebuildIndex();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.folder_scope_index_failed_,8000);
+        QTRY_VERIFY(!window.worker_thread_);
+        window.search_edit_->setText("catalog-recovery");window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1);
+    }
     void savingUnchangedRootsReportsCompletedSync() {
         MainWindow window;window.watcher_->stop();
         QTimer::singleShot(0,[&] {

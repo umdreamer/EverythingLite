@@ -12,6 +12,10 @@ ctest --preset core-debug
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
 
+## Mac 0.5.4 本地核验（2026-11-01）
+
+合成目录替换测试覆盖进入前发现绑定变化、保护该范围和继续扫描兄弟目录；Core Debug CTest 20/20、GUI Debug CTest 27/27 通过，Mac 构建通过。真实用户索引未用于测试。
+
 ## Mac 0.5.3 本地核验（2026-11-01）
 
 合成目录回归覆盖多个权限不足目录、系统错误码、目录移动与范围保护。Core Debug CTest 20/20 和 GUI Debug CTest 27/27 通过；此前一次 GUI 全量运行出现数据库锁异常，单项及随后全量复测通过。Mac 构建通过，实际用户索引未用于测试。

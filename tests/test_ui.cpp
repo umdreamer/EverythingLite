@@ -124,6 +124,34 @@ class UiTest : public QObject {
         QVERIFY(window.scope_combo_->isVisible());
         QVERIFY(window.scope_label_->isVisible());
     }
+    void rootChangesRegisterSourcesAndIndexWithoutManualRebuild() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto added=dir.filePath("added"); QVERIFY(QDir().mkpath(added));
+        QFile file(added+"/automatic-root-sync.txt"); QVERIFY(file.open(QIODevice::WriteOnly));file.close();
+        MainWindow window;window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
+            auto* list=dialog->findChild<QListWidget*>();QVERIFY(list);list->clear();list->addItem(added);dialog->accept();
+        });
+        window.editRoots();window.watcher_->stop();
+        Database db(window.db_path_.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("automatic-root-sync").empty(),8000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QCOMPARE(window.roots_,QStringList{added});
+        QCOMPARE(db.configuredRoots(),std::vector<std::string>{added.toStdString()});
+        QVERIFY(!db.search("alpha").empty()); // Historical source cache is retained.
+        window.search_edit_->setText("alpha");window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_);QCOMPARE(window.model_->rowCount(),0);
+        bool registered=false;for(const auto& source:db.sources())if(source.root==added.toStdString())registered=true;
+        QVERIFY(registered);
+    }
+    void explicitlyEmptyRootsRemainEmptyAfterRestart() {
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{});
+        MainWindow window;window.watcher_->stop();QVERIFY(window.roots_.isEmpty());
+        window.search_edit_->setText("alpha");window.runSearch();
+        QVERIFY(!window.search_in_flight_);QCOMPARE(window.model_->rowCount(),0);
+        QTRY_VERIFY(!window.worker_thread_);
+    }
     void settingsOverviewShowsSavedConfigurationAndStoragePaths() {
         MainWindow window;
         QString report;
@@ -144,6 +172,7 @@ class UiTest : public QObject {
         auto settings = makeAppSettings();
         settings.setValue("index/syncRetryBaseMs", 1500);
         settings.setValue("index/roots", QStringList{fixture_root});
+        Database(QString::fromUtf8(qgetenv("EVERYTHING_LITE_DB")).toStdString()).synchronizeConfiguredRoots({fixture_root.toStdString()});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
         settings.setValue("search/includeHidden", true);
@@ -275,6 +304,8 @@ class UiTest : public QObject {
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
         const auto path=dir.path()+"/index.db";qputenv("EVERYTHING_LITE_DB",path.toUtf8());
         MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
+        // Finish startup registration/indexing before imposing the external writer lock.
+        QTRY_VERIFY(!window.catalog_timer_->isActive() && !window.worker_thread_ && !window.event_timer_->isActive());
         sqlite3* writer=nullptr;QCOMPARE(sqlite3_open(path.toUtf8().constData(),&writer),SQLITE_OK);
         QCOMPARE(sqlite3_exec(writer,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr),SQLITE_OK);
         window.showIndexStorage();window.requestStorageMaintenance(false);
@@ -1429,8 +1460,9 @@ class UiTest : public QObject {
         });
         window.selectFolderScope(new_root);
         QVERIFY(window.roots_.contains(new_root));
-        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
-        QCOMPARE(window.sync_error_label_->text(), QStringLiteral("索引同步成功"));
+        QTRY_VERIFY_WITH_TIMEOUT(!window.folder_scope_index_pending_,10000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.sync_error_label_->text(), QStringLiteral("索引同步成功"),10000);
+        QTRY_VERIFY(!window.worker_thread_);
         Database indexed(db_path.toStdString());
         QVERIFY2(indexed.totalFileCount()>=2,qPrintable(window.status_label_->text()));
         QTRY_VERIFY_WITH_TIMEOUT(window.search_request_id_>0,5000);

@@ -360,6 +360,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     refreshStats();
     restartWatcher();
+    catalog_timer_=new QTimer(this);catalog_timer_->setSingleShot(true);
+    connect(catalog_timer_,&QTimer::timeout,this,&MainWindow::synchronizeCatalog);
+    scheduleCatalogSync();
 
     // v0.3+ upgrades an existing v0.2 database in-place. Building the trigram
     // index reads the existing SQLite rows only; it does not rescan the disk.
@@ -734,7 +737,10 @@ void MainWindow::loadSettings() {
     if (log_retention_days_ != 0 && log_retention_days_ != 7 && log_retention_days_ != 30
         && log_retention_days_ != 90 && log_retention_days_ != 365) log_retention_days_ = 0;
     roots_ = settings.value(QStringLiteral("index/roots")).toStringList();
-    if (roots_.isEmpty()) roots_ = defaultRoots();
+    if (!settings.contains(QStringLiteral("index/roots"))) roots_ = defaultRoots();
+    QStringList normalized_roots;
+    for(const auto& root:roots_)if(QDir::isAbsolutePath(root))normalized_roots<<QDir::cleanPath(root);
+    normalized_roots.removeDuplicates();roots_=normalized_roots;
     scope_combo_->setCurrentIndex(std::clamp(settings.value(QStringLiteral("search/itemScope"), 0).toInt(), 0, 2));
     match_path_check_->setChecked(settings.value(QStringLiteral("search/matchPath"), false).toBool());
     include_hidden_check_->setChecked(settings.value(QStringLiteral("search/includeHidden"), true).toBool());
@@ -927,9 +933,8 @@ void MainWindow::selectFolderScope(const QString& path) {
     updateScopeLabel();
     updateFolderScopeLabel();
     restartWatcher(false);
-    pending_rescan_roots_.insert(normalized);
-    normal_events_due_ = true;
-    dispatchSyncJobs();
+    // The same configuration path registers the source before its first scan.
+    scheduleCatalogSync();
 }
 
 void MainWindow::updateSearchStateLabel() {
@@ -993,6 +998,11 @@ void MainWindow::runSearch() {
     }
     if (closing_ || search_ime_composing_ || (indexing_.load() && indexed_count_ == 0)) return;
     search_timer_->stop();
+    if(roots_.isEmpty()) {
+        cancelActiveSearch();search_pending_=false;resetPaging();++search_request_id_;
+        model_->clearResults();status_label_->setText(QStringLiteral("未设置索引目录；未执行搜索"));
+        search_metrics_label_->setText(QStringLiteral("未搜索"));return;
+    }
     if (!folder_scope_.isEmpty() && (rootForPath(folder_scope_).isEmpty()
         || folder_scope_index_pending_ || folder_scope_index_failed_)) {
         cancelActiveSearch();
@@ -1228,7 +1238,7 @@ void MainWindow::cancelActiveSearch() {
 }
 
 void MainWindow::startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish,
-                             std::function<void(const QString&)> on_finished) {
+                             std::function<void(const QString&)> on_finished, bool refresh_statistics) {
     Q_UNUSED(refresh_search_on_finish)
     if (worker_thread_ || storage_maintenance_ || closing_) return;
     setBusy(true, start_message);
@@ -1241,7 +1251,7 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
     };
     auto stats = std::make_shared<Stats>();
     const auto db_path = db_path_;
-    worker_thread_ = QThread::create([job = std::move(job), stats, db_path] {
+    worker_thread_ = QThread::create([job = std::move(job), stats, db_path, refresh_statistics] {
         try {
             job();
         } catch (const std::exception& e) {
@@ -1249,6 +1259,8 @@ void MainWindow::startWorker(std::function<void()> job, const QString& start_mes
         } catch (...) {
             stats->error = QStringLiteral("未知索引任务错误");
         }
+        // Catalog-only synchronization must not recount millions of file rows.
+        if(!refresh_statistics)return;
         // Counting the full index belongs on this worker, never the GUI callback.
         try {
             Database db(toUtf8(db_path));
@@ -1511,6 +1523,35 @@ void MainWindow::rebuildIndex() {
         });
 }
 
+void MainWindow::scheduleCatalogSync() {
+    catalog_requested_roots_=roots_;
+    if(catalog_timer_ && !closing_)catalog_timer_->start(0);
+}
+void MainWindow::synchronizeCatalog() {
+    if(closing_)return;
+    if(worker_thread_ || storage_maintenance_){catalog_timer_->start(100);return;}
+    const auto configured=catalog_requested_roots_;const auto db_path=db_path_;
+    auto scans=std::make_shared<std::vector<std::string>>();
+    startWorker([configured,db_path,scans] {
+        auto settings=makeAppSettings();
+        if(settings.contains(QStringLiteral("index/roots"))) {
+            QStringList saved;
+            for(const auto& root:settings.value(QStringLiteral("index/roots")).toStringList())
+                if(QDir::isAbsolutePath(root))saved<<QDir::cleanPath(root);
+            saved.removeDuplicates();if(saved!=configured)return;
+        }
+        Database db(toUtf8(db_path));std::vector<std::string> paths;
+        for(const auto& root:configured)paths.push_back(toUtf8(root));
+        *scans=db.synchronizeConfiguredRoots(paths);
+    },{},false,[this,configured,scans](const QString& error) {
+        if(configured!=roots_)return;
+        if(!error.isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("索引来源尚未同步：%1；下次保存或启动时重试。").arg(error),15000);return;
+        }
+        for(const auto& root:*scans)scheduleFileEvent({root,true,{}});
+    },false);
+}
+
 void MainWindow::editRoots() {
     if(storage_maintenance_){status_label_->setText(QStringLiteral("索引维护进行中；完成后可修改索引目录。"));return;}
     RootSettingsDialog dialog(roots_, this);
@@ -1519,7 +1560,8 @@ void MainWindow::editRoots() {
     saveSettings();
     updateScopeLabel();
     restartWatcher();
-    status_label_->setText(QStringLiteral("索引目录已修改。请从“工具 → 重建索引”同步数据库。"));
+    scheduleCatalogSync();
+    status_label_->setText(QStringLiteral("索引目录已保存；正在同步来源，新增目录将自动建立索引。"));
 }
 
 void MainWindow::showIndexStatus() {
@@ -1621,8 +1663,19 @@ void MainWindow::showSettingsOverview() {
         for (std::size_t i = 1; i < rules.files.size(); ++i) details << QStringLiteral("    %1").arg(fromUtf8(rules.files[i]));
         details << QStringLiteral("  目录过滤器：%1").arg(fromUtf8(rules.folder_filter));
         details << QStringLiteral("  文件过滤器：%1").arg(fromUtf8(rules.file_filter));
-        details << QString{} << QStringLiteral("数据库中的索引来源：");
-        for (const auto& source : db.sources()) details << QStringLiteral("  %1").arg(fromUtf8(source.root));
+        details << QString{} << QStringLiteral("数据库中的活动索引目录：");
+        const auto active=db.configuredRoots();
+        for(const auto& root:active)details<<QStringLiteral("  %1").arg(fromUtf8(root));
+        if(active.empty())details<<QStringLiteral("  <无；来源同步可能尚未完成>");
+        details << QString{} << QStringLiteral("历史来源缓存（不会自动加入索引目录）：");
+        for(const auto& source:db.sources()) {
+            if(std::find(active.begin(),active.end(),source.root)!=active.end())continue;
+            QString owner;
+            for(const auto& root:active)if(pathIsWithin(source.root,root) && root.size()>toUtf8(owner).size())owner=fromUtf8(root);
+            details<<QStringLiteral("  %1；%2%3").arg(fromUtf8(source.root),
+                owner.isEmpty()?QStringLiteral("未启用，保留缓存"):QStringLiteral("归属索引目录：")+owner,
+                source.status==SourceStatus::Offline?QStringLiteral("；来源离线"):QString{});
+        }
     } catch (const std::exception& error) {
         details << QStringLiteral("  读取失败：%1").arg(QString::fromUtf8(error.what()));
     }

@@ -19,6 +19,9 @@ int main() {
         second.enqueue("/synthetic/root","/synthetic/root/.cache/item",2000);
         assert(!first.acknowledge(initial.front()));
         const auto changed=first.due(1000);assert(changed.size()==1 && changed.front().generation>initial.front().generation);
+        second.enqueue("/synthetic/root","/synthetic/root/.cache",1500);
+        const auto merged=first.due(1000);assert(merged.size()==1 && merged.front().path=="/synthetic/root/.cache");
+        assert(!first.acknowledge(changed.front()));
     }
 #if !defined(_WIN32)
     fs::create_symlink(path,dir/"linked.sqlite");
@@ -30,6 +33,13 @@ int main() {
         DeferredUpdates reopened(path);
         const auto pending=reopened.due(1000);assert(pending.size()==1);
         assert(reopened.acknowledge(pending.front()));assert(reopened.due(9999).empty());
+        reopened.enqueue(pending.front().root,pending.front().path,3000);
+        assert(!reopened.acknowledge(pending.front()));
+        const auto again=reopened.due(3000);assert(again.size()==1 && again.front().generation>pending.front().generation);
+        assert(reopened.acknowledge(again.front()));
+        for(int i=0;i<401;++i)reopened.enqueue("/synthetic/root","/synthetic/root/item-"+std::to_string(i),4000);
+        const auto overflow=reopened.due(4000);assert(overflow.size()==1 && overflow.front().path=="/synthetic/root");
+        assert(reopened.acknowledge(overflow.front()));
     }
     fs::remove_all(dir);std::cout<<"deferred updates passed\n";
 }

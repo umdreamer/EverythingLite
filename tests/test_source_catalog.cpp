@@ -204,8 +204,20 @@ static void nestedSourceOwnership(const fs::path& base) {
     assert(db.searchReliable("ownership-item").size()==1);
     assert(sourceRows(db,parent_id).size()==2 && sourceRows(db,child_id).size()==2);
     const auto event=manager.applyPathChange(parent.string(),(child/"ownership-item.txt").string());
-    assert(!event.completed && !event.error.empty() && "parent events cannot claim a nested source subtree");
+    assert(event.completed && "events within an online local child must reach its owning source");
     assert(sourceRows(db,parent_id).size()==2 && sourceRows(db,child_id).size()==2);
+    std::ofstream(child/"nested-event.txt")<<"new";
+    assert(manager.applyPathChange(parent.string(),(child/"nested-event.txt").string()).completed);
+    assert(db.search("nested-event").size()==1 && sourceRows(db,parent_id).size()==2);
+    fs::remove(child/"nested-event.txt");
+    assert(manager.applyPathChange(parent.string(),(child/"nested-event.txt").string()).completed);
+    assert(db.search("nested-event").empty());
+    auto network_child=db.source(child_id);network_child.type=SourceType::NAS;db.saveSource(network_child);
+    std::ofstream(child/"unverified-event.txt")<<"new";
+    assert(!manager.applyPathChange(parent.string(),(child/"unverified-event.txt").string()).completed);
+    assert(db.search("unverified-event").empty());
+    fs::remove(child/"unverified-event.txt");
+    network_child=db.source(child_id);network_child.type=SourceType::Local;db.saveSource(network_child);
 #if !defined(_WIN32)
     if(geteuid()!=0) {
         fs::permissions(child,fs::perms::none);

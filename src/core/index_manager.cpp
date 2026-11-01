@@ -9,6 +9,9 @@
 #include <stdexcept>
 #include <iterator>
 #include <optional>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 namespace everything_lite {
 
@@ -164,13 +167,30 @@ IndexStats IndexManager::applyPathChange(const std::string& root, const std::str
         }
     }
     if (!expected.id) return rebuildRoot(normalized_root);
-    // Reject delegated events before testing even the child's existence.
+    // Only same-volume legacy local descendants can be routed without
+    // replacing the separately bound identity of a removable/network source.
     try {
         const auto ownership=database_.captureSourceDescendants(expected);
-        for(const auto& child:ownership.descendants)
-            if(pathIsWithin(scan_path,child.root)) {
-                IndexStats stats; stats.error="scan scope belongs to nested source"; return stats;
+        std::optional<SourceRecord> owner;
+        for(const auto& child:ownership.descendants)if(pathIsWithin(scan_path,child.root)) {
+            if(owner && owner->root==child.root) {
+                IndexStats stats; stats.error="ambiguous nested source binding"; return stats;
             }
+            if(!owner || child.root.size()>owner->root.size())owner=child;
+        }
+        if(owner) {
+#if !defined(_WIN32)
+            struct stat parent_stat{},child_stat{};
+            if(owner->status!=SourceStatus::Offline &&
+               (owner->type==SourceType::Local || owner->type==SourceType::Unknown) &&
+               owner->identity.empty() && owner->mount_fingerprint.empty() &&
+               lstat(normalized_root.c_str(),&parent_stat)==0 && S_ISDIR(parent_stat.st_mode) &&
+               lstat(owner->root.c_str(),&child_stat)==0 && S_ISDIR(child_stat.st_mode) &&
+               parent_stat.st_dev==child_stat.st_dev)
+                return applyPathChange(owner->root,scan_path);
+#endif
+            IndexStats stats; stats.error="scan scope belongs to nested source requiring verification"; return stats;
+        }
     } catch(const std::exception& error) { IndexStats stats; stats.error=error.what(); return stats; }
     std::error_code ec;
     const bool exists = std::filesystem::exists(utf8ToPath(scan_path), ec);

@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <cerrno>
 using namespace everything_lite;
 namespace fs = std::filesystem;
 static void sql(const fs::path& db, const char* text) {
@@ -449,6 +450,15 @@ int main() {
     assert(!event_failure.completed && protected_manager.database().totalFileCount()==protected_count-3);
     assert(protected_manager.rebuildRoot(protected_root.string()).completed);
     assert(protected_manager.database().source(protected_id).status==SourceStatus::Accessible);
+    fs::create_directories(protected_root/"denied-two");
+    fs::permissions(protected_root/"denied",fs::perms::none);
+    fs::permissions(protected_root/"denied-two",fs::perms::none);
+    const auto two_denied=protected_manager.rebuildRoot(protected_root.string());
+    fs::permissions(protected_root/"denied",fs::perms::owner_all);
+    fs::permissions(protected_root/"denied-two",fs::perms::owner_all);
+    assert(two_denied.error.find((protected_root/"denied").string())!=std::string::npos);
+    assert(two_denied.error.find((protected_root/"denied-two").string())!=std::string::npos);
+    assert(two_denied.error.find("errno="+std::to_string(EACCES))!=std::string::npos);
     } else std::cout << "permission-denied checks skipped for privileged user; traversal failure checked independently\n";
 #endif
     const auto protected_after=protected_manager.database().totalFileCount();

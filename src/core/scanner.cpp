@@ -228,7 +228,10 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
     auto fail=[&](const char* message){stats.error=message;return false;};
     auto protect=[&](const std::string& path,const char* message) {
         if(!boundary || !boundary->allow_partial || path==scope)return fail(message);
-        if(stats.error.empty())stats.error=message;
+        const int code=errno;
+        if(!stats.error.empty())stats.error+="\n";
+        stats.error+=path+": "+message+" (errno="+std::to_string(code)+": "+std::strerror(code)+")";
+        if(code==EACCES || code==EPERM)stats.error+=" 权限不足";
         stats.protected_paths.push_back(path);
         return true;
     };
@@ -281,7 +284,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(!append(scope,root_st,root_hidden))return stats;
         std::function<bool(int,const std::string&,bool)> walk=[&](int fd,const std::string& path,bool parent_hidden) {
             int copy=dup(fd);if(copy<0)return fail("unable to duplicate directory");
-            DIR* opened=fdopendir(copy);if(!opened){close(copy);return protect(path,"unable to enumerate directory");}
+            DIR* opened=fdopendir(copy);if(!opened){const int code=errno;close(copy);errno=code;return protect(path,"unable to enumerate directory");}
             std::unique_ptr<DIR,int(*)(DIR*)> directory(opened,closedir);
             for(;;) {
                 if(stopped())return false;
@@ -330,11 +333,6 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(!flush() || stopped())return stats;
         stats.partial_complete=!stats.protected_paths.empty();
         stats.completed=!stats.partial_complete;
-        if(stats.partial_complete) {
-            stats.error+=" at "+stats.protected_paths.front();
-            if(stats.protected_paths.size()>1)
-                stats.error+=" ("+std::to_string(stats.protected_paths.size())+" unreadable paths)";
-        }
     } catch(const std::exception& error){stats.error=error.what();}
       catch(...){stats.error="scan callback or directory check failed";}
     return stats;

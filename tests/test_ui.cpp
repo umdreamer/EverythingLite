@@ -1060,6 +1060,24 @@ class UiTest : public QObject {
         window.roots_.append(retained); window.runSearch();
         QTRY_COMPARE(window.model_->rowCount(),2);
     }
+    void configuredParentSearchIncludesPresentNestedSources() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), child=root+"/child", missing=root+"/missing";
+        QVERIFY(QDir().mkpath(child)); QVERIFY(QDir().mkpath(missing));
+        for(const auto& path:{child+"/nested-needle.txt",missing+"/old-needle.txt"}) {
+            QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        }
+        const auto db_path=dir.filePath("index.db"); IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoots({root.toStdString(),child.toStdString(),missing.toStdString()}).completed);
+        QVERIFY(QDir().rename(missing,dir.filePath("offline")));
+        auto settings=makeAppSettings(); settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        window.search_edit_->setText("needle"); window.runSearch(); QTRY_VERIFY(!window.search_in_flight_);
+        QCOMPARE(window.model_->rowCount(),1);
+        QCOMPARE(window.model_->nameAt(0),QStringLiteral("nested-needle.txt"));
+        QCOMPARE(manager.database().search("needle").size(),std::size_t{2});
+    }
     void ownIndexDatabaseEventsDoNotScheduleSync() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         const auto db_path = dir.filePath(QStringLiteral("index.db"));

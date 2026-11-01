@@ -419,10 +419,12 @@ class UiTest : public QObject {
         QVERIFY(first.results.back().file.name<second.results.front().file.name);
         int revision_reads=0;
         SearchWorker changed_during_page(path,{},[&revision_reads] {
-            return static_cast<std::uint64_t>(++revision_reads);
+            return static_cast<std::uint64_t>(++revision_reads<=3 ? 1 : 2);
         });
+        const auto initial=changed_during_page.search("page",3,0,SearchOptions{});
+        QVERIFY(initial.revision.has_value());
         const auto incomplete=changed_during_page.search("page",3,3,SearchOptions{},nullptr,1);
-        QCOMPARE(revision_reads,2);
+        QCOMPARE(revision_reads,4);
         QVERIFY(incomplete.snapshot_changed);
         QVERIFY(incomplete.results.empty());
         // Raw writers do not increment the source revision. data_version must

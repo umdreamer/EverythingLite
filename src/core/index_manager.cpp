@@ -19,8 +19,7 @@ namespace {
 bool sameVolumeLegacyChild(const std::string& parent,const SourceRecord& child) {
 #if !defined(_WIN32)
     struct stat parent_stat{},child_stat{};
-    return child.status!=SourceStatus::Offline &&
-        (child.type==SourceType::Local || child.type==SourceType::Unknown) &&
+    return (child.type==SourceType::Local || child.type==SourceType::Unknown) &&
         child.identity.empty() && child.mount_fingerprint.empty() &&
         lstat(parent.c_str(),&parent_stat)==0 && S_ISDIR(parent_stat.st_mode) &&
         lstat(child.root.c_str(),&child_stat)==0 && S_ISDIR(child_stat.st_mode) &&

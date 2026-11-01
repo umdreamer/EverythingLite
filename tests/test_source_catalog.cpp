@@ -243,6 +243,10 @@ static void nestedSourceOwnership(const fs::path& base) {
     const auto missing_event=manager.applyPathChange(parent.string(),(child/"ownership-item.txt").string());
     assert(!missing_event.completed && !missing_event.error.empty());
     assert(sourceRows(db,child_id).size()==2 && sourceRows(db,parent_id).size()==2);
+    fs::rename(base/"ownership-offline",child);
+    std::ofstream(child/"reconnected.txt")<<"new";
+    assert(manager.rebuildRoots({parent.string()}).completed);
+    assert(db.source(child_id).status==SourceStatus::Accessible && db.search("reconnected").size()==1);
 
     const auto old_parent=base/"old-overlap", old_child=old_parent/"nested";
     fs::create_directories(old_child);

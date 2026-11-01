@@ -20,13 +20,13 @@ namespace {
 
 class SqliteConnection {
 public:
-    explicit SqliteConnection(const std::string& path) {
+    explicit SqliteConnection(const std::string& path,bool create=true) {
         const auto parent = std::filesystem::path(path).parent_path();
-        if (!parent.empty()) {
+        if (create && !parent.empty()) {
             std::error_code ec;
             std::filesystem::create_directories(parent, ec);
         }
-        if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
+        if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READWRITE | (create?SQLITE_OPEN_CREATE:0) | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
             std::string message = db_ ? sqlite3_errmsg(db_) : "unable to open sqlite database";
             if (db_) sqlite3_close(db_);
             db_ = nullptr;
@@ -1127,6 +1127,52 @@ std::string Database::migrationBackupPath() const {
     SqliteConnection conn(db_path_);
     auto stmt=prepare(conn.get(),"SELECT value FROM app_metadata WHERE key='source_migration_backup'");
     return sqlite3_step(stmt.get())==SQLITE_ROW ? columnText(stmt.get(),0) : std::string{};
+}
+std::vector<std::string> Database::configuredRoots() const {
+    SqliteConnection conn(db_path_,false);conn.exec("BEGIN;");
+    if(!tableExists(conn.get(),"configured_index_roots"))return {};
+    auto rows=prepare(conn.get(),"SELECT root FROM configured_index_roots ORDER BY position");
+    std::vector<std::string> result;int rc;
+    while((rc=sqlite3_step(rows.get()))==SQLITE_ROW)result.push_back(columnText(rows.get(),0));
+    if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));return result;
+}
+std::vector<std::string> Database::synchronizeConfiguredRoots(const std::vector<std::string>& roots) const {
+    std::vector<std::string> normalized;
+    for(const auto& root:roots) {
+        if(root.empty() || root.find('\0')!=std::string::npos || !utf8ToPath(root).is_absolute())
+            throw std::invalid_argument("configured root must be an absolute directory path");
+        const auto path=normalizePath(root);
+        if(std::find(normalized.begin(),normalized.end(),path)==normalized.end())normalized.push_back(path);
+    }
+    SqliteConnection conn(db_path_,false);conn.exec("BEGIN IMMEDIATE;");
+    try {
+        const bool had_configuration=tableExists(conn.get(),"configured_index_roots");
+        conn.exec("CREATE TABLE IF NOT EXISTS configured_index_roots(root TEXT PRIMARY KEY,position INTEGER NOT NULL);");
+        auto previous=prepare(conn.get(),"SELECT root FROM configured_index_roots ORDER BY position");
+        std::vector<std::string> old;
+        int rc;
+        while((rc=sqlite3_step(previous.get()))==SQLITE_ROW)old.push_back(columnText(previous.get(),0));
+        if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        previous.reset();
+        std::vector<std::string> scans;
+        for(const auto& root:normalized) {
+            const bool present=sourceForRoot(conn.get(),root,false)!=0;
+            const auto id=sourceForRoot(conn.get(),root,true);
+            const auto source=getSource(conn.get(),id);
+            const bool unfinished=source.last_success==0 && source.status!=SourceStatus::Offline &&
+                (source.type==SourceType::Local || source.type==SourceType::Unknown);
+            if(!present || unfinished || (had_configuration && std::find(old.begin(),old.end(),root)==old.end()))scans.push_back(root);
+        }
+        if(had_configuration && old==normalized){conn.exec("COMMIT;");return scans;}
+        conn.exec("DELETE FROM configured_index_roots;");
+        auto insert=prepare(conn.get(),"INSERT INTO configured_index_roots(root,position) VALUES(?,?)");
+        for(std::size_t i=0;i<normalized.size();++i) {
+            sqlite3_reset(insert.get());sqlite3_clear_bindings(insert.get());bindText(insert.get(),1,normalized[i]);
+            sqlite3_bind_int64(insert.get(),2,static_cast<sqlite3_int64>(i));
+            if(sqlite3_step(insert.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        }
+        conn.exec("COMMIT;");return scans;
+    }catch(...){conn.exec("ROLLBACK;");throw;}
 }
 std::vector<SourceRecord> Database::sources() const {
     SqliteConnection conn(db_path_); conn.exec("BEGIN;");

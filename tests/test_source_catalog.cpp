@@ -510,6 +510,41 @@ int main() {
     start=true; for(auto& worker:workers) worker.join();
     assert(concurrent.sources().size()==1);
     for(const auto id:ids) assert(id==ids.front());
+    {
+    // Active configuration is distinct from preserved source cache identities.
+    Database configured((base/"configured.db").string());configured.initialize();
+    SourceRecord offline;offline.root="/synthetic/offline";offline.type=SourceType::NAS;
+    offline.status=SourceStatus::Offline;offline.identity="synthetic-nas-identity";
+    const auto offline_id=configured.saveSource(offline);
+    FileRecord cached;cached.path=offline.root+"/cached.txt";cached.parent_path=offline.root;cached.name="cached.txt";
+    configured.upsertBatch({cached},offline.root,0);
+    const auto added=configured.synchronizeConfiguredRoots({"/synthetic/a/.","/synthetic/a","/synthetic/offline"});
+    assert(added==std::vector<std::string>({"/synthetic/a"}));
+    assert(configured.configuredRoots()==std::vector<std::string>({"/synthetic/a","/synthetic/offline"}));
+    assert(configured.source(offline_id).identity==offline.identity && configured.source(offline_id).status==SourceStatus::Offline);
+    // An interrupted first scan must remain eligible after registration/restart.
+    assert(configured.synchronizeConfiguredRoots({"/synthetic/a","/synthetic/offline"})==std::vector<std::string>({"/synthetic/a"}));
+    for(const auto& entry:configured.sources())if(entry.root=="/synthetic/a")configured.mergeSourceSnapshot(entry,{});
+    assert(configured.synchronizeConfiguredRoots({"/synthetic/a","/synthetic/offline"}).empty());
+    sqlite3* observer=nullptr;assert(sqlite3_open(configured.path().c_str(),&observer)==SQLITE_OK);
+    const auto version=[&] {sqlite3_stmt* statement=nullptr;assert(sqlite3_prepare_v2(observer,"PRAGMA data_version",-1,&statement,nullptr)==SQLITE_OK);assert(sqlite3_step(statement)==SQLITE_ROW);const auto value=sqlite3_column_int(statement,0);sqlite3_finalize(statement);return value;};
+    const auto before_version=version();configured.synchronizeConfiguredRoots({"/synthetic/a","/synthetic/offline"});
+    assert(version()==before_version && "Unchanged roots must not invalidate an active search cursor");sqlite3_close(observer);
+
+    assert(configured.synchronizeConfiguredRoots({}).empty());assert(configured.configuredRoots().empty());
+    assert(configured.sources().size()==2 && configured.source(offline_id).identity==offline.identity);
+    assert(configured.search("cached.txt").size()==1);
+    assert(Database(configured.path()).configuredRoots().empty());
+    assert(configured.synchronizeConfiguredRoots({"/synthetic/offline"})==std::vector<std::string>({"/synthetic/offline"}));
+    assert(rejected([&]{configured.synchronizeConfiguredRoots({"relative"});}));
+    const auto missing=base/"not-created.db";
+    assert(rejected([&]{Database(missing.string()).synchronizeConfiguredRoots({"/synthetic/a"});}));assert(!fs::exists(missing));
+    const auto previous=configured.configuredRoots();
+    SourceRecord ambiguous;ambiguous.root="/synthetic/ambiguous";configured.saveSource(ambiguous);configured.saveSource(ambiguous);
+    const auto source_count=configured.sources().size();
+    assert(rejected([&]{configured.synchronizeConfiguredRoots({"/synthetic/new-before-error","/synthetic/ambiguous"});}));
+    assert(configured.configuredRoots()==previous && configured.sources().size()==source_count);
+    }
     concurrentLegacyMigration(base/"concurrent-legacy-rows",true);
     concurrentLegacyMigration(base/"concurrent-legacy-empty",false);
     fs::remove_all(base);

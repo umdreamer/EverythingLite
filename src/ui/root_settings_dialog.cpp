@@ -24,7 +24,7 @@ RootSettingsDialog::RootSettingsDialog(const QStringList& roots, QWidget* parent
     resize(700, 620);
 
     auto* layout = new QVBoxLayout(this);
-    auto* hint = new QLabel(QStringLiteral("只索引需要被 Everything Lite 搜索的目录。目录可随时修改，修改后建议重建索引。"));
+    auto* hint = new QLabel(QStringLiteral("只索引需要被 Everything Lite 搜索的目录。保存后自动同步来源并索引新增目录；移除目录会保留历史缓存。"));
     hint->setWordWrap(true);
     layout->addWidget(hint);
 

@@ -129,6 +129,92 @@ class UiTest : public QObject {
         QVERIFY(window.scope_combo_->isVisible());
         QVERIFY(window.scope_label_->isVisible());
     }
+    void rootChangesRegisterSourcesAndIndexWithoutManualRebuild() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto added=dir.filePath("added"); QVERIFY(QDir().mkpath(added));
+        QFile file(added+"/automatic-root-sync.txt"); QVERIFY(file.open(QIODevice::WriteOnly));file.close();
+        MainWindow window;window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
+            auto* list=dialog->findChild<QListWidget*>();QVERIFY(list);list->clear();list->addItem(added);dialog->accept();
+        });
+        window.editRoots();window.watcher_->stop();
+        Database db(window.db_path_.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(!db.search("automatic-root-sync").empty(),8000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QCOMPARE(window.roots_,QStringList{added});
+        QCOMPARE(db.configuredRoots(),std::vector<std::string>{added.toStdString()});
+        QVERIFY(!db.search("alpha").empty()); // Historical source cache is retained.
+        window.search_edit_->setText("alpha");window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_);QCOMPARE(window.model_->rowCount(),0);
+        bool registered=false;for(const auto& source:db.sources())if(source.root==added.toStdString())registered=true;
+        QVERIFY(registered);
+    }
+    void readdingRetainedFolderWhileWorkerBusyCompletes() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        const auto first=dir.filePath("first"),second=dir.filePath("second"),path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(first));QVERIFY(QDir().mkpath(second));
+        QFile item(first+"/retained-folder-entry.txt");QVERIFY(item.open(QIODevice::WriteOnly));item.close();
+        IndexManager manager(path.toStdString());QVERIFY(manager.rebuildRoots({first.toStdString(),second.toStdString()}).completed);
+        manager.database().synchronizeConfiguredRoots({first.toStdString(),second.toStdString()});
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{first,second});
+        const auto original=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",original);window.watcher_->stop();
+        WorkerGate gate;window.startWorker([started=gate.started,release=gate.release]{started->release();release->acquire();},{});
+        QVERIFY(gate.started->tryAcquire(1,3000));
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
+            auto* list=dialog->findChild<QListWidget*>();QVERIFY(list);list->clear();list->addItem(second);dialog->accept();
+        });window.editRoots();window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* question=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());QVERIFY(question);
+            question->button(QMessageBox::Yes)->click();
+        });window.selectFolderScope(first);window.watcher_->stop();
+        QVERIFY(window.folder_scope_index_pending_);gate.release->release();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.folder_scope_index_pending_,6000);
+        QTRY_VERIFY(!window.worker_thread_);
+        window.search_edit_->setText("retained-folder-entry");window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1);
+    }
+    void catalogErrorRecoversAfterSuccessfulManualRebuild() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        const auto first=dir.filePath("first"),second=dir.filePath("second"),path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(first));QVERIFY(QDir().mkpath(second));
+        QFile item(first+"/catalog-recovery.txt");QVERIFY(item.open(QIODevice::WriteOnly));item.close();
+        IndexManager manager(path.toStdString());QVERIFY(manager.rebuildRoots({first.toStdString(),second.toStdString()}).completed);
+        manager.database().synchronizeConfiguredRoots({second.toStdString()});
+        SourceRecord duplicate;duplicate.root=first.toStdString();const auto duplicate_id=manager.database().saveSource(duplicate);
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{second});
+        const auto original=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",original);window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* question=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());QVERIFY(question);
+            question->button(QMessageBox::Yes)->click();
+        });window.selectFolderScope(first);window.watcher_->stop();
+        QTRY_VERIFY_WITH_TIMEOUT(window.folder_scope_index_failed_,5000);
+        QTRY_VERIFY(!window.worker_thread_);
+        manager.database().forgetSource(duplicate_id);
+        window.rebuildIndex();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.folder_scope_index_failed_,8000);
+        QTRY_VERIFY(!window.worker_thread_);
+        window.search_edit_->setText("catalog-recovery");window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1);
+    }
+    void savingUnchangedRootsReportsCompletedSync() {
+        MainWindow window;window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);dialog->accept();
+        });window.editRoots();window.watcher_->stop();
+        QTRY_COMPARE(window.status_label_->text(),QStringLiteral("索引来源已同步"));
+        QTRY_VERIFY(!window.worker_thread_);
+    }
+    void explicitlyEmptyRootsRemainEmptyAfterRestart() {
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{});
+        MainWindow window;window.watcher_->stop();QVERIFY(window.roots_.isEmpty());
+        window.search_edit_->setText("alpha");window.runSearch();
+        QVERIFY(!window.search_in_flight_);QCOMPARE(window.model_->rowCount(),0);
+        QTRY_VERIFY(!window.worker_thread_);
+    }
     void settingsOverviewShowsSavedConfigurationAndStoragePaths() {
         MainWindow window;
         QString report;
@@ -196,8 +282,8 @@ class UiTest : public QObject {
         QCOMPARE(sqlite3_exec(raw,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(raw);
         auto* timer=window.findChild<QTimer*>("deferredTimer");QVERIFY(timer);
         QVERIFY(QMetaObject::invokeMethod(timer,"timeout",Qt::DirectConnection));
+        QTRY_COMPARE_WITH_TIMEOUT(manager.database().search("new-hidden").size(),std::size_t{1},10000);
         QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
-        QCOMPARE(manager.database().search("new-hidden").size(),std::size_t{1});
         QVERIFY(store.due(std::numeric_limits<std::int64_t>::max()).empty());
     }
     void periodicEventsRecoverAfterWindowRestart() {
@@ -264,6 +350,7 @@ class UiTest : public QObject {
         settings.setValue("index/roots", QStringList{fixture_root});
         settings.remove("index/periodicMinutes");
         settings.remove("index/updateRules");
+        Database(QString::fromUtf8(qgetenv("EVERYTHING_LITE_DB")).toStdString()).synchronizeConfiguredRoots({fixture_root.toStdString()});
         settings.setValue("search/itemScope", 0);
         settings.setValue("search/matchPath", false);
         settings.setValue("search/includeHidden", true);
@@ -395,6 +482,8 @@ class UiTest : public QObject {
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto saved=qgetenv("EVERYTHING_LITE_DB");
         const auto path=dir.path()+"/index.db";qputenv("EVERYTHING_LITE_DB",path.toUtf8());
         MainWindow window;qputenv("EVERYTHING_LITE_DB",saved);window.watcher_->stop();
+        // Finish startup registration/indexing before imposing the external writer lock.
+        QTRY_VERIFY(!window.catalog_timer_->isActive() && !window.worker_thread_ && !window.event_timer_->isActive());
         sqlite3* writer=nullptr;QCOMPARE(sqlite3_open(path.toUtf8().constData(),&writer),SQLITE_OK);
         QCOMPARE(sqlite3_exec(writer,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr),SQLITE_OK);
         window.showIndexStorage();window.requestStorageMaintenance(false);
@@ -1561,8 +1650,9 @@ class UiTest : public QObject {
         });
         window.selectFolderScope(new_root);
         QVERIFY(window.roots_.contains(new_root));
-        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
-        QCOMPARE(window.sync_error_label_->text(), QStringLiteral("索引同步成功"));
+        QTRY_VERIFY_WITH_TIMEOUT(!window.folder_scope_index_pending_,10000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.sync_error_label_->text(), QStringLiteral("索引同步成功"),10000);
+        QTRY_VERIFY(!window.worker_thread_);
         Database indexed(db_path.toStdString());
         QVERIFY2(indexed.totalFileCount()>=2,qPrintable(window.status_label_->text()));
         QTRY_VERIFY_WITH_TIMEOUT(window.search_request_id_>0,5000);

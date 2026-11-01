@@ -342,7 +342,7 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
     // one canonical scope/budget with explicit full rescans and manual rebuilds.
     const bool rescan = requested_rescan || (pathIsWithin(native(path), native(root))
         && pathIsWithin(native(root), native(path)));
-    if (rescan && root == folder_scope_ && folder_scope_index_pending_) {
+    if (rescan && root == folder_scope_ && (folder_scope_index_pending_ || folder_scope_index_failed_)) {
         folder_scope_index_pending_ = false;
         folder_scope_index_failed_ = !error.isEmpty();
         updateFolderScopeLabel();

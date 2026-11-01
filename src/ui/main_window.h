@@ -160,6 +160,10 @@ private:
     QTimer* search_timer_ = nullptr;
     QTimer* event_timer_ = nullptr;
     QTimer* retry_timer_ = nullptr;
+    QTimer* catalog_timer_ = nullptr;
+    QStringList catalog_requested_roots_;
+    void scheduleCatalogSync();
+    void synchronizeCatalog();
     QThread* worker_thread_ = nullptr;
     QPointer<IndexStorageDialog> storage_dialog_;
     bool storage_maintenance_=false;
@@ -268,7 +272,7 @@ private:
     QString rootForPath(const QString& path) const;
     void setBusy(bool busy, const QString& message = {});
     void startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish = true,
-                     std::function<void(const QString&)> on_finished = {});
+                     std::function<void(const QString&)> on_finished = {}, bool refresh_statistics = true);
     void newWindow();
     void resetColumns();
     void addCurrentBookmark();

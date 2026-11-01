@@ -179,7 +179,10 @@ IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
         total.changed = total.changed || stats.changed;
         total.completed = total.completed && stats.completed;
         total.cancelled = total.cancelled || stats.cancelled;
-        if (!stats.error.empty()) total.error = stats.error;
+        if (!stats.error.empty()) {
+            if(!total.error.empty())total.error+="\n";
+            total.error+=stats.error;
+        }
     }
     return total;
 }

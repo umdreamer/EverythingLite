@@ -315,6 +315,11 @@ int main() {
     auto offline=manager.rebuildRoot((base/"root").string());
     assert(!offline.completed); assert(db.totalFileCount()==before);
     assert(db.sources().front().status==SourceStatus::Offline);
+    const auto missing_one=(base/"missing-one").string(),missing_two=(base/"missing-two").string();
+    IndexManager multiple_manager((base/"multiple-failures.db").string());
+    const auto multiple_failures=multiple_manager.rebuildRoots({missing_one,missing_two});
+    assert(!multiple_failures.completed && multiple_failures.error.find(missing_one)!=std::string::npos &&
+           multiple_failures.error.find(missing_two)!=std::string::npos);
     manager.rebuildRoots({}); assert(db.totalFileCount()==before);
     fs::rename(base/"offline",base/"root");
     manager.rebuildRoot((base/"root").string());

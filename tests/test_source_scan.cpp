@@ -78,6 +78,21 @@ static void scannerRegressions(const fs::path& base) {
     boundary.enter_directory=[](const std::string&,int){return DirectoryDecision::Error;};
     stats=FileScanner().scanTree(root.string(),[](std::vector<FileRecord>&&){return true;},nullptr,nullptr,&boundary);
     assert(!stats.completed && !stats.error.empty());
+    ScanBoundary partial;partial.allow_partial=true;
+    bool moved=false;std::vector<FileRecord> partial_rows;
+    stats=FileScanner(1).scanTree(root.string(),[&](std::vector<FileRecord>&& rows){
+        for(auto& row:rows) {
+            if(!moved && row.path==(root/"sample").string()) {
+                fs::rename(root/"sample",root/"moved-sample");moved=true;
+            }
+            partial_rows.push_back(std::move(row));
+        }
+        return true;
+    },nullptr,nullptr,&partial);
+    assert(moved && stats.partial_complete && !stats.completed);
+    assert(std::find(stats.protected_paths.begin(),stats.protected_paths.end(),(root/"sample").string())!=stats.protected_paths.end());
+    assert(std::any_of(partial_rows.begin(),partial_rows.end(),[&](const auto& row){return row.path==(root/"sample-other").string();}));
+    fs::rename(root/"moved-sample",root/"sample");
     std::atomic_bool cancel{false};
     stats=FileScanner(1).scanTree(root.string(),[&](std::vector<FileRecord>&&){cancel=true;return true;},&cancel);
     assert(!stats.completed && stats.cancelled);

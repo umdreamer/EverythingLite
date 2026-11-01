@@ -226,11 +226,11 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
     const auto scope=normalizePath(root);
     auto stopped=[&] {if(cancelled && cancelled->load()){stats.cancelled=true;return true;}return false;};
     auto fail=[&](const char* message){stats.error=message;return false;};
-    auto protect=[&](const std::string& path,const char* message) {
+    auto protect=[&](const std::string& path,const char* message,int code) {
         if(!boundary || !boundary->allow_partial || path==scope)return fail(message);
-        const int code=errno;
         if(!stats.error.empty())stats.error+="\n";
-        stats.error+=path+": "+message+" (errno="+std::to_string(code)+": "+std::strerror(code)+")";
+        stats.error+=path+": "+message;
+        if(code)stats.error+=" (errno="+std::to_string(code)+": "+std::strerror(code)+")";
         if(code==EACCES || code==EPERM)stats.error+=" 权限不足";
         stats.protected_paths.push_back(path);
         return true;
@@ -284,12 +284,12 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(!append(scope,root_st,root_hidden))return stats;
         std::function<bool(int,const std::string&,bool)> walk=[&](int fd,const std::string& path,bool parent_hidden) {
             int copy=dup(fd);if(copy<0)return fail("unable to duplicate directory");
-            DIR* opened=fdopendir(copy);if(!opened){const int code=errno;close(copy);errno=code;return protect(path,"unable to enumerate directory");}
+            DIR* opened=fdopendir(copy);if(!opened){const int code=errno;close(copy);return protect(path,"unable to enumerate directory",code);}
             std::unique_ptr<DIR,int(*)(DIR*)> directory(opened,closedir);
             for(;;) {
                 if(stopped())return false;
                 errno=0;dirent* entry=readdir(opened);
-                if(!entry){if(errno)return protect(path,"directory enumeration failed");break;}
+                if(!entry){if(errno)return protect(path,"directory enumeration failed",errno);break;}
                 const std::string name=entry->d_name;if(name=="." || name=="..")continue;
                 const auto child=path=="/"?"/"+name:path+"/"+name;
                 // Whole subtree boundaries are applied before even metadata.
@@ -297,7 +297,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                 struct stat st{};
                 if(!metadata(child))return fail("directory metadata boundary check failed");
                 if(fstatat(fd,name.c_str(),&st,AT_SYMLINK_NOFOLLOW)!=0) {
-                    if(!protect(child,"unable to read file metadata"))return false;
+                    if(!protect(child,"unable to read file metadata",errno))return false;
                     continue;
                 }
                 const bool child_hidden=parent_hidden || finderInvisible(child,st);
@@ -305,7 +305,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                     if(policy && policy->excludes(child,true)){++stats.skipped;continue;}
                     Descriptor nested(openat(fd,name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
                     if(nested.fd<0) {
-                        if(!protect(child,"unable to open child directory"))return false;
+                        if(!protect(child,"unable to open child directory",errno))return false;
                         continue;
                     }
                     struct stat held{};if(fstat(nested.fd,&held)!=0 || !sameDirectory(st,held))return fail("directory changed before entry");
@@ -321,8 +321,9 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                     if(fstatat(fd,name.c_str(),&current,AT_SYMLINK_NOFOLLOW)!=0 ||
                        fstat(nested.fd,&after)!=0 || !S_ISDIR(current.st_mode) ||
                        !sameDirectory(st,current) || !sameDirectory(st,after) ||
-                       enter(child,nested.fd)!=DirectoryDecision::Enter)
-                        return fail("directory binding changed during enumeration");
+                       enter(child,nested.fd)!=DirectoryDecision::Enter) {
+                        if(!protect(child,"directory binding changed during enumeration",0))return false;
+                    }
                 } else if(!append(child,st,child_hidden))return false; // Descendant links never enter.
             }
             return true;

@@ -1,5 +1,6 @@
 #include "ui/main_window.h"
 #include "core/index_manager.h"
+#include "core/database.h"
 #include "core/path_utils.h"
 #include "ui/index_update_journal.h"
 #include "ui/open_history_store.h"
@@ -12,12 +13,20 @@
 #include <QFileInfo>
 #include <QLabel>
 #include <QMetaObject>
+#include <QPointer>
 #include <QStatusBar>
+#include <QThreadPool>
 #include <QTimer>
 #include <exception>
 #include <algorithm>
 #include <limits>
 #include <utility>
+#include <filesystem>
+#if defined(__APPLE__)
+#include <cerrno>
+#include <sys/stat.h>
+#include <sys/xattr.h>
+#endif
 
 namespace everything_lite {
 namespace {
@@ -47,9 +56,58 @@ QStringList ownBuildDirectories() {
     }
     return result;
 }
+UpdatePolicy applicationUpdatePolicy(const QString& database,const std::vector<UpdateRule>& rules,
+                                     const std::string& home,bool include_periodic) {
+    std::vector<std::string> own;
+    for(const auto& directory:ownBuildDirectories())own.push_back(normalizePath(native(directory)));
+    const auto add=[&](const QString& path){if(!path.isEmpty())own.push_back(normalizePath(native(path)));};
+    add(IndexUpdateJournal::defaultDirectory());add(makeAppSettings().fileName());
+    for(const auto& file:{database,database+QStringLiteral(".deferred.sqlite"),OpenHistoryStore::defaultPath()})
+        for(const auto& suffix:{QString{},QStringLiteral("-wal"),QStringLiteral("-shm"),QStringLiteral("-journal")})add(file+suffix);
+    return UpdatePolicy(home,rules,std::move(own),include_periodic);
+}
+enum class FinderVisibility { Visible, Hidden, Unknown };
+FinderVisibility inspectFinderVisibility(const std::string& path,const std::string& root,const std::string& database) {
+#if defined(__APPLE__)
+    const auto cachedVisibility=[&]() {
+        try {
+            const auto cached=Database(database).cachedFinderHidden(path);
+            if(cached)return *cached?FinderVisibility::Hidden:FinderVisibility::Visible;
+        } catch(const std::exception&) {}
+        return FinderVisibility::Unknown;
+    };
+    auto current=utf8ToPath(path);std::vector<std::string> missing_paths;
+    for(;;) {
+        struct stat st{};
+        if(lstat(current.c_str(),&st)!=0) {
+            if(errno==ENOENT || errno==ENOTDIR)missing_paths.push_back(pathToUtf8(current));else return cachedVisibility();
+        } else {
+            if((st.st_flags & UF_HIDDEN)!=0)return FinderVisibility::Hidden;
+            unsigned char info[32]{};
+            const auto count=getxattr(current.c_str(),XATTR_FINDERINFO_NAME,info,sizeof(info),0,XATTR_NOFOLLOW);
+            if(count>=10 && (info[8]&0x40)!=0)return FinderVisibility::Hidden;
+            if(count<0 && errno!=ENOATTR && errno!=ENOTSUP && errno!=EOPNOTSUPP)return cachedVisibility();
+        }
+        if(current==utf8ToPath(root))break;
+        const auto parent=current.parent_path();if(parent==current || parent.empty())break;current=parent;
+    }
+    if(!missing_paths.empty()) {
+        try {
+            Database index(database);
+            for(const auto& missing:missing_paths) {
+                const auto cached=index.cachedFinderHidden(missing);
+                if(cached && *cached)return FinderVisibility::Hidden;
+            }
+        } catch(const std::exception&) {return FinderVisibility::Unknown;}
+    }
+    return FinderVisibility::Visible;
+#else
+    (void)path;(void)root;(void)database;return FinderVisibility::Visible;
+#endif
+}
 } // namespace
 
-void MainWindow::scheduleFileEvent(const FileEvent& event) {
+void MainWindow::scheduleFileEvent(const FileEvent& event, bool visibility_checked) {
     if (closing_) return;
     const auto error = !event.error.empty() ? QString::fromUtf8(event.error.c_str())
         : watcher_ ? QString::fromUtf8(watcher_->lastError().c_str()) : QString{};
@@ -79,16 +137,35 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     }
     const auto root = rootForPath(path);
     if (root.isEmpty()) return;
+    if(event.needs_full_rescan)complete_scan_generations_[root]=++complete_scan_sequence_;
+    else if(normalized_path==QDir::cleanPath(root) || std::any_of(update_rules_.begin(),update_rules_.end(),[&](const auto& rule) {
+        return rule.cadence==UpdateCadence::Periodic && pathIsWithin(rule.path,native(normalized_path));
+    })) {
+        // A coarse directory event can also hide periodic descendant changes.
+        try {
+            if(!deferred_updates_)deferred_updates_=std::make_unique<DeferredUpdates>(native(deferred_database));
+            deferred_updates_->enqueue(normalizePath(native(root)),normalizePath(native(normalized_path)),
+                QDateTime::currentMSecsSinceEpoch()+static_cast<qint64>(periodic_minutes_)*60000);
+            armDeferredTimer();
+        }catch(const std::exception& failure) {statusBar()->showMessage(QStringLiteral("周期队列尚未保存：%1").arg(QString::fromUtf8(failure.what())),15000);}
+    }
     if(!event.needs_full_rescan && normalized_path!=QDir::cleanPath(root)) {
         try {
             const UpdatePolicy policy(normalizePath(native(QDir::homePath())),update_rules_,{});
             if(policy.classify(normalizePath(native(normalized_path)))==UpdateCadence::Periodic) {
                 if(!deferred_updates_)deferred_updates_=std::make_unique<DeferredUpdates>(native(deferred_database));
-                const auto parent=QFileInfo(normalized_path).absolutePath();
-                const auto scope=pathIsWithin(native(parent),native(root))?parent:normalized_path;
-                deferred_updates_->enqueue(normalizePath(native(root)),normalizePath(native(scope)),
+                deferred_updates_->enqueue(normalizePath(native(root)),normalizePath(native(normalized_path)),
                     QDateTime::currentMSecsSinceEpoch()+static_cast<qint64>(periodic_minutes_)*60000);
                 armDeferredTimer();return;
+            }
+            if(!visibility_checked && policy.classify(normalizePath(native(normalized_path)),true)==UpdateCadence::Periodic) {
+                if(!deferred_updates_)deferred_updates_=std::make_unique<DeferredUpdates>(native(deferred_database));
+                deferred_updates_->enqueue(normalizePath(native(root)),normalizePath(native(normalized_path)),
+                    QDateTime::currentMSecsSinceEpoch()+static_cast<qint64>(periodic_minutes_)*60000);
+                armDeferredTimer();
+                const auto key=failureKey(root,normalized_path,false);const auto version=++visibility_versions_[key];
+                if(!visibility_pending_.contains(key))startVisibilityProbe(root,normalized_path,key,version);
+                return;
             }
         } catch(const std::exception& error) {
             statusBar()->showMessage(QStringLiteral("周期队列不可用，正在直接更新：%1").arg(QString::fromUtf8(error.what())),15000);
@@ -163,6 +240,27 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     if (!event_timer_->isActive()) event_timer_->start(700);
 }
 
+void MainWindow::startVisibilityProbe(const QString& root,const QString& path,const QString& key,quint64 version) {
+    visibility_pending_.insert(key);
+    const auto db=native(db_path_),candidate=native(path),source=native(root);
+    QPointer<MainWindow> window(this);
+    QThreadPool::globalInstance()->start([window,root,path,key,version,db,candidate,source] {
+        const auto result=inspectFinderVisibility(candidate,source,db);
+        if(!window)return;
+        QMetaObject::invokeMethod(window.data(),[window,root,path,key,version,result] {
+            if(!window || window->closing_)return;
+            window->visibility_pending_.remove(key);
+            const auto latest=window->visibility_versions_.value(key);
+            if(window->rootForPath(path)!=root) {window->visibility_versions_.remove(key);return;}
+            if(result==FinderVisibility::Visible)window->scheduleFileEvent({native(path),false,{}},true);
+            if(latest!=version) {
+                window->startVisibilityProbe(root,path,key,latest);return;
+            }
+            window->visibility_versions_.remove(key);
+        },Qt::QueuedConnection);
+    });
+}
+
 void MainWindow::processPendingEvents() {
     if (closing_) return;
     event_timer_->stop();
@@ -215,13 +313,15 @@ void MainWindow::processDeferredUpdates() {
     }
     if(jobs.empty()){armDeferredTimer();return;}
     const auto db_path=db_path_;const auto interval=static_cast<qint64>(periodic_minutes_)*60000;
-    startWorker([this,db_path,jobs,interval] {
+    const auto rules=update_rules_;const auto home=normalizePath(native(QDir::homePath()));
+    startWorker([this,db_path,jobs,interval,rules,home] {
         DeferredUpdates queue(native(db_path+QStringLiteral(".deferred.sqlite")));
         IndexManager manager(native(db_path));
         for(const auto& job:jobs) {
             QString error;
             try {
-                const auto stats=job.root==job.path?manager.rebuildRoots({job.root}):manager.applyPathChange(job.root,job.path);
+                const auto policy=applicationUpdatePolicy(db_path,rules,home,true);
+                const auto stats=job.root==job.path?manager.rebuildRoots({job.root},{},nullptr,&policy):manager.applyPathChange(job.root,job.path,&policy);
                 if(!stats.completed)error=stats.cancelled?QStringLiteral("同步已取消"):
                     stats.error.empty()?QStringLiteral("扫描未完整完成"):QString::fromUtf8(stats.error.c_str());
                 if(error.isEmpty()) {
@@ -313,28 +413,52 @@ void MainWindow::dispatchSyncJobs() {
                           job.root, job.path, {}, attempt);
     }
     const auto db_path = db_path_;
-    startWorker([this, db_path, jobs] {
+    std::vector<DeferredUpdate> pending;
+    if(deferred_updates_) {
+        try {pending=deferred_updates_->due(std::numeric_limits<std::int64_t>::max());}
+        catch(const std::exception& error) {statusBar()->showMessage(QStringLiteral("无法读取周期队列：%1").arg(QString::fromUtf8(error.what())),15000);}
+    }
+    const auto complete=complete_scan_generations_;const auto rules=update_rules_;
+    const auto home=normalizePath(native(QDir::homePath()));
+    startWorker([this, db_path, jobs, pending,complete,rules,home] {
+        std::unique_ptr<DeferredUpdates> queue;
+        if(!pending.empty())try {queue=std::make_unique<DeferredUpdates>(native(db_path+QStringLiteral(".deferred.sqlite")));} catch(...) {}
         auto process = [&](const QString& root, const QString& path, bool rescan) {
             QString error;
             try {
                 IndexManager manager(native(db_path));
-                const auto stats = rescan ? manager.rebuildRoots({native(root)})
-                    : manager.applyPathChange(native(root), native(path));
+                const auto policy=applicationUpdatePolicy(db_path,rules,home,false);
+                // Explicit initial/full scans retain their complete-snapshot authority.
+                const auto* applied=complete.value(root)>0?nullptr:&policy;
+                const auto stats = rescan ? manager.rebuildRoots({native(root)},{},nullptr,applied)
+                    : manager.applyPathChange(native(root), native(path),applied);
                 if (!stats.completed) {
                     error = stats.cancelled ? QStringLiteral("同步已取消")
                         : stats.error.empty() ? QStringLiteral("扫描未完整完成") : QString::fromUtf8(stats.error.c_str());
+                }
+                if(stats.completed && !stats.deferred && queue) {
+                    for(const auto& item:pending)if(item.root==native(root) && item.path==native(path)) {
+                        try {queue->acknowledge(item);} catch(...) {}
+                    }
                 }
             } catch (const std::exception& e) {
                 error = QString::fromUtf8(e.what());
             } catch (...) {
                 error = QStringLiteral("未知同步错误");
             }
-            QMetaObject::invokeMethod(this, [this, root, path, rescan, error] {
-                if (!closing_) reportSyncOutcome(root, path, rescan, error);
+            const auto generation=complete.value(root);
+            QMetaObject::invokeMethod(this, [this, root, path, rescan, error,generation] {
+                if (!closing_) {
+                    if(error.isEmpty() && rescan && generation && complete_scan_generations_.value(root)==generation)complete_scan_generations_.remove(root);
+                    reportSyncOutcome(root, path, rescan, error);
+                }
             }, Qt::QueuedConnection);
         };
         for (const auto& job : jobs) process(job.root, job.path, job.rescan);
-    }, {}, false);
+    }, {}, false,[this](const QString& error) {
+        if(!error.isEmpty())status_label_->setText(QStringLiteral("索引任务未完成：%1").arg(error));
+        armDeferredTimer();
+    });
 }
 
 void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool requested_rescan, const QString& error, bool retry) {

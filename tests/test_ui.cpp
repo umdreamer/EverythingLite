@@ -28,6 +28,9 @@
 #include <atomic>
 #include <optional>
 #include <limits>
+#if defined(__APPLE__)
+#include <sys/stat.h>
+#endif
 #include <sqlite3.h>
 #if defined(__APPLE__)
 #include <dlfcn.h>
@@ -390,6 +393,61 @@ class UiTest : public QObject {
         });
         reopened.editRoots();
     }
+    void realtimeDeletionDoesNotScanPeriodicSiblings() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), hidden=root+"/.periodic", db_path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(hidden));
+        const auto visible=root+"/visible-delete.txt", deferred=hidden+"/deferred-delete.txt";
+        for(const auto& path:{visible,deferred}) {QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();}
+        IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        auto settings=makeAppSettings(); settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        window.update_rules_={{root.toStdString(),UpdateCadence::Realtime},{hidden.toStdString(),UpdateCadence::Periodic}};
+        QVERIFY(QFile::remove(visible)); QVERIFY(QFile::remove(deferred));
+        window.scheduleFileEvent({visible.toStdString(),false,{}});
+        QTRY_VERIFY_WITH_TIMEOUT(manager.database().search("visible-delete").empty(),5000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY2(!manager.database().search("deferred-delete").empty(),
+                 "A realtime deletion must retain periodic sibling state until its scheduled update");
+    }
+    void explicitFullScanIndexesAnIgnoredApplicationBuildRoot() {
+        QTemporaryDir root(QCoreApplication::applicationDirPath()+"/owned-force-scan-XXXXXX");QVERIFY(root.isValid());
+        QTemporaryDir storage;QVERIFY(storage.isValid());const auto db_path=storage.filePath("index.db");
+        QFile file(root.filePath("force-full-build.txt"));QVERIFY(file.open(QIODevice::WriteOnly));file.close();
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{root.path()});
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",old);window.watcher_->stop();
+        window.scheduleFileEvent({file.fileName().toStdString(),false,{}});QVERIFY(window.pending_paths_.isEmpty());
+        window.scheduleFileEvent({root.path().toStdString(),true,{}});
+        Database db(db_path.toStdString());QTRY_VERIFY_WITH_TIMEOUT(!db.search("force-full-build").empty(),6000);
+        QTRY_VERIFY(!window.worker_thread_);
+    }
+    void realtimeParentEventDoesNotScanPeriodicSiblings() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto root=dir.filePath("root"), hidden=root+"/.periodic", db_path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(hidden));
+        const auto visible=root+"/visible-parent-delete.txt", deferred=hidden+"/deferred-parent-delete.txt";
+        for(const auto& path:{visible,deferred}) {QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();}
+        IndexManager manager(db_path.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        auto settings=makeAppSettings(); settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window; qputenv("EVERYTHING_LITE_DB",old); window.watcher_->stop();
+        window.update_rules_={{root.toStdString(),UpdateCadence::Realtime},{hidden.toStdString(),UpdateCadence::Periodic}};
+        QVERIFY(QFile::remove(visible)); QVERIFY(QFile::remove(deferred));
+        window.scheduleFileEvent({root.toStdString(),false,{}});
+        QTRY_VERIFY_WITH_TIMEOUT(manager.database().search("visible-parent-delete").empty(),5000);
+        QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY2(!manager.database().search("deferred-parent-delete").empty(),
+                 "A parent event must retain periodic sibling state until its scheduled update");
+        QVERIFY(window.deferred_updates_);
+        sqlite3* raw=nullptr;QCOMPARE(sqlite3_open((db_path+".deferred.sqlite").toUtf8().constData(),&raw),SQLITE_OK);
+        QCOMPARE(sqlite3_exec(raw,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(raw);
+        QVERIFY(QMetaObject::invokeMethod(window.deferred_timer_,"timeout",Qt::DirectConnection));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.database().search("deferred-parent-delete").empty(),10000);
+        QTRY_VERIFY(!window.worker_thread_);
+
+    }
     void periodicEventsAreDurableAndRunWhenDue() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.filePath("root");
         QVERIFY(QDir().mkpath(root+"/.cache"));
@@ -446,8 +504,52 @@ class UiTest : public QObject {
         window.scheduleFileEvent({(root+"/generated/two.txt").toStdString(),false,{}});
         DeferredUpdates store((db_path+".deferred.sqlite").toStdString());
         const auto queued=store.due(std::numeric_limits<std::int64_t>::max());
-        QCOMPARE(queued.size(),std::size_t{1});QCOMPARE(QString::fromStdString(queued.front().path),root+"/generated");
+        QCOMPARE(queued.size(),std::size_t{1});QCOMPARE(QString::fromStdString(queued.front().path),root+"/generated/two.txt");
     }
+#if defined(__APPLE__)
+    void newlyFinderHiddenScopesKeepCacheUntilPeriodicUpdate() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto root=dir.filePath("root"),hidden=root+"/now-hidden",urgent=hidden+"/urgent",db_path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(urgent));
+        const auto cached=hidden+"/new-hidden-cache.txt",single=root+"/now-hidden-file.txt",removed=urgent+"/urgent-removed.txt";
+        for(const auto& path:{cached,single,removed}) {QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.close();}
+        IndexManager manager(db_path.toStdString());QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QVERIFY(manager.database().cachedFinderHidden(cached.toStdString())==std::optional<bool>(false));
+        struct RestoreFlags {QString directory,file;~RestoreFlags(){chflags(directory.toUtf8().constData(),0);chflags(file.toUtf8().constData(),0);}} restore{hidden,single};
+        QVERIFY(chflags(hidden.toUtf8().constData(),UF_HIDDEN)==0);QVERIFY(chflags(single.toUtf8().constData(),UF_HIDDEN)==0);
+        QVERIFY(QFile::remove(removed));QFile added(urgent+"/urgent-added.txt");QVERIFY(added.open(QIODevice::WriteOnly));added.close();
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",old);window.watcher_->stop();
+        window.update_rules_={{urgent.toStdString(),UpdateCadence::Realtime}};
+        window.scheduleFileEvent({root.toStdString(),false,{}});window.processPendingEvents();
+        QTRY_VERIFY(!window.worker_thread_);
+        QCOMPARE(manager.database().search("new-hidden-cache").size(),std::size_t{1});
+        QCOMPARE(manager.database().search("now-hidden-file").size(),std::size_t{1});
+        QCOMPARE(manager.database().search("urgent-added").size(),std::size_t{1});
+        QVERIFY(manager.database().search("urgent-removed").empty());
+        QVERIFY(window.deferred_updates_);
+        sqlite3* raw=nullptr;QCOMPARE(sqlite3_open((db_path+".deferred.sqlite").toUtf8().constData(),&raw),SQLITE_OK);
+        QCOMPARE(sqlite3_exec(raw,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(raw);
+        QVERIFY(QMetaObject::invokeMethod(window.deferred_timer_,"timeout",Qt::DirectConnection));
+        QTRY_VERIFY_WITH_TIMEOUT(manager.database().cachedFinderHidden(cached.toStdString())==std::optional<bool>(true),10000);
+        QTRY_VERIFY(!window.worker_thread_);
+    }
+    void finderHiddenDirectoriesUsePeriodicCadence() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto root=dir.filePath("root"),hidden=root+"/hidden-by-finder",db_path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(hidden));QVERIFY(chflags(hidden.toUtf8().constData(),UF_HIDDEN)==0);
+        QFile file(hidden+"/entry.txt");QVERIFY(file.open(QIODevice::WriteOnly));file.close();
+        IndexManager manager(db_path.toStdString());QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",old);window.watcher_->stop();
+        window.scheduleFileEvent({file.fileName().toStdString(),false,{}});
+        QVERIFY(window.pending_paths_.isEmpty());
+        QTRY_VERIFY(window.deferred_updates_!=nullptr);
+        QTRY_VERIFY(!window.deferred_updates_->due(std::numeric_limits<std::int64_t>::max()).empty());
+        QTest::qWait(900);QVERIFY(window.pending_paths_.isEmpty());QVERIFY(!window.worker_thread_);
+        QVERIFY(chflags(hidden.toUtf8().constData(),0)==0);
+    }
+#endif
 #if !defined(_WIN32)
     void periodicFailureKeepsScopeUntilRecovery() {
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto root=dir.filePath("root"),db_path=dir.filePath("index.db"),blocked=root+"/.blocked";
@@ -834,6 +936,8 @@ class UiTest : public QObject {
         const auto first=dir.filePath("a"), second=dir.filePath("b");
         QVERIFY(QDir().mkpath(first)); QVERIFY(QDir().mkpath(second));
         MainWindow window; window.watcher_->stop(); window.roots_={first,second};
+        // Exercise the existing realtime scheduler independently of Finder metadata probing.
+        window.update_rules_={{first.toStdString(),UpdateCadence::Realtime},{second.toStdString(),UpdateCadence::Realtime}};
         window.pending_paths_.clear(); window.pending_rescan_roots_.clear();
         window.scheduleFileEvent({(first+"/first.txt").toStdString(),false,{}});
         for(int i=0;i<401;++i) window.scheduleFileEvent({(second+QString("/file%1").arg(i)).toStdString(),false,{}});
@@ -925,6 +1029,8 @@ class UiTest : public QObject {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         const auto root=dir.path(), nested=dir.filePath("nested"); QVERIFY(QDir().mkpath(nested));
         MainWindow window; window.watcher_->stop(); window.roots_={root,nested};
+        // Exercise the existing realtime scheduler independently of Finder metadata probing.
+        window.update_rules_={{root.toStdString(),UpdateCadence::Realtime},{nested.toStdString(),UpdateCadence::Realtime}};
         window.pending_paths_.clear(); window.pending_rescan_roots_.clear();
         window.scheduleFileEvent({(root+"/a/file").toStdString(),false,{}});
         window.scheduleFileEvent({(root+"/a").toStdString(),false,{}});
@@ -1892,6 +1998,8 @@ class UiTest : public QObject {
         QFile old(blocked+"/blocked_original.txt"); QVERIFY(old.open(QIODevice::WriteOnly)); old.close();
         QFile unrelated(root+"/unrelated.txt"); QVERIFY(unrelated.open(QIODevice::WriteOnly)); unrelated.close();
         MainWindow window; window.watcher_->stop(); window.roots_={root};
+        // Exercise the existing realtime scheduler independently of Finder metadata probing.
+        window.update_rules_={{root.toStdString(),UpdateCadence::Realtime}};
         IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
         const auto originalPermissions=QFile::permissions(blocked);
         struct RestorePermissions {QString path;QFile::Permissions permissions;~RestorePermissions(){QFile::setPermissions(path,permissions);}} restore{blocked,originalPermissions};
@@ -1917,6 +2025,8 @@ class UiTest : public QObject {
         QFile cache(paused+"/overflow_offline_cache.txt"); QVERIFY(cache.open(QIODevice::WriteOnly)); cache.close();
         QFile newFile(good+"/overflow_live.txt"); QVERIFY(newFile.open(QIODevice::WriteOnly)); newFile.close();
         MainWindow window; window.watcher_->stop(); window.roots_={paused,good};
+        // Exercise the existing realtime scheduler independently of Finder metadata probing.
+        window.update_rules_={{paused.toStdString(),UpdateCadence::Realtime},{good.toStdString(),UpdateCadence::Realtime}};
         IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(paused.toStdString()).completed);
         QVERIFY(QDir(paused).removeRecursively());
         window.scheduleFileEvent({paused.toStdString(),true,{}}); window.processPendingEvents();
@@ -1959,6 +2069,8 @@ class UiTest : public QObject {
             QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
         }
         MainWindow window; window.watcher_->stop(); window.roots_={root,offline};
+        // Exercise the existing realtime scheduler independently of Finder metadata probing.
+        window.update_rules_={{root.toStdString(),UpdateCadence::Realtime},{offline.toStdString(),UpdateCadence::Realtime}};
         IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoots({root.toStdString(),offline.toStdString()}).completed);
         const auto childPermissions=QFile::permissions(child), unrelatedPermissions=QFile::permissions(unrelated);
         struct Restore {QString path;QFile::Permissions permissions;~Restore(){QFile::setPermissions(path,permissions);}} first{child,childPermissions}, second{unrelated,unrelatedPermissions};
@@ -1988,6 +2100,8 @@ class UiTest : public QObject {
         QFile cached(blocked+"/merge_retry_cache.txt"); QVERIFY(cached.open(QIODevice::WriteOnly)); cached.close();
         QFile live(good+"/merge_retry_other.txt"); QVERIFY(live.open(QIODevice::WriteOnly)); live.close();
         MainWindow window; window.watcher_->stop(); window.roots_={root,good};
+        // Exercise the existing realtime scheduler independently of Finder metadata probing.
+        window.update_rules_={{root.toStdString(),UpdateCadence::Realtime},{good.toStdString(),UpdateCadence::Realtime}};
         IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
         const auto permissions=QFile::permissions(blocked);
         struct Restore {QString path;QFile::Permissions permissions;~Restore(){QFile::setPermissions(path,permissions);}} restore{blocked,permissions};
@@ -2112,6 +2226,8 @@ class UiTest : public QObject {
             QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
         }
         MainWindow window; window.watcher_->stop(); window.roots_={root,offline};
+        // Exercise the existing realtime scheduler independently of Finder metadata probing.
+        window.update_rules_={{root.toStdString(),UpdateCadence::Realtime},{offline.toStdString(),UpdateCadence::Realtime}};
         IndexManager manager(window.db_path_.toStdString()); QVERIFY(manager.rebuildRoots({root.toStdString(),offline.toStdString()}).completed);
         QVERIFY(QDir(offline).removeRecursively());
         window.scheduleFileEvent({offline.toStdString(),true,{}}); window.processPendingEvents();

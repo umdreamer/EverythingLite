@@ -197,6 +197,10 @@ private:
     std::vector<SearchBookmark> bookmarks_;
     QSet<QString> pending_paths_;
     QSet<QString> pending_rescan_roots_;
+    QHash<QString,quint64> complete_scan_generations_;
+    quint64 complete_scan_sequence_=0;
+    QSet<QString> visibility_pending_;
+    QHash<QString,quint64> visibility_versions_;
     QString pending_search_query_;
     bool results_have_more_ = false;
     std::size_t next_search_offset_ = 0;
@@ -275,7 +279,8 @@ private:
     void showContextMenu(const QPoint& pos);
     void restartWatcher(bool refresh_stats = true);
     void receiveWatcherEvent(std::uint64_t generation, const FileEvent& event);
-    void scheduleFileEvent(const FileEvent& event);
+    void scheduleFileEvent(const FileEvent& event, bool visibility_checked = false);
+    void startVisibilityProbe(const QString& root,const QString& path,const QString& key,quint64 version);
     void processPendingEvents();
     void dispatchSyncJobs();
     void processDueRetries();

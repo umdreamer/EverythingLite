@@ -226,12 +226,16 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
     const auto scope=normalizePath(root);
     auto stopped=[&] {if(cancelled && cancelled->load()){stats.cancelled=true;return true;}return false;};
     auto fail=[&](const char* message){stats.error=message;return false;};
+    auto describe=[&](const std::string& path,const char* message,int code) {
+        std::string result=path+": "+message;
+        if(code)result+=" (errno="+std::to_string(code)+": "+std::strerror(code)+")";
+        if(code==EACCES || code==EPERM)result+=" 权限不足";
+        return result;
+    };
     auto protect=[&](const std::string& path,const char* message,int code) {
-        if(!boundary || !boundary->allow_partial || path==scope)return fail(message);
+        if(!boundary || !boundary->allow_partial || path==scope){stats.error=describe(path,message,code);return false;}
         if(!stats.error.empty())stats.error+="\n";
-        stats.error+=path+": "+message;
-        if(code)stats.error+=" (errno="+std::to_string(code)+": "+std::strerror(code)+")";
-        if(code==EACCES || code==EPERM)stats.error+=" 权限不足";
+        stats.error+=describe(path,message,code);
         stats.protected_paths.push_back(path);
         return true;
     };
@@ -261,7 +265,8 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         if(stopped())return stats;
         if(root.empty() || root.find('\0')!=std::string::npos){fail("invalid scan root");return stats;}
         struct stat root_st{};
-        if(!metadata(scope) || lstat(scope.c_str(),&root_st)!=0){fail("unable to read root metadata");return stats;}
+        if(!metadata(scope)){fail("unable to read root metadata");return stats;}
+        if(lstat(scope.c_str(),&root_st)!=0){stats.error=describe(scope,"unable to read root metadata",errno);return stats;}
         // Legacy scanTree(root) treats its root as a bound source directory.
         // A configured subtree contract opts out; descendant links never follow.
         const bool follow_root=S_ISLNK(root_st.st_mode) && (!boundary || boundary->allow_root_symlink);
@@ -273,7 +278,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                 // obtaining its target's metadata or attempting file reads.
                 root_fd.reset();
             } else {
-                if(root_fd->fd<0 || fstat(root_fd->fd,&root_st)!=0){fail("unable to open scan directory");return stats;}
+                if(root_fd->fd<0 || fstat(root_fd->fd,&root_st)!=0){stats.error=describe(scope,"unable to open scan directory",errno);return stats;}
                 if(enter(scope,root_fd->fd)!=DirectoryDecision::Enter){fail("scan root outside directory boundary");return stats;}
             }
         }
@@ -283,7 +288,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         const bool root_hidden=finderInvisibleInPath(utf8ToPath(scope));
         if(!append(scope,root_st,root_hidden))return stats;
         std::function<bool(int,const std::string&,bool)> walk=[&](int fd,const std::string& path,bool parent_hidden) {
-            int copy=dup(fd);if(copy<0)return fail("unable to duplicate directory");
+            int copy=dup(fd);if(copy<0)return protect(path,"unable to duplicate directory",errno);
             DIR* opened=fdopendir(copy);if(!opened){const int code=errno;close(copy);return protect(path,"unable to enumerate directory",code);}
             std::unique_ptr<DIR,int(*)(DIR*)> directory(opened,closedir);
             for(;;) {

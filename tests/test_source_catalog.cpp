@@ -448,6 +448,8 @@ int main() {
     const auto event_failure=protected_manager.applyPathChange(protected_root.string(),(protected_root/"denied").string());
     fs::permissions(protected_root/"denied",fs::perms::owner_all);
     assert(!event_failure.completed && protected_manager.database().totalFileCount()==protected_count-3);
+    assert(event_failure.error.find("errno="+std::to_string(EACCES))!=std::string::npos);
+    assert(event_failure.error.find("权限不足")!=std::string::npos);
     assert(protected_manager.rebuildRoot(protected_root.string()).completed);
     assert(protected_manager.database().source(protected_id).status==SourceStatus::Accessible);
     fs::create_directories(protected_root/"denied-two");

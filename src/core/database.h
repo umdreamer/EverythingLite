@@ -32,6 +32,10 @@ public:
     const std::string& path() const { return db_path_; }
     void initialize() const;
     std::vector<SourceRecord> sources() const;
+    // Atomically publish configured roots, retaining all historical source caches.
+    // Returns newly enabled roots that need an initial/renewed scan.
+    std::vector<std::string> synchronizeConfiguredRoots(const std::vector<std::string>& roots) const;
+    std::vector<std::string> configuredRoots() const;
     SourceRecord source(std::int64_t id) const;
     std::int64_t ensureSourceForRoot(const std::string& root) const;
     std::int64_t saveSource(const SourceRecord& source) const;

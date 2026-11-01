@@ -1546,9 +1546,19 @@ void MainWindow::synchronizeCatalog() {
     },{},false,[this,configured,scans](const QString& error) {
         if(configured!=roots_)return;
         if(!error.isEmpty()) {
+            if(folder_scope_index_pending_) {
+                folder_scope_index_pending_=false;folder_scope_index_failed_=true;updateFolderScopeLabel();
+            }
             statusBar()->showMessage(QStringLiteral("索引来源尚未同步：%1；下次保存或启动时重试。").arg(error),15000);return;
         }
+        // Explicit folder enrollment still requires a completion callback when
+        // remove/re-add was coalesced before any catalog write occurred.
+        if(folder_scope_index_pending_ && roots_.contains(folder_scope_) &&
+           std::find(scans->begin(),scans->end(),toUtf8(folder_scope_))==scans->end())
+            scans->push_back(toUtf8(folder_scope_));
         for(const auto& root:*scans)scheduleFileEvent({root,true,{}});
+        if(scans->empty() && status_label_->text().startsWith(QStringLiteral("索引目录已保存；")))
+            status_label_->setText(QStringLiteral("索引来源已同步"));
     },false);
 }
 

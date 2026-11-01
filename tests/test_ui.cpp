@@ -145,6 +145,40 @@ class UiTest : public QObject {
         bool registered=false;for(const auto& source:db.sources())if(source.root==added.toStdString())registered=true;
         QVERIFY(registered);
     }
+    void readdingRetainedFolderWhileWorkerBusyCompletes() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        const auto first=dir.filePath("first"),second=dir.filePath("second"),path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(first));QVERIFY(QDir().mkpath(second));
+        QFile item(first+"/retained-folder-entry.txt");QVERIFY(item.open(QIODevice::WriteOnly));item.close();
+        IndexManager manager(path.toStdString());QVERIFY(manager.rebuildRoots({first.toStdString(),second.toStdString()}).completed);
+        manager.database().synchronizeConfiguredRoots({first.toStdString(),second.toStdString()});
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{first,second});
+        const auto original=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",original);window.watcher_->stop();
+        WorkerGate gate;window.startWorker([started=gate.started,release=gate.release]{started->release();release->acquire();},{});
+        QVERIFY(gate.started->tryAcquire(1,3000));
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
+            auto* list=dialog->findChild<QListWidget*>();QVERIFY(list);list->clear();list->addItem(second);dialog->accept();
+        });window.editRoots();window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* question=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());QVERIFY(question);
+            question->button(QMessageBox::Yes)->click();
+        });window.selectFolderScope(first);window.watcher_->stop();
+        QVERIFY(window.folder_scope_index_pending_);gate.release->release();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.folder_scope_index_pending_,6000);
+        QTRY_VERIFY(!window.worker_thread_);
+        window.search_edit_->setText("retained-folder-entry");window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1);
+    }
+    void savingUnchangedRootsReportsCompletedSync() {
+        MainWindow window;window.watcher_->stop();
+        QTimer::singleShot(0,[&] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);dialog->accept();
+        });window.editRoots();window.watcher_->stop();
+        QTRY_COMPARE(window.status_label_->text(),QStringLiteral("索引来源已同步"));
+        QTRY_VERIFY(!window.worker_thread_);
+    }
     void explicitlyEmptyRootsRemainEmptyAfterRestart() {
         auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{});
         MainWindow window;window.watcher_->stop();QVERIFY(window.roots_.isEmpty());

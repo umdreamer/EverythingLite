@@ -10,8 +10,8 @@ void validate(const std::string& path) {
         throw std::invalid_argument("update policy path must be absolute and normalized");
 }
 }
-UpdatePolicy::UpdatePolicy(std::string home,std::vector<UpdateRule> overrides,std::vector<std::string> own_directories)
-    :home_(std::move(home)),overrides_(std::move(overrides)),own_directories_(std::move(own_directories)) {
+UpdatePolicy::UpdatePolicy(std::string home,std::vector<UpdateRule> overrides,std::vector<std::string> own_directories,bool include_periodic)
+    :include_periodic_(include_periodic),home_(std::move(home)),overrides_(std::move(overrides)),own_directories_(std::move(own_directories)) {
     validate(home_);std::unordered_set<std::string> seen;
     for(const auto& rule:overrides_) {
         validate(rule.path);
@@ -20,6 +20,18 @@ UpdatePolicy::UpdatePolicy(std::string home,std::vector<UpdateRule> overrides,st
     }
     for(const auto& path:own_directories_)validate(path);
     std::stable_sort(overrides_.begin(),overrides_.end(),[](const auto& a,const auto& b){return a.path.size()>b.path.size();});
+}
+bool UpdatePolicy::allows(const std::string& path,bool finder_hidden) const {
+    const auto cadence=classify(path,finder_hidden);
+    return cadence==UpdateCadence::Realtime || (include_periodic_ && cadence==UpdateCadence::Periodic);
+}
+bool UpdatePolicy::shouldDescend(const std::string& path,bool finder_hidden) const {
+    if(allows(path,finder_hidden))return true;
+    if(classify(path,finder_hidden)==UpdateCadence::Ignore)return false;
+    // A periodic ancestor may contain an explicitly realtime descendant.
+    return std::any_of(overrides_.begin(),overrides_.end(),[&](const auto& rule) {
+        return rule.cadence==UpdateCadence::Realtime && pathIsWithin(rule.path,path);
+    });
 }
 UpdateCadence UpdatePolicy::classify(const std::string& path,bool finder_hidden) const {
     validate(path);

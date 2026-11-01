@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,8 @@ struct SourceOwnershipSnapshot {
     std::vector<SourceRecord> descendants;
 };
 
+class UpdatePolicy;
+
 class Database {
 public:
     explicit Database(std::string db_path);
@@ -37,6 +40,8 @@ public:
     std::vector<std::string> synchronizeConfiguredRoots(const std::vector<std::string>& roots) const;
     std::vector<std::string> configuredRoots() const;
     SourceRecord source(std::int64_t id) const;
+    // Reads the indexed Finder-hidden flag without modifying the index.
+    std::optional<bool> cachedFinderHidden(const std::string& path) const;
     std::int64_t ensureSourceForRoot(const std::string& root) const;
     std::int64_t saveSource(const SourceRecord& source) const;
     std::uint64_t forgetSource(std::int64_t id) const;
@@ -46,11 +51,15 @@ public:
     // Full snapshots require the captured source/policy guard to agree.
     // When provided, ownership/protection admission runs inside the main write
     // transaction. Offline or never-successful children retain parent cache.
+    // Cadence-limited callers pass freshly observed hidden ancestors when
+    // pruning, so formerly visible cache metadata cannot authorize deletion.
     IndexStats mergeSourceSnapshot(const SourceRecord& expected,
                                   const std::vector<FileRecord>& records,
                                   const std::string& subtree_relative = {},
                                   const std::vector<SourceRecord>* expected_descendants = nullptr,
-                                  const std::vector<std::string>* unreadable_paths = nullptr) const;
+                                  const std::vector<std::string>* unreadable_paths = nullptr,
+                                  const UpdatePolicy* update_policy = nullptr,
+                                  const std::vector<std::string>* observed_hidden_roots = nullptr) const;
     // Read-only staging SQLite: snapshot_metadata(complete=1), snapshot_files
     // columns follow FileRecord (path,parent_path,name,ext,root,size,
     // modified_time,is_dir,scan_generation,source_id,relative_path,cloud_copy).

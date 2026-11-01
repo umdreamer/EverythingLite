@@ -20,6 +20,11 @@ namespace everything_lite {
 enum class DirectoryDecision { Enter, Prune, Error };
 struct ScanBoundary {
     std::vector<std::string> prune_roots;
+    // Restrict enumeration to the path needed to verify a missing child.
+    std::string required_path;
+    std::string visibility_root;
+    std::function<bool(const std::string&,bool)> allow_record;
+    std::function<bool(const std::string&,bool)> descend_directory;
     // IndexManager may reconcile fully enumerated siblings while retaining
     // unreadable descendants. Snapshot helpers keep this disabled.
     bool allow_partial = false;

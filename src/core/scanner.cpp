@@ -177,10 +177,11 @@ bool finderInvisible(const std::string& path,const struct stat& st) {
     return false;
 #endif
 }
-bool finderInvisibleInPath(fs::path path) {
+bool finderInvisibleInPath(fs::path path,const fs::path& boundary={}) {
     for (;;) {
         struct stat st{};
         if(lstat(path.c_str(),&st)==0 && finderInvisible(pathToUtf8(path),st))return true;
+        if(!boundary.empty() && path==boundary)return false;
         const auto parent=path.parent_path();
         if(parent==path || parent.empty())return false;
         path=parent;
@@ -258,6 +259,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
     };
     auto append=[&](const std::string& path,const struct stat& st,bool finder_hidden) {
         if(policy && policy->excludes(path,S_ISDIR(st.st_mode))){++stats.skipped;return true;}
+        if(boundary && boundary->allow_record && !boundary->allow_record(path,finder_hidden)) {stats.deferred=true;++stats.skipped;return true;}
         ++stats.scanned;FileRecord record;fromStat(utf8ToPath(path),st,record,finder_hidden);batch.push_back(std::move(record));
         return batch.size()<batch_size_ || flush();
     };
@@ -270,6 +272,8 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
         // Legacy scanTree(root) treats its root as a bound source directory.
         // A configured subtree contract opts out; descendant links never follow.
         const bool follow_root=S_ISLNK(root_st.st_mode) && (!boundary || boundary->allow_root_symlink);
+        struct stat root_binding=root_st;
+        if(follow_root && stat(scope.c_str(),&root_binding)!=0){stats.error=describe(scope,"unable to verify scan root",errno);return stats;}
         std::unique_ptr<Descriptor> root_fd;
         if(S_ISDIR(root_st.st_mode) || follow_root) {
             root_fd=std::make_unique<Descriptor>(open(scope.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|(follow_root?0:O_NOFOLLOW)));
@@ -279,13 +283,14 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                 root_fd.reset();
             } else {
                 if(root_fd->fd<0 || fstat(root_fd->fd,&root_st)!=0){stats.error=describe(scope,"unable to open scan directory",errno);return stats;}
+                if(!sameDirectory(root_binding,root_st)){fail("scan root changed before entry");return stats;}
                 if(enter(scope,root_fd->fd)!=DirectoryDecision::Enter){fail("scan root outside directory boundary");return stats;}
             }
         }
         if(policy && (policy->excludes(pathToUtf8(utf8ToPath(scope).parent_path()),true) || policy->excludes(scope,S_ISDIR(root_st.st_mode)))) {
             stats.completed=true;return stats;
         }
-        const bool root_hidden=finderInvisibleInPath(utf8ToPath(scope));
+        const bool root_hidden=finderInvisibleInPath(utf8ToPath(scope),boundary?utf8ToPath(boundary->visibility_root):fs::path{});
         if(!append(scope,root_st,root_hidden))return stats;
         std::function<bool(int,const std::string&,bool)> walk=[&](int fd,const std::string& path,bool parent_hidden) {
             int copy=dup(fd);if(copy<0)return protect(path,"unable to duplicate directory",errno);
@@ -298,7 +303,9 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                 const std::string name=entry->d_name;if(name=="." || name=="..")continue;
                 const auto child=path=="/"?"/"+name:path+"/"+name;
                 // Whole subtree boundaries are applied before even metadata.
-                if(prune(child) || (entry->d_type==DT_DIR && policy && policy->excludes(child,true))){++stats.skipped;continue;}
+                if((boundary && !boundary->required_path.empty() &&
+                    !pathIsWithin(child,boundary->required_path) && !pathIsWithin(boundary->required_path,child)) ||
+                   prune(child) || (entry->d_type==DT_DIR && policy && policy->excludes(child,true))){++stats.skipped;continue;}
                 struct stat st{};
                 if(!metadata(child))return fail("directory metadata boundary check failed");
                 if(fstatat(fd,name.c_str(),&st,AT_SYMLINK_NOFOLLOW)!=0) {
@@ -307,6 +314,7 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                 }
                 const bool child_hidden=parent_hidden || finderInvisible(child,st);
                 if(S_ISDIR(st.st_mode)) {
+                    if(boundary && boundary->descend_directory && !boundary->descend_directory(child,child_hidden)) {stats.deferred=true;++stats.skipped;continue;}
                     if(policy && policy->excludes(child,true)){++stats.skipped;continue;}
                     Descriptor nested(openat(fd,name.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
                     if(nested.fd<0) {
@@ -350,9 +358,18 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
             }
             return true;
         };
-        if(root_fd && !(policy && !policy->indexAppBundleContents() &&
+        const bool descend_root=!boundary || !boundary->descend_directory || boundary->descend_directory(scope,root_hidden);
+        if(!descend_root)stats.deferred=true;
+        if(root_fd && descend_root && !(policy && !policy->indexAppBundleContents() &&
                         appBundleName(pathToUtf8(utf8ToPath(scope).filename()))) &&
            !walk(root_fd->fd,scope,root_hidden))return stats;
+        if(root_fd) {
+            struct stat current{},held{};
+            if((follow_root?stat(scope.c_str(),&current):lstat(scope.c_str(),&current))!=0 ||
+               fstat(root_fd->fd,&held)!=0 || !sameDirectory(root_binding,current) || !sameDirectory(root_binding,held)) {
+                fail("scan root binding changed during enumeration");return stats;
+            }
+        }
         if(!flush() || stopped())return stats;
         stats.partial_complete=!stats.protected_paths.empty();
         stats.completed=!stats.partial_complete;

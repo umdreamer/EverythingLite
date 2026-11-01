@@ -177,12 +177,16 @@ static void hiddenCompact(const fs::path& base) {
     const std::string root="/synthetic/hidden";const auto id=db.ensureSourceForRoot(root);
     auto hidden=file(root,"finder-invisible.txt");hidden.finder_hidden=true;
     db.mergeSourceSnapshot(db.source(id),{file(root,".",true),hidden});
+    assert(db.cachedFinderHidden(root+"/finder-invisible.txt")==std::optional<bool>(true));
+    assert(!db.cachedFinderHidden(root+"/missing.txt").has_value());
     optimize(path);
+    assert(db.cachedFinderHidden(root+"/finder-invisible.txt")==std::optional<bool>(true));
     SearchQuery visible_only;visible_only.terms={"finder-invisible"};visible_only.include_hidden=false;
     assert(db.search(visible_only).empty());
     assert(db.search("finder-invisible").size()==1);
     hidden.finder_hidden=false;
     db.upsertBatch({hidden},root,0);
+    assert(db.cachedFinderHidden(root+"/finder-invisible.txt")==std::optional<bool>(false));
     assert(db.search(visible_only).size()==1);
 }
 static void partialCompact(const fs::path& base) {

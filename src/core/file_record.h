@@ -45,6 +45,7 @@ struct IndexStats {
     bool partial_complete = false;
     bool cancelled = false;
     bool changed = false;
+    bool deferred = false;
     std::string error;
     std::vector<std::string> protected_paths;
     std::uint64_t scanned = 0;

@@ -1,4 +1,5 @@
 #include "core/database.h"
+#include "core/update_policy.h"
 #include "core/directory_storage.h"
 #include "core/path_utils.h"
 #include "core/scan_request.h"
@@ -13,6 +14,7 @@
 #include <memory>
 #include <functional>
 #include <sstream>
+#include <unordered_set>
 #include <stdexcept>
 
 namespace everything_lite {
@@ -467,13 +469,48 @@ void validateScope(const std::string& scope) {
     if(parsed.is_absolute() || pathToUtf8(parsed.lexically_normal())!=scope) throw std::invalid_argument("invalid subtree scope");
     for(const auto& part:parsed) if(part=="..") throw std::invalid_argument("subtree escapes source");
 }
+struct UpdateMergeGate {
+    std::string root;
+    UpdatePolicy policy;
+    bool deferred=false;
+    bool suppressed=false;
+    std::unordered_set<std::string> observed_hidden;
+};
+void updateAllowed(sqlite3_context* context,int,sqlite3_value** values) {
+    auto* gate=static_cast<UpdateMergeGate*>(sqlite3_user_data(context));
+    try {
+        const auto* raw=sqlite3_value_text(values[0]);
+        if(!raw)throw std::runtime_error("missing relative path during update reconciliation");
+        const std::string relative(reinterpret_cast<const char*>(raw),static_cast<std::size_t>(sqlite3_value_bytes(values[0])));
+        validateScope(relative);
+        const auto path=accessPath(gate->root,relative);
+        auto cadence=gate->policy.classify(path,(sqlite3_value_int(values[1])&kFinderHiddenStorageBit)!=0);
+        if(cadence==UpdateCadence::Realtime && !gate->policy.includesPeriodic() && !gate->observed_hidden.empty()) {
+            // Fresh hidden attributes override stale visible cache metadata,
+            // while the policy still honors explicitly realtime descendants.
+            auto ancestor=path;
+            for(;;) {
+                if(gate->observed_hidden.count(ancestor)){cadence=gate->policy.classify(path,true);break;}
+                if(ancestor==gate->root)break;
+                const auto slash=ancestor.find_last_of('/');if(slash==std::string::npos)break;
+                ancestor=slash==0?"/":ancestor.substr(0,slash);
+                if(ancestor.size()<gate->root.size())break;
+            }
+        }
+        const bool allowed=cadence==UpdateCadence::Realtime || (gate->policy.includesPeriodic() && cadence==UpdateCadence::Periodic);
+        if(!allowed)gate->suppressed=true;
+        if(!allowed && cadence==UpdateCadence::Periodic)gate->deferred=true;
+        sqlite3_result_int(context,allowed?1:0);
+    }catch(const std::exception& error){sqlite3_result_error(context,error.what(),-1);}
+}
 IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expected,
                          const std::function<bool(std::vector<FileRecord>&)>& next,
                          const std::string& scope,
                          const std::function<void(sqlite3*)>& admission={},
                          const ExclusionPolicy* captured_policy=nullptr,
                          const std::vector<std::string>* protected_scopes=nullptr,
-                         bool partial=false) {
+                         bool partial=false,const UpdatePolicy* update_policy=nullptr,
+                         const std::vector<std::string>* observed_hidden_roots=nullptr) {
     validateScope(scope);
     if(protected_scopes)for(const auto& protected_scope:*protected_scopes) {
         validateScope(protected_scope);
@@ -492,6 +529,18 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
         const auto& policy=captured_policy?*captured_policy:current_policy;
         if(current_policy.revision!=expected.policy_revision || policy.revision!=expected.policy_revision) throw std::runtime_error("exclusion policy changed during scan");
         if(admission)admission(conn.get());
+        UpdateMergeGate* update_gate=nullptr;
+        if(update_policy) {
+            auto gate=std::make_unique<UpdateMergeGate>(UpdateMergeGate{s.root,*update_policy,false,false,{}});
+            if(observed_hidden_roots)for(const auto& hidden:*observed_hidden_roots) {
+                if(normalizePath(hidden)!=hidden || !pathIsWithin(hidden,s.root))throw std::invalid_argument("hidden observation outside source");
+                gate->observed_hidden.insert(hidden);
+            }
+            update_gate=gate.release();
+            if(sqlite3_create_function_v2(conn.get(),"el_update_allowed",2,SQLITE_UTF8|SQLITE_DETERMINISTIC,
+                update_gate,updateAllowed,nullptr,nullptr,[](void* data){delete static_cast<UpdateMergeGate*>(data);})!=SQLITE_OK)
+                throw std::runtime_error(sqlite3_errmsg(conn.get()));
+        }
         const bool compact=hasDirectoryStorage(conn.get());
         conn.exec(compact?"CREATE TEMP TABLE snapshot_keys(entry_id INTEGER PRIMARY KEY);":"CREATE TEMP TABLE snapshot_keys(relative_path TEXT PRIMARY KEY);");
         auto keys=prepare(conn.get(),"INSERT INTO snapshot_keys VALUES(?)");
@@ -506,6 +555,11 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
                 if(record.source_id!=0 && record.source_id!=s.id) throw std::invalid_argument("wrong source record");
                 if(!record.relative_path.empty() && record.relative_path!=relative) throw std::invalid_argument("relative path mismatch");
                 if(!relativeWithin(relative,scope)) throw std::invalid_argument("record outside snapshot scope");
+                if(update_policy && !update_policy->allows(record.path,record.finder_hidden)) {
+                    update_gate->suppressed=true;
+                    if(update_policy->classify(record.path,record.finder_hidden)==UpdateCadence::Periodic)update_gate->deferred=true;
+                    continue;
+                }
                 if(protected_scopes && std::any_of(protected_scopes->begin(),protected_scopes->end(),
                     [&](const std::string& protected_scope){return relativeWithin(relative,protected_scope);}))continue;
                 if(policy.excludes(record.path,record.is_directory)) continue;
@@ -564,9 +618,11 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             stats.removed+=static_cast<std::uint64_t>(sqlite3_changes(conn.get()));
             if(searchTraceEnabled()) searchTrace("Database", "merge_delete vm_steps="+std::to_string(sqlite3_stmt_status(remove.get(),SQLITE_STMTSTATUS_VM_STEP,0)));
         };
-        const std::string missing=" AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.relative_path=files.relative_path)";
+        std::string missing=" AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.relative_path=files.relative_path)";
+        if(update_policy)missing+=" AND el_update_allowed(files.relative_path,files.cloud_copy)";
         if(compact) {
-            const std::string compact_missing=" AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.entry_id=file_entries.id)";
+            std::string compact_missing=" AND NOT EXISTS(SELECT 1 FROM snapshot_keys WHERE snapshot_keys.entry_id=file_entries.id)";
+            if(update_policy)compact_missing+=" AND el_update_allowed((SELECT CASE WHEN file_entries.leaf='' THEN '.' WHEN d.relative_path='' THEN file_entries.leaf ELSE d.relative_path||'/'||file_entries.leaf END FROM directories d WHERE d.id=file_entries.directory_id AND d.source_id=file_entries.source_id),file_entries.cloud_copy)";
             for(const auto& query:directoryScopeQueries("DELETE FROM file_entries WHERE ",compact_missing,scope))removeMissing(query.sql,query.bounds);
         } else if(full) {
             removeMissing("DELETE FROM files WHERE source_id=?"+missing,{});
@@ -579,15 +635,27 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             removeMissing("DELETE FROM files WHERE source_id=? AND relative_path=?"+missing,{scope});
             removeMissing("DELETE FROM files WHERE source_id=? AND relative_path>=? AND relative_path<?"+missing,{scope+"/",scope+"0"});
         }
+        const bool full_refresh=full && (!update_policy || update_policy->includesPeriodic());
         auto update=prepare(conn.get(),partial ?
-            "UPDATE sources SET status=3,last_check=strftime('%s','now'),revision=revision+1 WHERE id=?" : full ?
+            "UPDATE sources SET status=3,last_check=strftime('%s','now'),revision=revision+1 WHERE id=?" : full_refresh ?
             "UPDATE sources SET status=0,last_check=strftime('%s','now'),last_success=strftime('%s','now'),revision=revision+1 WHERE id=?" :
             "UPDATE sources SET last_check=strftime('%s','now'),revision=revision+1 WHERE id=?");
         sqlite3_bind_int64(update.get(),1,s.id);
         if(sqlite3_step(update.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
-        if(full && !partial) {
+        if(full_refresh && !partial) {
+            auto cached_count=count+retained_count;
+            if(update_gate && update_gate->suppressed) {
+                // A background refresh can retain ignored cache rows. Count them
+                // in the worker transaction rather than underreporting the source.
+                auto rows=prepare(conn.get(),compact ?
+                    "SELECT COUNT(*) FROM file_entries WHERE source_id=?" :
+                    "SELECT COUNT(*) FROM files WHERE source_id=?");
+                sqlite3_bind_int64(rows.get(),1,s.id);
+                if(sqlite3_step(rows.get())!=SQLITE_ROW)throw std::runtime_error(sqlite3_errmsg(conn.get()));
+                cached_count=static_cast<std::uint64_t>(sqlite3_column_int64(rows.get(),0));
+            }
             auto root=prepare(conn.get(),"INSERT INTO roots(root,generation,last_scan_time,file_count) VALUES(?,0,strftime('%s','now'),?) ON CONFLICT(root) DO UPDATE SET last_scan_time=excluded.last_scan_time,file_count=excluded.file_count");
-            bindText(root.get(),1,s.root); sqlite3_bind_int64(root.get(),2,count+retained_count);
+            bindText(root.get(),1,s.root); sqlite3_bind_int64(root.get(),2,cached_count);
             if(sqlite3_step(root.get())!=SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(conn.get()));
         }
         if(tableExists(conn.get(),"files_name_fts") && !metadataFlag(conn.get(),"name_fts_ready")) {
@@ -596,7 +664,8 @@ IndexStats mergeSnapshot(const SqliteConnection& conn,const SourceRecord& expect
             installFtsTriggers(conn); setMetadataFlag(conn.get(),"name_fts_ready",true);
         }
         stats.changed = content_changed || stats.removed > 0 ||
-            (partial && s.status != SourceStatus::Failed) || (full && !partial && s.status != SourceStatus::Accessible);
+            (partial && s.status != SourceStatus::Failed) || (full_refresh && !partial && s.status != SourceStatus::Accessible);
+        stats.deferred=update_gate && update_gate->deferred;
         conn.exec("COMMIT;"); return stats;
     } catch (...) { conn.exec("ROLLBACK;"); throw; }
 }
@@ -1187,6 +1256,38 @@ std::vector<SourceRecord> Database::sources() const {
 SourceRecord Database::source(std::int64_t id) const {
     SqliteConnection conn(db_path_,false,true); conn.exec("BEGIN;"); return getSource(conn.get(),id);
 }
+std::optional<bool> Database::cachedFinderHidden(const std::string& path) const {
+    if(path.empty() || path.find('\0')!=std::string::npos || !utf8ToPath(path).is_absolute() || normalizePath(path)!=path)
+        throw std::invalid_argument("invalid indexed path");
+    sqlite3* raw=nullptr;
+    if(sqlite3_open_v2(db_path_.c_str(),&raw,SQLITE_OPEN_READONLY|SQLITE_OPEN_FULLMUTEX,nullptr)!=SQLITE_OK) {
+        const std::string message=raw?sqlite3_errmsg(raw):"unable to open index";
+        if(raw)sqlite3_close(raw);throw std::runtime_error(message);
+    }
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);sqlite3_busy_timeout(raw,1000);
+    auto sources=prepare(raw,"SELECT id,root FROM sources");
+    const bool compact=hasDirectoryStorage(raw);
+    auto lookup=prepare(raw,compact ?
+        "SELECT e.cloud_copy FROM directories d JOIN file_entries e ON e.directory_id=d.id WHERE d.source_id=? AND d.relative_path=? AND e.leaf=?" :
+        "SELECT cloud_copy FROM files WHERE source_id=? AND relative_path=?");
+    bool found=false;int rc;
+    while((rc=sqlite3_step(sources.get()))==SQLITE_ROW) {
+        const auto root=columnText(sources.get(),1);if(!pathIsWithin(path,root))continue;
+        const auto relative=relativeTo(path,root);
+        sqlite3_reset(lookup.get());sqlite3_clear_bindings(lookup.get());sqlite3_bind_int64(lookup.get(),1,sqlite3_column_int64(sources.get(),0));
+        if(compact) {
+            const auto separator=relative.find_last_of('/');
+            const auto dir=relative=="."?std::string{}:separator==std::string::npos?std::string{}:relative.substr(0,separator);
+            const auto leaf=relative=="."?std::string{}:separator==std::string::npos?relative:relative.substr(separator+1);
+            bindText(lookup.get(),2,dir);bindText(lookup.get(),3,leaf);
+        } else bindText(lookup.get(),2,relative);
+        const auto row=sqlite3_step(lookup.get());
+        if(row==SQLITE_ROW) {found=true;if((sqlite3_column_int(lookup.get(),0)&kFinderHiddenStorageBit)!=0)return true;}
+        else if(row!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(raw));
+    }
+    if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(raw));
+    return found?std::optional<bool>(false):std::nullopt;
+}
 std::int64_t Database::ensureSourceForRoot(const std::string& root) const {
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");
     try { const auto id=sourceForRoot(conn.get(),root,true); conn.exec("COMMIT;"); return id; }
@@ -1268,7 +1369,8 @@ IndexStats Database::mergeSourceSnapshot(const SourceRecord& expected,
                                         const std::vector<FileRecord>& records,
                                         const std::string& subtree_relative,
                                         const std::vector<SourceRecord>* expected_descendants,
-                                        const std::vector<std::string>* unreadable_paths) const {
+                                        const std::vector<std::string>* unreadable_paths,const UpdatePolicy* update_policy,
+                                        const std::vector<std::string>* observed_hidden_roots) const {
     std::vector<std::string> protected_scopes;
     if(unreadable_paths)for(const auto& path:*unreadable_paths)
         protected_scopes.push_back(relativeTo(path,expected.root));
@@ -1294,7 +1396,7 @@ IndexStats Database::mergeSourceSnapshot(const SourceRecord& expected,
         for(const auto& child:*expected_descendants)
             if(pathIsWithin(scope,child.root))throw std::invalid_argument("scan scope belongs to nested source");
     },nullptr,(expected_descendants || unreadable_paths)?&protected_scopes:nullptr,
-       unreadable_paths && !unreadable_paths->empty());
+       unreadable_paths && !unreadable_paths->empty(),update_policy,observed_hidden_roots);
 }
 IndexStats Database::mergeSourceSnapshotFile(const SourceRecord& expected,
                                             const std::string& snapshot_database,

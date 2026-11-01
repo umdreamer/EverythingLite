@@ -1,4 +1,6 @@
 #include "core/index_manager.h"
+#include "core/update_policy.h"
+#include <unordered_set>
 #include "core/path_utils.h"
 #include "core/source_probe.h"
 
@@ -41,15 +43,16 @@ std::int64_t IndexManager::newGeneration() {
 
 IndexStats IndexManager::rebuildSource(std::int64_t source_id,
                                       const ProgressCallback& progress,
-                                      const std::atomic_bool* cancelled) {
+                                      const std::atomic_bool* cancelled,const UpdatePolicy* update_policy) {
     const auto expected = database_.source(source_id);
-    return rebuildSourceScope(expected, expected.root, {}, progress, cancelled);
+    return rebuildSourceScope(expected, expected.root, {}, progress, cancelled,{},update_policy);
 }
 
 IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const std::string& scan_path,
                                            const std::string& subtree_relative,
                                            const ProgressCallback& progress,
-                                           const std::atomic_bool* cancelled) {
+                                           const std::atomic_bool* cancelled,
+                                           const std::string& reconcile_target,const UpdatePolicy* update_policy) {
     std::optional<SourceOwnershipSnapshot> ownership;
     try { ownership.emplace(database_.captureSourceDescendants(expected)); }
     catch(const std::exception& error) { IndexStats stats; stats.error=error.what(); return stats; }
@@ -58,10 +61,32 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
     // Classification changes only the displayed physical type. It never binds
     // a legacy cache to a new volume identity or grants snapshot authority.
     std::optional<ProbeSession> type_probe;
-    if(expected.type==SourceType::Unknown && subtree_relative.empty())
+    if(expected.type==SourceType::Unknown && subtree_relative.empty() && (!update_policy || update_policy->includesPeriodic()))
         type_probe.emplace(beginSourceProbe(expected));
-    ScanBoundary boundary; boundary.allow_root_symlink=subtree_relative.empty();
+    ScanBoundary boundary; boundary.allow_root_symlink=scan_path==expected.root;
     boundary.allow_partial=true;
+    boundary.required_path=reconcile_target;
+    boundary.visibility_root=expected.root;
+    bool cadence_deferred=false;
+    std::unordered_set<std::string> observed_hidden;
+    if(update_policy) {
+        const auto markDeferred=[&](const auto& path,bool hidden) {
+            if(hidden && !update_policy->includesPeriodic()) {
+                auto ancestor=path;bool covered=false;
+                for(;;) {
+                    if(observed_hidden.count(ancestor)){covered=true;break;}
+                    if(ancestor==expected.root)break;
+                    const auto slash=ancestor.find_last_of('/');if(slash==std::string::npos)break;
+                    ancestor=slash==0?"/":ancestor.substr(0,slash);
+                    if(ancestor.size()<expected.root.size())break;
+                }
+                if(!covered)observed_hidden.insert(path);
+            }
+            if(!update_policy->allows(path,hidden) && update_policy->classify(path,hidden)==UpdateCadence::Periodic)cadence_deferred=true;
+        };
+        boundary.allow_record=[&,update_policy,markDeferred](const auto& path,bool hidden){markDeferred(path,hidden);return update_policy->allows(path,hidden);};
+        boundary.descend_directory=[&,update_policy,markDeferred](const auto& path,bool hidden){markDeferred(path,hidden);return update_policy->shouldDescend(path,hidden);};
+    }
     for(const auto& child:descendants) {
         if(pathIsWithin(scan_path,child.root)) {
             IndexStats stats; stats.error="scan scope belongs to nested source"; return stats;
@@ -73,15 +98,23 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
     auto stats = scanner_.scanTree(scan_path, [&](std::vector<FileRecord>&& batch) {
         if (cancelled && cancelled->load()) return false;
         reported += batch.size();
-        snapshot.insert(snapshot.end(), std::make_move_iterator(batch.begin()), std::make_move_iterator(batch.end()));
+        for(auto& record:batch)
+            if(reconcile_target.empty() || pathIsWithin(record.path,reconcile_target))snapshot.push_back(std::move(record));
         if (progress) progress(expected.root, reported);
         return !(cancelled && cancelled->load());
     }, cancelled, &policy, &boundary);
+    stats.deferred=cadence_deferred;
+    if(!reconcile_target.empty())for(const auto& protected_path:stats.protected_paths)
+        if(pathIsWithin(reconcile_target,protected_path)) {
+            stats.completed=false;stats.partial_complete=false;break;
+        }
     const bool snapshot_ready=(stats.completed || stats.partial_complete) && !(cancelled && cancelled->load());
     if (snapshot_ready) {
         try {
+            const std::vector<std::string> observed(observed_hidden.begin(),observed_hidden.end());
             const auto merged = database_.mergeSourceSnapshot(expected, snapshot, subtree_relative,
-                &descendants, stats.partial_complete ? &stats.protected_paths : nullptr);
+                &descendants, stats.partial_complete ? &stats.protected_paths : nullptr,update_policy,&observed);
+            stats.deferred=stats.deferred || merged.deferred;
             stats.removed = merged.removed;
             stats.changed = merged.changed;
             stats.indexed = merged.indexed;
@@ -135,14 +168,14 @@ IndexStats IndexManager::rebuildSourceScope(const SourceRecord& expected, const 
 
 IndexStats IndexManager::rebuildRoot(const std::string& root,
                                      const ProgressCallback& progress,
-                                     const std::atomic_bool* cancelled) {
+                                     const std::atomic_bool* cancelled,const UpdatePolicy* update_policy) {
     const auto id = database_.ensureSourceForRoot(normalizePath(root));
-    return rebuildSource(id, progress, cancelled);
+    return rebuildSource(id, progress, cancelled,update_policy);
 }
 
 IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
                                       const ProgressCallback& progress,
-                                      const std::atomic_bool* cancelled) {
+                                      const std::atomic_bool* cancelled,const UpdatePolicy* update_policy) {
     IndexStats total; total.completed = true;
     std::unordered_set<std::string> seen;
     std::vector<std::pair<std::string,std::int64_t>> configured;
@@ -172,10 +205,11 @@ IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
         if (cancelled && cancelled->load()) { total.completed = false; total.cancelled = true; break; }
         const auto already_scanned=total.scanned;
         const auto stats = rebuildSource(entry.second, progress ? ProgressCallback(
-            [&](const std::string& root,std::uint64_t count){progress(root,already_scanned+count);}) : ProgressCallback{}, cancelled);
+            [&](const std::string& root,std::uint64_t count){progress(root,already_scanned+count);}) : ProgressCallback{}, cancelled,update_policy);
         total.scanned += stats.scanned; total.indexed += stats.indexed;
         total.skipped += stats.skipped; total.removed += stats.removed;
         total.changed = total.changed || stats.changed;
+        total.deferred = total.deferred || stats.deferred;
         total.completed = total.completed && stats.completed;
         total.cancelled = total.cancelled || stats.cancelled;
         if (!stats.error.empty()) {
@@ -186,9 +220,10 @@ IndexStats IndexManager::rebuildRoots(const std::vector<std::string>& roots,
     return total;
 }
 
-IndexStats IndexManager::applyPathChange(const std::string& root, const std::string& path) {
+IndexStats IndexManager::applyPathChange(const std::string& root, const std::string& path,const UpdatePolicy* update_policy) {
     const auto normalized_root = normalizePath(root);
     auto scan_path = normalizePath(path);
+    const auto requested_path=scan_path;
     if (!pathIsWithin(scan_path, normalized_root)) return {};
     SourceRecord expected;
     for (const auto& source : database_.sources()) {
@@ -197,7 +232,7 @@ IndexStats IndexManager::applyPathChange(const std::string& root, const std::str
             expected = source;
         }
     }
-    if (!expected.id) return rebuildRoot(normalized_root);
+    if (!expected.id) return rebuildRoot(normalized_root,{},nullptr,update_policy);
     // Only same-volume legacy local descendants can be routed without
     // replacing the separately bound identity of a removable/network source.
     try {
@@ -211,7 +246,7 @@ IndexStats IndexManager::applyPathChange(const std::string& root, const std::str
         }
         if(owner) {
             if(sameVolumeLegacyChild(normalized_root,*owner))
-                return applyPathChange(owner->root,scan_path);
+                return applyPathChange(owner->root,scan_path,update_policy);
             IndexStats stats; stats.error="scan scope belongs to nested source requiring verification"; return stats;
         }
     } catch(const std::exception& error) { IndexStats stats; stats.error=error.what(); return stats; }
@@ -228,9 +263,11 @@ IndexStats IndexManager::applyPathChange(const std::string& root, const std::str
             if (parent_exists) break;
         }
     }
-    const auto relative = scan_path == normalized_root ? std::string{} :
-        scan_path.substr(normalized_root.size() + (normalized_root.back() == '/' ? 0 : 1));
-    return rebuildSourceScope(expected, scan_path, relative, {}, nullptr);
+    const auto target=(!exists && requested_path!=normalized_root)?requested_path:scan_path;
+    const auto relative = target == normalized_root ? std::string{} :
+        target.substr(normalized_root.size() + (normalized_root.back() == '/' ? 0 : 1));
+    return rebuildSourceScope(expected, scan_path, relative, {}, nullptr,
+                              target==scan_path?std::string{}:target,update_policy);
 }
 
 } // namespace everything_lite

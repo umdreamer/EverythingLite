@@ -78,6 +78,16 @@ static void scannerRegressions(const fs::path& base) {
     boundary.enter_directory=[](const std::string&,int){return DirectoryDecision::Error;};
     stats=FileScanner().scanTree(root.string(),[](std::vector<FileRecord>&&){return true;},nullptr,nullptr,&boundary);
     assert(!stats.completed && !stats.error.empty());
+    ScanBoundary changed_root;bool root_swapped=false;
+    changed_root.enter_directory=[&](const std::string& path,int) {
+        if(path==root.string() && !root_swapped) {
+            fs::rename(root,base/"branches-held");fs::create_directory(root);root_swapped=true;
+        }
+        return DirectoryDecision::Enter;
+    };
+    stats=FileScanner().scanTree(root.string(),[](std::vector<FileRecord>&&){return true;},nullptr,nullptr,&changed_root);
+    assert(root_swapped && !stats.completed && !stats.error.empty());
+    fs::remove(root);fs::rename(base/"branches-held",root);
     ScanBoundary partial;partial.allow_partial=true;
     bool moved=false;std::vector<FileRecord> partial_rows;
     stats=FileScanner(1).scanTree(root.string(),[&](std::vector<FileRecord>&& rows){
@@ -208,7 +218,11 @@ static void sourceRegressions(const fs::path& base,SourceScanRequest request) {
     auto main_bytes=[&]{std::ifstream stream(db.path(),std::ios::binary);return std::string(std::istreambuf_iterator<char>(stream),{});};
     const auto protected_main=main_bytes();incomplete(scanSourceToSnapshot(r));assert(main_bytes()==protected_main);
     fs::create_directory_symlink(base/"root",base/"manager-root-link");
+    std::ofstream(base/"root"/"root-link-removal-regression.txt")<<"synthetic";
     IndexManager manager((base/"output"/"legacy-manager.sqlite").string());assert(manager.rebuildRoot((base/"manager-root-link").string()).completed);assert(manager.database().search("item-13.txt").size()==1);
+    fs::remove(base/"root"/"root-link-removal-regression.txt");
+    assert(manager.applyPathChange((base/"manager-root-link").string(),(base/"manager-root-link"/"root-link-removal-regression.txt").string()).completed);
+    assert(manager.database().search("root-link-removal-regression").empty());
     const auto old_root_mtime=scalar(db.path(),"SELECT modified_time FROM files WHERE relative_path='.'");
     fs::remove(base/"root"/"item-0.txt");saved=db.source(saved.id);reset(r);r.source=saved;auto changed=scanSourceToSnapshot(r);assert(changed.stats.completed);auto delta=db.mergeSourceSnapshotFile(saved,changed.snapshot_path);assert(delta.completed && delta.removed==1 && scalar(db.path(),"SELECT writes FROM audit")==1+(old_root_mtime!=scalar(db.path(),"SELECT modified_time FROM files WHERE relative_path='.'")));
 }

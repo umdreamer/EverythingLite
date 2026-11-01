@@ -18,17 +18,20 @@ public:
 
     IndexStats rebuildSource(std::int64_t source_id,
                              const ProgressCallback& progress = {},
-                             const std::atomic_bool* cancelled = nullptr);
+                             const std::atomic_bool* cancelled = nullptr,
+                             const UpdatePolicy* update_policy = nullptr);
 
     IndexStats rebuildRoot(const std::string& root,
                            const ProgressCallback& progress = {},
-                           const std::atomic_bool* cancelled = nullptr);
+                           const std::atomic_bool* cancelled = nullptr,
+                             const UpdatePolicy* update_policy = nullptr);
 
     IndexStats rebuildRoots(const std::vector<std::string>& roots,
                             const ProgressCallback& progress = {},
-                            const std::atomic_bool* cancelled = nullptr);
+                            const std::atomic_bool* cancelled = nullptr,
+                             const UpdatePolicy* update_policy = nullptr);
 
-    IndexStats applyPathChange(const std::string& root, const std::string& path);
+    IndexStats applyPathChange(const std::string& root, const std::string& path,const UpdatePolicy* update_policy=nullptr);
 
     Database& database() { return database_; }
     const Database& database() const { return database_; }
@@ -39,7 +42,9 @@ private:
     IndexStats rebuildSourceScope(const SourceRecord& expected, const std::string& scan_path,
                                   const std::string& subtree_relative,
                                   const ProgressCallback& progress,
-                                  const std::atomic_bool* cancelled);
+                                  const std::atomic_bool* cancelled,
+                                  const std::string& reconcile_target = {},
+                                  const UpdatePolicy* update_policy = nullptr);
 
     static std::int64_t newGeneration();
 };

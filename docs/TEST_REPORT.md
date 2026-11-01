@@ -1,4 +1,4 @@
-# 测试范围与验证记录（截至 0.5.4）
+# 测试范围与验证记录（截至 0.5.5）
 
 ## 验证范围
 
@@ -11,6 +11,14 @@ ctest --preset core-debug
 ```
 
 启用 GUI 时还需实际生成 EverythingLite。GUI Debug 预设要求 Qt，缺少依赖时配置失败。Linux 构建与隔离容器入口见 [Linux 构建](LINUX_BUILD.md)。没有 GitHub Actions 工作流，不能把本地测试记录称为 CI 通过。
+
+## Mac 0.5.5 本地核验（2026-11-01）
+
+来源目录同步覆盖规范路径去重、原子回滚、活动目录增删、空列表、来源身份及离线文件缓存保留、首次未完成扫描恢复，以及相同配置不改变 SQLite data_version。界面回归覆盖保存后自动索引、清空配置后重启、移除目录后的搜索范围、文件夹加入索引、分页与扫描重试。GUI Debug CTest 27/27、独立 Core Debug CTest 20/20 通过。
+
+Mac Release 本地构建通过，应用包 CFBundleShortVersionString 为 0.5.5。使用临时配置、空索引目录和独立数据库，应用以 offscreen 方式运行 3 秒，未提前退出。该启动检查不代表人工交互、真实大型索引、NAS、Finder 联动、独立 Qt 部署或签名分发已验收；真实日常索引未用于测试。
+
+命令：`cmake --build build/gui-debug --parallel 4`；`QT_QPA_PLATFORM=offscreen ctest --test-dir build/gui-debug --output-on-failure`；`cmake --preset core-debug`；`cmake --build --preset core-debug --parallel 4`；`ctest --preset core-debug`；`BUILD_DIR=build/macos-release ./scripts/build-macos.sh`。
 
 ## Mac 0.5.4 本地核验（2026-11-01）
 

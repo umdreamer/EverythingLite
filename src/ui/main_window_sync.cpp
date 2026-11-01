@@ -201,7 +201,7 @@ void MainWindow::dispatchSyncJobs() {
             QString error;
             try {
                 IndexManager manager(native(db_path));
-                const auto stats = rescan ? manager.rebuildRoot(native(root))
+                const auto stats = rescan ? manager.rebuildRoots({native(root)})
                     : manager.applyPathChange(native(root), native(path));
                 if (!stats.completed) {
                     error = stats.cancelled ? QStringLiteral("同步已取消")

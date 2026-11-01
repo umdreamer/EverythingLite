@@ -1081,6 +1081,11 @@ class UiTest : public QObject {
         window.rebuildIndex(); QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
         window.search_edit_->setText("fresh-nested"); window.runSearch();
         QTRY_VERIFY(!window.search_in_flight_); QCOMPARE(window.model_->rowCount(),1);
+        QFile overflow(child+"/overflow-nested.txt"); QVERIFY(overflow.open(QIODevice::WriteOnly)); overflow.close();
+        window.scheduleFileEvent({root.toStdString(),true,{}}); window.processPendingEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        window.search_edit_->setText("overflow-nested"); window.runSearch();
+        QTRY_VERIFY(!window.search_in_flight_); QCOMPARE(window.model_->rowCount(),1);
     }
     void nestedSourceAvailabilityStaysFixedDuringPagination() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

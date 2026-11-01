@@ -40,6 +40,7 @@ add_library(everything_core
     src/core/path_utils.cpp
     src/core/directory_sync.cpp
     src/core/deferred_updates.cpp
+    src/core/update_policy.cpp
     src/core/scanner.cpp
     src/core/database.cpp
     src/core/index_storage.cpp
@@ -235,6 +236,9 @@ if(BUILD_TESTS)
     add_executable(test_deferred_updates tests/test_deferred_updates.cpp)
     target_link_libraries(test_deferred_updates PRIVATE everything_core)
     add_test(NAME deferred_updates COMMAND test_deferred_updates)
+    add_executable(test_update_policy tests/test_update_policy.cpp)
+    target_link_libraries(test_update_policy PRIVATE everything_core)
+    add_test(NAME update_policy COMMAND test_update_policy)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME cli_directory COMMAND ${Python3_EXECUTABLE}

@@ -1234,9 +1234,21 @@ class UiTest : public QObject {
         window.scheduleFileEvent({db_path.toStdString(), false, {}});
         window.scheduleFileEvent({(db_path + QStringLiteral("-wal")).toStdString(), false, {}});
         window.scheduleFileEvent({(db_path + QStringLiteral("-shm")).toStdString(), false, {}});
+        window.scheduleFileEvent({(db_path + QStringLiteral(".deferred.sqlite")).toStdString(), false, {}});
+        window.scheduleFileEvent({(db_path + QStringLiteral(".deferred.sqlite-wal")).toStdString(), false, {}});
         QVERIFY(window.pending_paths_.isEmpty());
         QVERIFY(window.pending_rescan_roots_.isEmpty());
         QVERIFY(!window.event_timer_->isActive());
+    }
+    void applicationBuildEventsDoNotTriggerIndexing() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto db=dir.filePath("index.db");
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",old);window.watcher_->stop();window.roots_={QStringLiteral("/")};
+        window.scheduleFileEvent({QCoreApplication::applicationFilePath().toStdString(),false,{}});
+        QVERIFY(window.pending_paths_.isEmpty()); QVERIFY(!window.deferred_updates_);
+        QVERIFY(!window.event_timer_->isActive());
+        window.scheduleFileEvent({QCoreApplication::applicationFilePath().toStdString(),true,{}});
+        QVERIFY(window.pending_rescan_roots_.contains(QStringLiteral("/")));
     }
     void manualRebuildShowsBusyAndCompletionFeedback() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

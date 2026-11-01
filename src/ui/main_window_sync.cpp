@@ -3,9 +3,12 @@
 #include "core/path_utils.h"
 #include "ui/index_update_journal.h"
 #include "ui/open_history_store.h"
+#include "ui/app_settings.h"
 
 #include <QDir>
 #include <QDateTime>
+#include <QCoreApplication>
+#include <QFile>
 #include <QFileInfo>
 #include <QLabel>
 #include <QMetaObject>
@@ -28,6 +31,22 @@ QString failureKey(const QString& root, const QString& path, bool rescan) {
     // inside a filename. Scope association itself uses structured fields.
     return QStringLiteral("%1:%2:%3:%4").arg(root.size()).arg(root).arg(rescan ? 1 : 0).arg(path);
 }
+
+QStringList ownBuildDirectories() {
+    QStringList result;
+    const auto executable=QDir::cleanPath(QCoreApplication::applicationFilePath());
+    const auto marker=executable.indexOf(QStringLiteral(".app/Contents/"));
+    if(marker>=0)result<<executable.left(marker+4);
+    QDir directory(QCoreApplication::applicationDirPath());
+    for(int i=0;i<5;++i) {
+        QFile cache(directory.filePath(QStringLiteral("CMakeCache.txt")));
+        if(cache.open(QIODevice::ReadOnly) && cache.read(1024*1024).contains("CMAKE_PROJECT_NAME:STATIC=EverythingLite")) {
+            result<<QDir::cleanPath(directory.absolutePath());break;
+        }
+        if(!directory.cdUp())break;
+    }
+    return result;
+}
 } // namespace
 
 void MainWindow::scheduleFileEvent(const FileEvent& event) {
@@ -43,14 +62,21 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     if (event.path.empty()) return;
     const auto path = QString::fromUtf8(event.path.c_str());
     const auto normalized_path = QDir::cleanPath(path);
-    if (index_journal_ && index_journal_->containsPath(normalized_path)) return;
+    if (!event.needs_full_rescan && index_journal_ && index_journal_->containsPath(normalized_path)) return;
     const auto own_open_history = QDir::cleanPath(OpenHistoryStore::defaultPath());
-    if (normalized_path == own_open_history || normalized_path.startsWith(own_open_history + QLatin1Char('-'))) return;
+    if (!event.needs_full_rescan && (normalized_path == own_open_history || normalized_path.startsWith(own_open_history + QLatin1Char('-')))) return;
     const auto own_database = QDir::cleanPath(db_path_);
     const auto deferred_database=own_database+QStringLiteral(".deferred.sqlite");
     if (!event.needs_full_rescan &&
         (normalized_path == own_database || normalized_path.startsWith(own_database + QLatin1Char('-')) ||
          normalized_path == deferred_database || normalized_path.startsWith(deferred_database + QLatin1Char('-')))) return;
+    if(!event.needs_full_rescan) {
+        const auto settings_path=QDir::cleanPath(makeAppSettings().fileName());
+        if(normalized_path==settings_path || normalized_path==settings_path+QStringLiteral(".lock"))return;
+        static const auto own_directories=ownBuildDirectories();
+        for(const auto& own:own_directories)
+            if(pathIsWithin(native(normalized_path),native(own)))return;
+    }
     const auto root = rootForPath(path);
     if (root.isEmpty()) return;
     if(!event.needs_full_rescan && normalized_path!=QDir::cleanPath(root)) {

@@ -539,6 +539,10 @@ int main() {
     assert(rejected([&]{configured.synchronizeConfiguredRoots({"relative"});}));
     const auto missing=base/"not-created.db";
     assert(rejected([&]{Database(missing.string()).synchronizeConfiguredRoots({"/synthetic/a"});}));assert(!fs::exists(missing));
+    assert(rejected([&]{Database(missing.string()).sources();}));assert(!fs::exists(missing));
+    assert(rejected([&]{Database(missing.string()).source(1);}));assert(!fs::exists(missing));
+    assert(rejected([&]{Database(missing.string()).exclusionPolicy();}));assert(!fs::exists(missing));
+    assert(rejected([&]{Database(missing.string()).configuredRoots();}));assert(!fs::exists(missing));
     const auto previous=configured.configuredRoots();
     SourceRecord ambiguous;ambiguous.root="/synthetic/ambiguous";configured.saveSource(ambiguous);configured.saveSource(ambiguous);
     const auto source_count=configured.sources().size();

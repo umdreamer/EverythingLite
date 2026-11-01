@@ -20,13 +20,14 @@ namespace {
 
 class SqliteConnection {
 public:
-    explicit SqliteConnection(const std::string& path,bool create=true) {
+    explicit SqliteConnection(const std::string& path,bool create=true,bool read_only=false) {
         const auto parent = std::filesystem::path(path).parent_path();
-        if (create && !parent.empty()) {
+        if (create && !read_only && !parent.empty()) {
             std::error_code ec;
             std::filesystem::create_directories(parent, ec);
         }
-        if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READWRITE | (create?SQLITE_OPEN_CREATE:0) | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
+        const int flags=SQLITE_OPEN_FULLMUTEX | (read_only?SQLITE_OPEN_READONLY:SQLITE_OPEN_READWRITE | (create?SQLITE_OPEN_CREATE:0));
+        if (sqlite3_open_v2(path.c_str(), &db_, flags, nullptr) != SQLITE_OK) {
             std::string message = db_ ? sqlite3_errmsg(db_) : "unable to open sqlite database";
             if (db_) sqlite3_close(db_);
             db_ = nullptr;
@@ -34,11 +35,9 @@ public:
         }
         registerDirectoryWriter(db_);
         // Configure lock waiting before any PRAGMA that may acquire a lock.
-        sqlite3_busy_timeout(db_, 5000);
-        exec("PRAGMA journal_mode=WAL;");
-        exec("PRAGMA synchronous=NORMAL;");
+        sqlite3_busy_timeout(db_, read_only?100:5000);
+        if(!read_only) {exec("PRAGMA journal_mode=WAL;");exec("PRAGMA synchronous=NORMAL;");}
         exec("PRAGMA temp_store=MEMORY;");
-        exec("PRAGMA busy_timeout=5000;");
         exec("PRAGMA case_sensitive_like=ON;");
     }
 
@@ -1026,7 +1025,7 @@ CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 }
 
 ExclusionPolicy Database::exclusionPolicy() const {
-    SqliteConnection conn(db_path_); conn.exec("BEGIN;"); return getPolicy(conn.get());
+    SqliteConnection conn(db_path_,false,true); conn.exec("BEGIN;"); return getPolicy(conn.get());
 }
 std::uint64_t Database::saveExclusionPolicy(const ExclusionRules& rules,const ExclusionProgress& progress) const {
     const ExclusionPolicy validated(rules); // invalid rules must not touch storage
@@ -1129,7 +1128,7 @@ std::string Database::migrationBackupPath() const {
     return sqlite3_step(stmt.get())==SQLITE_ROW ? columnText(stmt.get(),0) : std::string{};
 }
 std::vector<std::string> Database::configuredRoots() const {
-    SqliteConnection conn(db_path_,false);conn.exec("BEGIN;");
+    SqliteConnection conn(db_path_,false,true);conn.exec("BEGIN;");
     if(!tableExists(conn.get(),"configured_index_roots"))return {};
     auto rows=prepare(conn.get(),"SELECT root FROM configured_index_roots ORDER BY position");
     std::vector<std::string> result;int rc;
@@ -1175,7 +1174,7 @@ std::vector<std::string> Database::synchronizeConfiguredRoots(const std::vector<
     }catch(...){conn.exec("ROLLBACK;");throw;}
 }
 std::vector<SourceRecord> Database::sources() const {
-    SqliteConnection conn(db_path_); conn.exec("BEGIN;");
+    SqliteConnection conn(db_path_,false,true); conn.exec("BEGIN;");
     const auto policy=getPolicy(conn.get());
     auto stmt=prepare(conn.get(),std::string("SELECT ")+sourceColumns+" FROM sources ORDER BY id");
     std::vector<SourceRecord> out; int rc;
@@ -1186,7 +1185,7 @@ std::vector<SourceRecord> Database::sources() const {
     return out;
 }
 SourceRecord Database::source(std::int64_t id) const {
-    SqliteConnection conn(db_path_); conn.exec("BEGIN;"); return getSource(conn.get(),id);
+    SqliteConnection conn(db_path_,false,true); conn.exec("BEGIN;"); return getSource(conn.get(),id);
 }
 std::int64_t Database::ensureSourceForRoot(const std::string& root) const {
     SqliteConnection conn(db_path_); conn.exec("BEGIN IMMEDIATE;");

@@ -188,6 +188,9 @@ class UiTest : public QObject {
         QVERIFY(window.pending_paths_.isEmpty());QVERIFY(!window.event_timer_->isActive());
         DeferredUpdates store((db_path+".deferred.sqlite").toStdString());
         QCOMPARE(store.due(std::numeric_limits<std::int64_t>::max()).size(),std::size_t{1});
+        QString status;
+        QTimer::singleShot(0,[&] {auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());QVERIFY(box);status=box->text();box->accept();});
+        window.showIndexStatus();QVERIFY(status.contains(QStringLiteral("周期待更新")) && status.contains(root+"/.cache"));
         QVERIFY(manager.database().search("new-hidden").empty());
         sqlite3* raw=nullptr;QCOMPARE(sqlite3_open((db_path+".deferred.sqlite").toUtf8().constData(),&raw),SQLITE_OK);
         QCOMPARE(sqlite3_exec(raw,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(raw);

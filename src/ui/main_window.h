@@ -262,6 +262,7 @@ private:
     void processDueRetries();
     void armDeferredTimer();
     void processDeferredUpdates();
+    QStringList deferredStatusLines() const;
     void armRetryTimer();
     void reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error, bool retry = true);
     QString rootForPath(const QString& path) const;

@@ -188,6 +188,18 @@ void MainWindow::armDeferredTimer() {
     }
 }
 
+QStringList MainWindow::deferredStatusLines() const {
+    QStringList lines;
+    if(!deferred_updates_)return lines;
+    try {
+        for(const auto& item:deferred_updates_->due(std::numeric_limits<std::int64_t>::max())) {
+            const auto when=QDateTime::fromMSecsSinceEpoch(item.due_ms).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+            lines<<QStringLiteral("周期待更新：%1；计划时间：%2").arg(QString::fromUtf8(item.path.c_str()),when);
+        }
+    } catch(const std::exception& error) {lines<<QStringLiteral("无法读取周期队列：%1").arg(QString::fromUtf8(error.what()));}
+    return lines;
+}
+
 void MainWindow::processDeferredUpdates() {
     if(closing_ || !deferred_updates_)return;
     if(worker_thread_ || storage_maintenance_) {deferred_timer_->start(1000);return;}

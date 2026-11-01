@@ -1569,6 +1569,7 @@ void MainWindow::showIndexStatus() {
         details << QStringLiteral("待更新范围与原因：");
         for (const auto& item : sync_errors_) details << QStringLiteral("  %1").arg(item);
     }
+    details << deferredStatusLines();
     // Read only the tiny source catalog so incomplete scans remain visible
     // after restart. Do not initialize or count the multi-gigabyte index here.
     sqlite3* catalog = nullptr;

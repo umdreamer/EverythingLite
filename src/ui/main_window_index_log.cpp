@@ -46,6 +46,7 @@ void MainWindow::refreshIndexUpdateLogDialog() {
 
     QStringList pending;
     for (const auto& value : sync_errors_) pending << value;
+    pending << deferredStatusLines();
     pending.sort();
     if (pending.isEmpty()) pending << QStringLiteral("当前无待更新范围");
     if (!index_journal_error_.isEmpty())

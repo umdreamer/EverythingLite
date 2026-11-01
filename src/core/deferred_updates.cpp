@@ -92,8 +92,22 @@ bool DeferredUpdates::acknowledge(const DeferredUpdate& value) {
     if(sqlite3_step(stmt.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db_));return sqlite3_changes(db_)!=0;
 }
 void DeferredUpdates::postpone(const std::string& root,const std::string& path,std::int64_t due_ms) {
-    auto stmt=prepare(db_,"UPDATE pending SET due_ms=MAX(due_ms,?) WHERE root=? AND path=?");
-    sqlite3_bind_int64(stmt.get(),1,due_ms);bindValue(db_,stmt.get(),2,root);bindValue(db_,stmt.get(),3,path);
-    if(sqlite3_step(stmt.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db_));
+    if(sqlite3_exec(db_,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr)!=SQLITE_OK)throw std::runtime_error(sqlite3_errmsg(db_));
+    try {
+        auto list=prepare(db_,"SELECT path FROM pending WHERE root=?");bindValue(db_,list.get(),1,root);
+        std::vector<std::string> matching;int rc;
+        while((rc=sqlite3_step(list.get()))==SQLITE_ROW) {
+            auto current=column(list.get(),0);
+            if(pathIsWithin(path,current) || pathIsWithin(current,path))matching.push_back(std::move(current));
+        }
+        if(rc!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db_));
+        auto stmt=prepare(db_,"UPDATE pending SET due_ms=MAX(due_ms,?) WHERE root=? AND path=?");
+        for(const auto& current:matching) {
+            sqlite3_reset(stmt.get());sqlite3_clear_bindings(stmt.get());sqlite3_bind_int64(stmt.get(),1,due_ms);
+            bindValue(db_,stmt.get(),2,root);bindValue(db_,stmt.get(),3,current);
+            if(sqlite3_step(stmt.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db_));
+        }
+        if(sqlite3_exec(db_,"COMMIT",nullptr,nullptr,nullptr)!=SQLITE_OK)throw std::runtime_error(sqlite3_errmsg(db_));
+    } catch(...) {sqlite3_exec(db_,"ROLLBACK",nullptr,nullptr,nullptr);throw;}
 }
 }

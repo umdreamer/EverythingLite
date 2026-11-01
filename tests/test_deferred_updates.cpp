@@ -22,7 +22,7 @@ int main() {
         second.enqueue("/synthetic/root","/synthetic/root/.cache",1500);
         const auto merged=first.due(1000);assert(merged.size()==1 && merged.front().path=="/synthetic/root/.cache");
         assert(!first.acknowledge(changed.front()));
-        first.postpone(merged.front().root,merged.front().path,2000);assert(first.due(1999).empty());
+        first.postpone(changed.front().root,changed.front().path,2000);assert(first.due(1999).empty());
     }
 #if !defined(_WIN32)
     fs::create_symlink(path,dir/"linked.sqlite");

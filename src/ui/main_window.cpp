@@ -15,6 +15,8 @@
 #include "core/search_query.h"
 #include "platform/watcher_factory.h"
 #include "ui/root_settings_dialog.h"
+#include "ui/settings_dialog.h"
+#include <QTabWidget>
 #include "ui/desktop_actions.h"
 #include "ui/file_preview.h"
 #include "ui/search_result_model.h"
@@ -698,23 +700,26 @@ void MainWindow::buildMenus() {
     bookmarks_menu_ = menuBar()->addMenu(QStringLiteral("书签(&B)"));
 
     auto* tools_menu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
+    auto* settings_action=tools_menu->addAction(QStringLiteral("设置…"));
+    connect(settings_action,&QAction::triggered,this,[this]{showSettingsPage(QStringLiteral("roots"));});
+    tools_menu->addSeparator();
     auto* rebuild_action = tools_menu->addAction(QStringLiteral("重建索引"));
     connect(rebuild_action, &QAction::triggered, this, &MainWindow::rebuildIndex);
 
     auto* roots_action = tools_menu->addAction(QStringLiteral("索引目录…"));
-    connect(roots_action, &QAction::triggered, this, &MainWindow::editRoots);
+    connect(roots_action, &QAction::triggered, this, [this]{showSettingsPage(QStringLiteral("roots"));});
 
     auto* excludes_action = tools_menu->addAction(QStringLiteral("排除规则…"));
-    connect(excludes_action, &QAction::triggered, this, &MainWindow::showExclusionSettings);
+    connect(excludes_action, &QAction::triggered, this, [this]{showSettingsPage(QStringLiteral("excludes"));});
 
     auto* storage_action = tools_menu->addAction(QStringLiteral("索引存储…"));
-    connect(storage_action, &QAction::triggered, this, &MainWindow::showIndexStorage);
+    connect(storage_action, &QAction::triggered, this, [this]{showSettingsPage(QStringLiteral("storage"));});
 
     auto* status_action = tools_menu->addAction(QStringLiteral("索引状态…"));
     connect(status_action, &QAction::triggered, this, &MainWindow::showIndexStatus);
 
     auto* update_log_action = tools_menu->addAction(QStringLiteral("索引更新日志…"));
-    connect(update_log_action, &QAction::triggered, this, &MainWindow::showIndexUpdateLog);
+    connect(update_log_action, &QAction::triggered, this, [this]{showSettingsPage(QStringLiteral("logs"));});
 
     auto* overview_action = tools_menu->addAction(QStringLiteral("设置总览…"));
     connect(overview_action, &QAction::triggered, this, &MainWindow::showSettingsOverview);
@@ -726,7 +731,7 @@ void MainWindow::buildMenus() {
     auto* preferences_action = tools_menu->addAction(QStringLiteral("偏好设置…"));
     preferences_action->setMenuRole(QAction::PreferencesRole);
     preferences_action->setShortcut(QKeySequence::Preferences);
-    connect(preferences_action, &QAction::triggered, this, &MainWindow::editRoots);
+    connect(preferences_action, &QAction::triggered, this, [this]{showSettingsPage(QStringLiteral("roots"));});
 
     auto* help_menu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
     auto* help_syntax = help_menu->addAction(QStringLiteral("搜索语法"));
@@ -1333,8 +1338,8 @@ void MainWindow::showExclusionSettings() {
     }
     try {
         Database db(toUtf8(db_path_));db.initialize();
-        const auto previous_rules=db.exclusionPolicy().rules();
-        auto* dialog=new ExclusionSettingsDialog(previous_rules,this);
+        auto previous_rules=std::make_shared<ExclusionRules>(db.exclusionPolicy().rules());
+        auto* dialog=new ExclusionSettingsDialog(*previous_rules,this);exclusion_editor_=dialog;
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         QPointer<ExclusionSettingsDialog> safe(dialog);
         dialog->saveRequested=[this,safe,previous_rules](ExclusionRules rules){
@@ -1342,6 +1347,8 @@ void MainWindow::showExclusionSettings() {
                 if(safe) safe->showError(QStringLiteral("索引任务正在运行，规则未保存。请稍后重试。"));
                 return;
             }
+            try {*previous_rules=Database(toUtf8(db_path_)).exclusionPolicy().rules();}
+            catch(const std::exception& error) {if(safe)safe->showError(QString::fromUtf8(error.what()));return;}
             if(safe) safe->setSaving(true);
             auto removed=std::make_shared<std::uint64_t>(0);
             auto elapsed=std::make_shared<QElapsedTimer>();elapsed->start();
@@ -1366,8 +1373,9 @@ void MainWindow::showExclusionSettings() {
                 }
                 if(safe) safe->finishSaved();
                 statusBar()->showMessage(QStringLiteral("排除规则已保存，清理 %1 项。放宽规则后请重建索引。").arg(*removed),15000);
-                if(!previous_rules.index_app_bundle_contents && rules.index_app_bundle_contents)
-                    QTimer::singleShot(0,this,&MainWindow::rebuildIndex);
+                const bool rebuild=!previous_rules->index_app_bundle_contents && rules.index_app_bundle_contents;
+                *previous_rules=rules;
+                if(rebuild)QTimer::singleShot(0,this,&MainWindow::rebuildIndex);
             });
         };
         dialog->show();
@@ -1576,6 +1584,7 @@ void MainWindow::synchronizeCatalog() {
             if(folder_scope_index_pending_) {
                 folder_scope_index_pending_=false;folder_scope_index_failed_=true;updateFolderScopeLabel();
             }
+            emit catalogSynchronized(error);
             statusBar()->showMessage(QStringLiteral("索引来源尚未同步：%1；下次保存或启动时重试。").arg(error),15000);return;
         }
         // Explicit folder enrollment still requires a completion callback when
@@ -1583,6 +1592,7 @@ void MainWindow::synchronizeCatalog() {
         if(folder_scope_index_pending_ && roots_.contains(folder_scope_) &&
            std::find(scans->begin(),scans->end(),toUtf8(folder_scope_))==scans->end())
             scans->push_back(toUtf8(folder_scope_));
+        emit catalogSynchronized({});
         for(const auto& root:*scans)scheduleFileEvent({root,true,{}});
         if(scans->empty() && status_label_->text().startsWith(QStringLiteral("索引目录已保存；")))
             status_label_->setText(QStringLiteral("索引来源已同步"));
@@ -1593,11 +1603,14 @@ void MainWindow::editRoots() {
     if(storage_maintenance_){status_label_->setText(QStringLiteral("索引维护进行中；完成后可修改索引目录。"));return;}
     RootSettingsDialog dialog(roots_, this, periodic_minutes_, update_rules_);
     if (dialog.exec() != QDialog::Accepted) return;
-    roots_ = dialog.roots();
-    periodic_minutes_=dialog.periodicMinutes();update_rules_=dialog.updateRules();
+    applyRootConfiguration(dialog.roots(),dialog.periodicMinutes(),dialog.updateRules());
+}
+void MainWindow::applyRootConfiguration(const QStringList& roots,int interval,const std::vector<UpdateRule>& rules) {
+    roots_ = roots;
+    periodic_minutes_=interval;update_rules_=rules;
     saveSettings();
     updateScopeLabel();
-    restartWatcher();
+    restartWatcher(false);
     armDeferredTimer();
     scheduleCatalogSync();
     status_label_->setText(QStringLiteral("索引目录已保存；正在同步来源，新增目录将自动建立索引。"));
@@ -1606,10 +1619,16 @@ void MainWindow::editRoots() {
 
 void MainWindow::showIndexStatus() {
     if(storage_maintenance_){status_label_->setText(QStringLiteral("索引维护进行中；完成后可读取索引状态。"));return;}
+    showSettingsPage(QStringLiteral("state"));
+    if(auto* tabs=settings_dialog_->findChild<QTabWidget*>("stateTabs"))tabs->setCurrentIndex(0);
+}
+QString MainWindow::indexStatusText() const {
     QStringList details;
     details << QStringLiteral("版本：%1").arg(QString::fromLatin1(EVERYTHING_LITE_VERSION));
     details << QStringLiteral("数据库：%1").arg(db_path_);
     details << QStringLiteral("文件记录（最近统计）：%1").arg(indexed_count_);
+    details << QStringLiteral("后台任务：%1").arg(storage_maintenance_?QStringLiteral("索引存储维护中"):worker_thread_?QStringLiteral("正在更新索引或来源清单"):QStringLiteral("空闲"));
+    details << QStringLiteral("当前消息：%1").arg(status_label_->text());
     details << QStringLiteral("名称索引状态：%1").arg(
         !name_search_available_ ? QStringLiteral("unavailable") :
         !name_search_ready_ ? QStringLiteral("not ready") : QStringLiteral("ready"));
@@ -1662,10 +1681,14 @@ void MainWindow::showIndexStatus() {
         details << QStringLiteral("当前已加载结果：%1").arg(last_search_result_count_);
     }
     details << QStringLiteral("索引目录：\n  %1").arg(roots_.join(QStringLiteral("\n  ")));
-    QMessageBox::information(this, QStringLiteral("索引状态"), details.join(QStringLiteral("\n")));
+    return details.join(QStringLiteral("\n"));
 }
 
 void MainWindow::showSettingsOverview() {
+    showSettingsPage(QStringLiteral("state"));
+    if(auto* tabs=settings_dialog_->findChild<QTabWidget*>("stateTabs"))tabs->setCurrentIndex(1);
+}
+QString MainWindow::settingsOverviewText() const {
     auto settings = makeAppSettings();
     QStringList details{
         QStringLiteral("当前索引目录："),
@@ -1726,22 +1749,14 @@ void MainWindow::showSettingsOverview() {
     const auto files = QDir(db_info.absolutePath()).entryInfoList({db_info.fileName() + QStringLiteral("*")}, QDir::Files | QDir::Hidden, QDir::Name);
     for (const auto& file : files) details << QStringLiteral("  %1（%2 字节）").arg(file.absoluteFilePath()).arg(file.size());
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("设置总览"));
-    dialog.resize(760, 620);
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* text = new QPlainTextEdit(&dialog);
-    text->setObjectName(QStringLiteral("settingsOverviewText"));
-    text->setReadOnly(true);
-    text->setPlainText(details.join(QStringLiteral("\n")));
-    layout->addWidget(text);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
-    dialog.exec();
+    return details.join(QStringLiteral("\n"));
 }
 
 void MainWindow::showSearchDiagnostics() {
+    showSettingsPage(QStringLiteral("state"));
+    if(auto* tabs=settings_dialog_->findChild<QTabWidget*>("stateTabs"))tabs->setCurrentIndex(2);
+}
+QString MainWindow::searchDiagnosticsText() const {
     const auto visible_query = search_edit_ ? search_edit_->text() : QString{};
     const auto normalized_query = normalizeGuiQuery(visible_query);
     QStringList details;
@@ -1763,7 +1778,7 @@ void MainWindow::showSearchDiagnostics() {
     details << QStringLiteral("搜索执行方式：输入完成后延迟搜索（800 ms）+ IME 组词保护 + 启动不空查 + SearchService 复用（v0.4.10）");
     details << QStringLiteral("终端 Trace：%1").arg(searchTraceEnabled() ? QStringLiteral("已启用") : QStringLiteral("未启用"));
     details << QStringLiteral("CLI 探针：%1").arg(cliProbePath());
-    QMessageBox::information(this, QStringLiteral("最近搜索诊断"), details.join(QStringLiteral("\n")));
+    return details.join(QStringLiteral("\n"));
 }
 
 void MainWindow::finishSearchLog(std::uint64_t request_id, const QString& state, const QString& detail,

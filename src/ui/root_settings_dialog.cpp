@@ -23,12 +23,14 @@ RootSettingsDialog::RootSettingsDialog(const QStringList& roots, QWidget* parent
     setWindowTitle(QStringLiteral("索引目录"));
     resize(700, 620);
 
-    auto* layout = new QVBoxLayout(this);
+    auto* outer = new QVBoxLayout(this);
+    root_section_=new QWidget(this);auto* layout=new QVBoxLayout(root_section_);layout->setContentsMargins(0,0,0,0);
+    outer->addWidget(root_section_,1);
     auto* hint = new QLabel(QStringLiteral("只索引需要被 Everything Lite 搜索的目录。保存后自动同步来源并索引新增目录；移除目录会保留历史缓存。"));
     hint->setWordWrap(true);
     layout->addWidget(hint);
 
-    list_ = new QListWidget(this);
+    list_ = new QListWidget(this);list_->setObjectName(QStringLiteral("indexRootsList"));
     list_->addItems(roots);
     list_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     layout->addWidget(list_, 1);
@@ -41,6 +43,8 @@ RootSettingsDialog::RootSettingsDialog(const QStringList& roots, QWidget* parent
     actionRow->addStretch();
     layout->addLayout(actionRow);
 
+    update_section_=new QWidget(this);layout=new QVBoxLayout(update_section_);layout->setContentsMargins(0,0,0,0);
+    outer->addWidget(update_section_,1);
     auto* intervalRow=new QHBoxLayout();
     intervalRow->addWidget(new QLabel(QStringLiteral("隐藏及程序数据目录更新间隔："),this));
     periodic_minutes_=new QSpinBox(this);periodic_minutes_->setObjectName(QStringLiteral("periodicMinutes"));
@@ -63,15 +67,25 @@ RootSettingsDialog::RootSettingsDialog(const QStringList& roots, QWidget* parent
     connect(removeRule,&QPushButton::clicked,this,[this]{const auto rows=rules_->selectionModel()->selectedRows();for(auto it=rows.crbegin();it!=rows.crend();++it)rules_->removeRow(it->row());});
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    layout->addWidget(buttons);
+    outer->addWidget(buttons);
 
     connect(addButton, &QPushButton::clicked, this, &RootSettingsDialog::addRoot);
     connect(removeButton, &QPushButton::clicked, this, &RootSettingsDialog::removeSelected);
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        try { UpdatePolicy(pathToUtf8(utf8ToPath(QDir::homePath().toUtf8().toStdString())),updateRules(),{}); accept(); }
+        try { UpdatePolicy(pathToUtf8(utf8ToPath(QDir::homePath().toUtf8().toStdString())),updateRules(),{}); if(saveRequested)saveRequested();else accept(); }
         catch(const std::exception&) { QMessageBox::warning(this,QStringLiteral("更新规则无效"),QStringLiteral("请为每条规则填写不同的绝对目录路径。")); }
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+}
+
+void RootSettingsDialog::reload(const QStringList& roots,int interval,const std::vector<UpdateRule>& rules) {
+    list_->clear();list_->addItems(roots);periodic_minutes_->setValue(interval);rules_->setRowCount(0);
+    for(const auto& rule:rules)appendRule(QString::fromUtf8(rule.path.c_str()),rule.cadence);
+    setProperty("rootSettingsBaseline",roots);
+}
+
+void RootSettingsDialog::setSectionsVisible(bool roots,bool updates) {
+    root_section_->setVisible(roots);update_section_->setVisible(updates);
 }
 
 void RootSettingsDialog::appendRule(const QString& path,UpdateCadence cadence) {

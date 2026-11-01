@@ -22,9 +22,14 @@ public:
     void setSaving(bool saving);
     void setSaveProgress(std::uint64_t checked,std::uint64_t total,int elapsed_seconds);
     void finishSaved();
+    void setEmbedded(bool embedded) {embedded_=embedded;}
+    bool isSaving() const {return saving_active_;}
+    void reloadRules(const ExclusionRules& rules);
     std::function<void(ExclusionRules)> saveRequested;
 
 private:
+    bool embedded_=false;
+    bool saving_active_=false;
     QListWidget* directories_ = nullptr;
     QListWidget* files_ = nullptr;
     QPlainTextEdit* folder_filter_ = nullptr;

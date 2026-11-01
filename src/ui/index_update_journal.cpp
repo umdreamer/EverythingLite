@@ -37,6 +37,8 @@ void setError(QString* target, const QString& message) {
 IndexUpdateJournal::IndexUpdateJournal(QString directory) : directory_(QDir::cleanPath(std::move(directory))) {}
 
 QString IndexUpdateJournal::defaultDirectory() {
+    const auto test_file=qgetenv("EVERYTHING_LITE_TEST_SETTINGS_FILE");
+    if(!test_file.isEmpty())return QDir(QFileInfo(QString::fromUtf8(test_file)).absolutePath()).filePath(QStringLiteral("index-update-logs"));
     return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
         .filePath(QStringLiteral("index-update-logs"));
 }

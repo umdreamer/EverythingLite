@@ -72,11 +72,17 @@ struct SearchBookmark {
     Qt::SortOrder sort_order = Qt::AscendingOrder;
 };
 
+class SettingsDialog;
+class ExclusionSettingsDialog;
+
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
+
+signals:
+    void catalogSynchronized(const QString& error);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -237,13 +243,22 @@ private:
     void resetPaging();
     QString currentSearchSignature() const;
     void rebuildIndex();
+    QPointer<SettingsDialog> settings_dialog_;
+    QPointer<ExclusionSettingsDialog> exclusion_editor_;
+    void showSettingsPage(const QString& page);
+    QWidget* makeRootSettingsPage(QWidget* parent,bool updates);
+    QWidget* makeStateSettingsPage(QWidget* parent);
+    QString indexStatusText() const;
+    QString settingsOverviewText() const;
+    QString searchDiagnosticsText() const;
+    void applyRootConfiguration(const QStringList& roots,int interval,const std::vector<UpdateRule>& rules);
     void editRoots();
     void showIndexStatus();
     void showSettingsOverview();
     void showSearchDiagnostics();
     void showSearchLog();
     void showIndexUpdateLog();
-    void refreshIndexUpdateLogDialog();
+    void refreshIndexUpdateLogDialog(bool force=false);
     void recordIndexUpdate(const QString& kind, const QString& root, const QString& path,
                            const QString& reason = {}, int attempt = 0);
     void applyIndexLogRetention(bool force = false);

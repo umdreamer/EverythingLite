@@ -114,6 +114,7 @@ void ExclusionSettingsDialog::showError(const QString& message) {
 }
 
 void ExclusionSettingsDialog::setSaving(bool saving) {
+    saving_active_=saving;
     saving_->setVisible(saving);
     progress_->setVisible(saving);
     if(saving) {progress_->setRange(0,0);saving_->setText(QStringLiteral("正在保存排除规则并计算索引条数…"));}
@@ -130,7 +131,18 @@ void ExclusionSettingsDialog::setSaveProgress(std::uint64_t checked,std::uint64_
         : QStringLiteral("已检查 %1 / %2 项；正在清理索引，已用 %3 秒").arg(checked).arg(total).arg(elapsed_seconds));
 }
 
+void ExclusionSettingsDialog::reloadRules(const ExclusionRules& rules) {
+    if(saving_active_)return;
+    directories_->clear();files_->clear();
+    for(const auto& path:rules.directories)addUnique(directories_,QString::fromUtf8(path.c_str()));
+    for(const auto& path:rules.files)addUnique(files_,QString::fromUtf8(path.c_str()));
+    folder_filter_->setPlainText(QString::fromUtf8(rules.folder_filter.c_str()));
+    file_filter_->setPlainText(QString::fromUtf8(rules.file_filter.c_str()));
+    app_contents_->setChecked(rules.index_app_bundle_contents);error_->clear();saving_->hide();
+}
+
 void ExclusionSettingsDialog::finishSaved() {
+    if(embedded_) {setSaving(false);saving_->setText(QStringLiteral("排除规则已保存，索引清理已完成。"));saving_->show();return;}
     QDialog::accept();
 }
 

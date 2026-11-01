@@ -29,6 +29,9 @@
 #include <optional>
 #include <limits>
 #include <sqlite3.h>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 #include <QFile>
 #include <QFileDialog>
 #include <QDialog>
@@ -47,12 +50,50 @@
 #include <QSettings>
 #include <QTableView>
 #include <QTableWidget>
+#include <QDialogButtonBox>
+#include <QTabWidget>
+#include <QTreeWidget>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QtTest>
 namespace everything_lite {
+namespace {
+std::atomic_bool audit_settings_counts{false};
+std::atomic_int settings_gui_counts{0};
+int countSettingsSql(unsigned,void*,void* statement,void*) {
+    if(!audit_settings_counts || QThread::currentThread()!=QCoreApplication::instance()->thread())return 0;
+    const char* query=sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+    if(query && (std::string(query).find("COUNT(*) FROM files")!=std::string::npos || std::string(query).find("COUNT(*) FROM file_entries")!=std::string::npos))++settings_gui_counts;
+    return 0;
+}
+#if defined(__APPLE__)
+extern "C" int sqlite3_open_v2(const char* path,sqlite3** db,int flags,const char* vfs) {
+    using Open=int(*)(const char*,sqlite3**,int,const char*);
+    static const auto native=reinterpret_cast<Open>(dlsym(RTLD_NEXT,"sqlite3_open_v2"));
+    const int rc=native(path,db,flags,vfs);
+    if(rc==SQLITE_OK && audit_settings_counts)sqlite3_trace_v2(*db,SQLITE_TRACE_STMT,countSettingsSql,nullptr);
+    return rc;
+}
+#else
+int registerSettingsSqlTrace(sqlite3* db,char**,const sqlite3_api_routines*) {
+    return sqlite3_trace_v2(db,SQLITE_TRACE_STMT,countSettingsSql,nullptr);
+}
+#endif
+struct SettingsCountAudit {
+    SettingsCountAudit() {settings_gui_counts=0;audit_settings_counts=true;
+#if !defined(__APPLE__)
+        sqlite3_auto_extension(reinterpret_cast<void(*)()>(registerSettingsSqlTrace));
+#endif
+    }
+    ~SettingsCountAudit() {audit_settings_counts=false;
+#if !defined(__APPLE__)
+        sqlite3_cancel_auto_extension(reinterpret_cast<void(*)()>(registerSettingsSqlTrace));
+#endif
+    }
+};
+}
 class UiUrlSink : public QObject {
     Q_OBJECT
 public:
@@ -215,17 +256,105 @@ class UiTest : public QObject {
         QVERIFY(!window.search_in_flight_);QCOMPARE(window.model_->rowCount(),0);
         QTRY_VERIFY(!window.worker_thread_);
     }
+    void indexStatusOpensUnifiedSettingsInsteadOfMessageBox() {
+        MainWindow window;window.watcher_->stop();bool message_box=false;
+        QTimer::singleShot(0,&window,[&] {
+            if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {message_box=true;box->reject();}
+        });
+        window.showIndexStatus();
+        QVERIFY2(!message_box,"Index status must use the settings page instead of a long modal message box");
+        auto* settings=window.findChild<QDialog*>("settingsDialog");QVERIFY(settings);
+        auto* navigation=settings->findChild<QTreeWidget*>("settingsNavigation");QVERIFY(navigation);
+        QVERIFY(navigation->topLevelItemCount()>=5);
+        auto* status=settings->findChild<QPlainTextEdit*>("indexStatusText");QVERIFY(status);QVERIFY(status->isReadOnly());
+        QVERIFY(status->toPlainText().contains(QStringLiteral("版本")));
+        QVERIFY(!QApplication::activeModalWidget());
+    }
+    void unifiedSettingsSavePreservesPolicyAndCurrentResults() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto added=dir.filePath("added");QVERIFY(QDir().mkpath(added));
+        QFile file(added+"/settings-new-root.txt");QVERIFY(file.open(QIODevice::WriteOnly));file.close();
+        MainWindow window;window.watcher_->stop();window.search_edit_->setText("item");window.runSearch();
+        QTRY_COMPARE(window.model_->rowCount(),1000);QTRY_VERIFY(!window.search_in_flight_);
+        window.table_->selectRow(0);const auto selected=window.model_->pathAt(0);const auto request=window.search_request_id_;
+        window.showSettingsPage("roots");auto* settings=window.findChild<QDialog*>("settingsDialog");QVERIFY(settings);
+        auto* roots=settings->findChild<RootSettingsDialog*>("rootSettingsEditor");QVERIFY(roots);
+        window.showSettingsPage("updates");
+        auto* updates=settings->findChild<RootSettingsDialog*>("updateSettingsEditor");QVERIFY(updates);
+        updates->findChild<QSpinBox*>("periodicMinutes")->setValue(60);
+        updates->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        QCOMPARE(window.periodic_minutes_,60);
+        window.showSettingsPage("roots");auto* list=roots->findChild<QListWidget*>("indexRootsList");QVERIFY(list);list->clear();list->addItem(added);
+        roots->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();window.watcher_->stop();
+        QCOMPARE(window.roots_,QStringList{added});QCOMPARE(window.periodic_minutes_,60);QVERIFY(settings->isVisible());
+        Database db(window.db_path_.toStdString());QTRY_VERIFY_WITH_TIMEOUT(!db.search("settings-new-root").empty(),8000);
+        QTRY_VERIFY(!window.worker_thread_);QCOMPARE(window.search_request_id_,request);
+        QCOMPARE(window.model_->rowCount(),1000);QCOMPARE(window.model_->pathAt(0),selected);
+        QCOMPARE(window.table_->selectionModel()->selectedRows().size(),1);
+        if(!qgetenv("EL_SETTINGS_SCREENSHOT").isEmpty())QVERIFY(settings->grab().save(QString::fromUtf8(qgetenv("EL_SETTINGS_SCREENSHOT"))));
+        window.showIndexStatus();QCOMPARE(window.findChild<QDialog*>("settingsDialog"),settings);
+        window.showSettingsPage("storage");QCOMPARE(window.findChild<QDialog*>("settingsDialog"),settings);
+        auto* storage=settings->findChild<QDialog*>("indexStorageDialog");QVERIFY(storage);QVERIFY(!storage->isWindow());
+        QCOMPARE(window.search_request_id_,request);
+    }
+    void settingsPolicySaveDoesNotCountIndexOnGuiThread() {
+        MainWindow window;window.watcher_->stop();QTRY_VERIFY(!window.worker_thread_ && !window.catalog_timer_->isActive());
+        SettingsCountAudit audit;
+        Database(window.db_path_.toStdString()).totalFileCount();
+        QVERIFY2(settings_gui_counts.load()>0,"The audit must observe its positive-control count query");
+        settings_gui_counts=0;
+        window.applyRootConfiguration(window.roots_,60,window.update_rules_);window.watcher_->stop();
+        QCOMPARE(settings_gui_counts.load(),0);
+    }
+    void hiddenSettingsLogDoesNotRefreshUntilShown() {
+        MainWindow window;window.watcher_->stop();window.showSettingsPage("logs");
+        auto* settings=window.findChild<QDialog*>("settingsDialog");QVERIFY(settings);
+        auto* history=settings->findChild<QPlainTextEdit*>("indexUpdateHistory");QVERIFY(history);
+        history->setPlainText("retained hidden view");settings->close();
+        window.recordIndexUpdate(QStringLiteral("完成"),fixture_root,fixture_root+"/hidden-log-update",{},0);
+        QCOMPARE(history->toPlainText(),QStringLiteral("retained hidden view"));
+        window.showSettingsPage("logs");QVERIFY(history->toPlainText().contains(QStringLiteral("hidden-log-update")));
+    }
+    void visibleSettingsRejectStaleRootSave() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto added=dir.filePath("added");QVERIFY(QDir().mkpath(added));
+        MainWindow window;window.watcher_->stop();window.showSettingsPage("roots");
+        auto* settings=window.findChild<QDialog*>("settingsDialog");QVERIFY(settings);
+        auto* editor=settings->findChild<RootSettingsDialog*>("rootSettingsEditor");QVERIFY(editor);
+        window.applyRootConfiguration({fixture_root,added},window.periodic_minutes_,window.update_rules_);window.watcher_->stop();
+        editor->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        QVERIFY(window.roots_.contains(added));
+        QVERIFY(settings->findChild<QLabel*>("rootSettingsOutcome")->text().contains(QStringLiteral("已在其他操作中变化")));
+    }
+    void reopenedSettingsReloadCurrentRoots() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto added=dir.filePath("added");QVERIFY(QDir().mkpath(added));
+        MainWindow window;window.watcher_->stop();window.showSettingsPage("roots");
+        auto* settings=window.findChild<QDialog*>("settingsDialog");QVERIFY(settings);
+        auto* editor=settings->findChild<RootSettingsDialog*>("rootSettingsEditor");QVERIFY(editor);
+        auto* list=editor->findChild<QListWidget*>("indexRootsList");QVERIFY(list);list->addItem("/synthetic/unsaved-root");settings->close();
+        window.applyRootConfiguration({fixture_root,added},window.periodic_minutes_,window.update_rules_);window.watcher_->stop();
+        window.showSettingsPage("roots");
+        QCOMPARE(list->findItems(added,Qt::MatchExactly).size(),1);
+        QVERIFY(list->findItems("/synthetic/unsaved-root",Qt::MatchExactly).empty());
+        editor->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        QVERIFY(window.roots_.contains(added));
+    }
+    void unifiedExclusionSaveStaysOpenAndCanSaveAgain() {
+        MainWindow window;window.watcher_->stop();
+        QTRY_VERIFY(!window.worker_thread_ && !window.catalog_timer_->isActive());
+        window.showSettingsPage("excludes");auto* settings=window.findChild<QDialog*>("settingsDialog");QVERIFY(settings);
+        auto* editor=window.exclusion_editor_.data();QVERIFY(editor);
+        auto* filter=editor->findChild<QPlainTextEdit*>("fileFilterEdit");QVERIFY(filter);
+        filter->setPlainText(QStringLiteral("*.settings-only"));editor->accept();
+        QTRY_VERIFY(!window.worker_thread_);QVERIFY(editor->isVisible());QVERIFY(settings->isVisible());
+        Database db(window.db_path_.toStdString());QCOMPARE(db.exclusionPolicy().rules().file_filter,std::string("*.settings-only"));
+        filter->clear();editor->accept();QTRY_VERIFY(!window.worker_thread_);
+        QVERIFY(db.exclusionPolicy().rules().file_filter.empty());QVERIFY(editor->isVisible());
+        settings->close();QVERIFY(!settings->isVisible());window.showSettingsPage("excludes");QVERIFY(editor->isVisible());
+    }
     void settingsOverviewShowsSavedConfigurationAndStoragePaths() {
         MainWindow window;
-        QString report;
-        QTimer::singleShot(0, [&] {
-            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
-            if (!dialog) return;
-            if (auto* text = dialog->findChild<QPlainTextEdit*>("settingsOverviewText"))
-                report = text->toPlainText();
-            dialog->accept();
-        });
         window.showSettingsOverview();
+        auto* report_edit=window.findChild<QPlainTextEdit*>("settingsOverviewText");QVERIFY(report_edit);
+        const auto report=report_edit->toPlainText();
         QVERIFY(report.contains(QStringLiteral("index/roots")));
         QVERIFY(report.contains(QStringLiteral("排除规则")));
         QVERIFY(report.contains(QStringLiteral("数据库")));
@@ -274,9 +403,10 @@ class UiTest : public QObject {
         QVERIFY(window.pending_paths_.isEmpty());QVERIFY(!window.event_timer_->isActive());
         DeferredUpdates store((db_path+".deferred.sqlite").toStdString());
         QCOMPARE(store.due(std::numeric_limits<std::int64_t>::max()).size(),std::size_t{1});
-        QString status;
-        QTimer::singleShot(0,[&] {auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());QVERIFY(box);status=box->text();box->accept();});
-        window.showIndexStatus();QVERIFY(status.contains(QStringLiteral("周期待更新")) && status.contains(root+"/.cache"));
+        window.showIndexStatus();
+        auto* status_edit=window.findChild<QPlainTextEdit*>("indexStatusText");QVERIFY(status_edit);
+        const auto status=status_edit->toPlainText();
+        QVERIFY(status.contains(QStringLiteral("周期待更新")) && status.contains(root+"/.cache"));
         QVERIFY(manager.database().search("new-hidden").empty());
         sqlite3* raw=nullptr;QCOMPARE(sqlite3_open((db_path+".deferred.sqlite").toUtf8().constData(),&raw),SQLITE_OK);
         QCOMPARE(sqlite3_exec(raw,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(raw);
@@ -513,13 +643,9 @@ class UiTest : public QObject {
         const auto saved=qgetenv("EVERYTHING_LITE_DB"); qputenv("EVERYTHING_LITE_DB",path.toUtf8());
         MainWindow window; qputenv("EVERYTHING_LITE_DB",saved); window.watcher_->stop();
         QVERIFY(QFile::remove(path));
-        QString text;
-        QTimer::singleShot(0,[&]{
-            if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
-                text=box->text();box->accept();
-            }
-        });
         window.showIndexStatus();
+        auto* status=window.findChild<QPlainTextEdit*>("indexStatusText");QVERIFY(status);
+        const auto text=status->toPlainText();
         QVERIFY(!QFile::exists(path));
         QVERIFY(text.contains(QStringLiteral("最近统计")));
     }
@@ -971,13 +1097,9 @@ class UiTest : public QObject {
         window.reportSyncOutcome(path, path, true, QStringLiteral("scan interrupted"));
         QVERIFY(window.sync_error_label_->text().contains(QStringLiteral("待更新")));
         QVERIFY(!window.sync_error_label_->text().contains(QStringLiteral("失败")));
-        QString details;
-        QTimer::singleShot(0, [&] {
-            auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
-            if (!dialog) return;
-            details = dialog->text(); dialog->accept();
-        });
         window.showIndexStatus();
+        auto* status=window.findChild<QPlainTextEdit*>("indexStatusText");QVERIFY(status);
+        const auto details=status->toPlainText();
         QVERIFY(details.contains(path));
         QVERIFY(details.contains(QStringLiteral("scan interrupted")));
     }
@@ -994,13 +1116,9 @@ class UiTest : public QObject {
         MainWindow window; window.watcher_->stop();
         window.db_path_ = db_path;
         QVERIFY(window.sync_errors_.isEmpty());
-        QString details;
-        QTimer::singleShot(0, [&] {
-            auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
-            if (!dialog) return;
-            details = dialog->text(); dialog->accept();
-        });
         window.showIndexStatus();
+        auto* status=window.findChild<QPlainTextEdit*>("indexStatusText");QVERIFY(status);
+        const auto details=status->toPlainText();
         QVERIFY(details.contains(absent));
         QVERIFY(details.contains(QStringLiteral("上次扫描未完成")));
     }
@@ -2345,7 +2463,8 @@ class UiTest : public QObject {
         dialog->accept();
         QTRY_VERIFY_WITH_TIMEOUT(manager.database().exclusionPolicy().revision>0,10000);
         QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
-        QTRY_VERIFY(!saved || !saved->isVisible());
+        QVERIFY(saved && saved->isVisible());
+        QVERIFY(saved->findChild<QLabel*>("exclusionSaving")->text().contains(QStringLiteral("已保存")));
         QCOMPARE(manager.database().search("alpha").size(),std::size_t(0));
         QCOMPARE(manager.database().search("beta").size(),std::size_t(1));
         action->trigger();

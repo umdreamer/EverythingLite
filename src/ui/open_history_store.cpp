@@ -29,6 +29,8 @@ OpenHistoryStore::OpenHistoryStore(QString database_path)
     : database_path_(QDir::cleanPath(std::move(database_path))) {}
 
 QString OpenHistoryStore::defaultPath() {
+    const auto test_file=qgetenv("EVERYTHING_LITE_TEST_SETTINGS_FILE");
+    if(!test_file.isEmpty())return QDir(QFileInfo(QString::fromUtf8(test_file)).absolutePath()).filePath(QStringLiteral("open-history.db"));
     return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
         .filePath(QStringLiteral("open-history.db"));
 }

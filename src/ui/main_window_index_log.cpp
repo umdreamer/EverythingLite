@@ -37,8 +37,8 @@ void MainWindow::recordIndexUpdate(const QString& kind, const QString& root, con
     refreshIndexUpdateLogDialog();
 }
 
-void MainWindow::refreshIndexUpdateLogDialog() {
-    if (!index_update_log_dialog_ || !index_journal_) return;
+void MainWindow::refreshIndexUpdateLogDialog(bool force) {
+    if (!index_update_log_dialog_ || !index_journal_ || (!force && !index_update_log_dialog_->isVisible())) return;
     auto* dates = index_update_log_dialog_->findChild<QComboBox*>(QStringLiteral("indexUpdateDates"));
     auto* current = index_update_log_dialog_->findChild<QPlainTextEdit*>(QStringLiteral("indexUpdateCurrent"));
     auto* history = index_update_log_dialog_->findChild<QPlainTextEdit*>(QStringLiteral("indexUpdateHistory"));
@@ -76,7 +76,7 @@ void MainWindow::refreshIndexUpdateLogDialog() {
 
 void MainWindow::showIndexUpdateLog() {
     if (index_update_log_dialog_) {
-        refreshIndexUpdateLogDialog();
+        refreshIndexUpdateLogDialog(true);
         index_update_log_dialog_->show();
         index_update_log_dialog_->raise();
         index_update_log_dialog_->activateWindow();
@@ -126,8 +126,8 @@ void MainWindow::showIndexUpdateLog() {
     auto* close = new QPushButton(QStringLiteral("关闭"), dialog);
     buttons->addWidget(close);
     layout->addLayout(buttons);
-    connect(dates, &QComboBox::currentIndexChanged, dialog, [this] { refreshIndexUpdateLogDialog(); });
-    connect(refresh, &QPushButton::clicked, dialog, [this] { refreshIndexUpdateLogDialog(); });
+    connect(dates, &QComboBox::currentIndexChanged, dialog, [this] { refreshIndexUpdateLogDialog(true); });
+    connect(refresh, &QPushButton::clicked, dialog, [this] { refreshIndexUpdateLogDialog(true); });
     connect(retention, &QComboBox::currentIndexChanged, dialog, [this, retention] {
         log_retention_days_ = retention->currentData().toInt();
         auto settings = makeAppSettings();
@@ -144,10 +144,10 @@ void MainWindow::showIndexUpdateLog() {
         QString error;
         if (!index_journal_->removeDate(date, &error))
             QMessageBox::warning(dialog, QStringLiteral("无法删除日志"), error);
-        refreshIndexUpdateLogDialog();
+        refreshIndexUpdateLogDialog(true);
     });
     connect(close, &QPushButton::clicked, dialog, &QDialog::close);
-    refreshIndexUpdateLogDialog();
+    refreshIndexUpdateLogDialog(true);
     dialog->show();
 }
 

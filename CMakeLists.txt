@@ -83,6 +83,9 @@ if(BUILD_GUI)
             src/ui/directory_sync_setup_dialog.cpp
             src/ui/directory_sync_setup_dialog.h
             src/ui/directory_sync_permissions.cpp
+            src/ui/settings_dialog.cpp
+            src/ui/settings_dialog.h
+            src/ui/main_window_settings.cpp
             src/ui/main_window.cpp
             src/ui/main_window_sync.cpp
             src/ui/main_window_index_log.cpp

@@ -313,10 +313,27 @@ IndexStats FileScanner::scanTree(const std::string& root,const BatchCallback& ca
                         if(!protect(child,"unable to open child directory",errno))return false;
                         continue;
                     }
-                    struct stat held{};if(fstat(nested.fd,&held)!=0 || !sameDirectory(st,held))return fail("directory changed before entry");
+                    struct stat held{};
+                    if(fstat(nested.fd,&held)!=0) {
+                        if(!protect(child,"unable to read opened directory metadata",errno))return false;
+                        continue;
+                    }
+                    if(!sameDirectory(st,held)) {
+                        if(!protect(child,"directory changed before entry",0))return false;
+                        continue;
+                    }
                     const auto decision=enter(child,nested.fd);
                     if(decision==DirectoryDecision::Prune){++stats.skipped;continue;}
                     if(decision==DirectoryDecision::Error)return fail("directory boundary check failed");
+                    struct stat entry_now{};
+                    if(fstatat(fd,name.c_str(),&entry_now,AT_SYMLINK_NOFOLLOW)!=0) {
+                        if(!protect(child,"unable to verify directory before entry",errno))return false;
+                        continue;
+                    }
+                    if(!S_ISDIR(entry_now.st_mode) || !sameDirectory(st,entry_now)) {
+                        if(!protect(child,"directory changed before entry",0))return false;
+                        continue;
+                    }
                     if(!append(child,st,child_hidden))return false;
                     if(!(policy && !policy->indexAppBundleContents() && appBundleName(name)) &&
                        !walk(nested.fd,child,child_hidden))return false;

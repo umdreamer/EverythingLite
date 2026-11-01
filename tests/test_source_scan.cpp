@@ -93,6 +93,25 @@ static void scannerRegressions(const fs::path& base) {
     assert(std::find(stats.protected_paths.begin(),stats.protected_paths.end(),(root/"sample").string())!=stats.protected_paths.end());
     assert(std::any_of(partial_rows.begin(),partial_rows.end(),[&](const auto& row){return row.path==(root/"sample-other").string();}));
     fs::rename(root/"moved-sample",root/"sample");
+    bool swapped=false,entered_old=false;
+    partial.enter_directory=[&](const std::string& path,int) {
+        if(!swapped && path==(root/"sample").string()) {
+            fs::rename(root/"sample",root/"old-sample");fs::create_directory(root/"sample");swapped=true;
+        }
+        return DirectoryDecision::Enter;
+    };
+    partial.metadata_guard=[&](const std::string& path) {
+        if(path==(root/"sample"/"sentinel").string())entered_old=true;return true;
+    };
+    partial_rows.clear();
+    stats=FileScanner(1).scanTree(root.string(),[&](std::vector<FileRecord>&& rows){
+        for(auto& row:rows)partial_rows.push_back(std::move(row));return true;
+    },nullptr,nullptr,&partial);
+    assert(swapped && !entered_old && stats.partial_complete && !stats.completed);
+    assert(std::find(stats.protected_paths.begin(),stats.protected_paths.end(),(root/"sample").string())!=stats.protected_paths.end());
+    assert(std::any_of(partial_rows.begin(),partial_rows.end(),[&](const auto& row){return row.path==(root/"sample-other").string();}));
+    fs::remove(root/"sample");fs::rename(root/"old-sample",root/"sample");
+    partial.enter_directory={};partial.metadata_guard={};
     std::atomic_bool cancel{false};
     stats=FileScanner(1).scanTree(root.string(),[&](std::vector<FileRecord>&&){cancel=true;return true;},&cancel);
     assert(!stats.completed && stats.cancelled);

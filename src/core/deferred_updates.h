@@ -23,6 +23,7 @@ public:
     void enqueue(const std::string& root,const std::string& path,std::int64_t due_ms);
     std::vector<DeferredUpdate> due(std::int64_t now_ms) const;
     bool acknowledge(const DeferredUpdate& update);
+    void postpone(const std::string& root,const std::string& path,std::int64_t due_ms);
 private:
     sqlite3* db_=nullptr;
 };

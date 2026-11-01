@@ -324,6 +324,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     retry_timer_->setSingleShot(true);
     retry_timer_->setTimerType(Qt::PreciseTimer);
     connect(retry_timer_, &QTimer::timeout, this, &MainWindow::processDueRetries);
+    deferred_timer_=new QTimer(this);deferred_timer_->setObjectName(QStringLiteral("deferredTimer"));
+    deferred_timer_->setSingleShot(true);
+    connect(deferred_timer_,&QTimer::timeout,this,&MainWindow::processDeferredUpdates);
+    if(QFileInfo::exists(db_path_+QStringLiteral(".deferred.sqlite"))) {
+        try {deferred_updates_=std::make_unique<DeferredUpdates>(toUtf8(db_path_+QStringLiteral(".deferred.sqlite")));armDeferredTimer();}
+        catch(const std::exception& error) {statusBar()->showMessage(QStringLiteral("无法恢复待更新队列：%1").arg(QString::fromUtf8(error.what())),15000);}
+    }
 
     // Index changes do not replace visible search results or their selection.
 
@@ -407,6 +414,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     search_timer_->stop();
     event_timer_->stop();
     retry_timer_->stop();
+    deferred_timer_->stop();
     log_retention_timer_->stop();
     saveSettings();
     saveBookmarks();
@@ -1538,6 +1546,7 @@ void MainWindow::editRoots() {
     saveSettings();
     updateScopeLabel();
     restartWatcher();
+    armDeferredTimer();
     status_label_->setText(QStringLiteral("索引目录已修改。请从“工具 → 重建索引”同步数据库。"));
 }
 
@@ -1606,6 +1615,7 @@ void MainWindow::showSettingsOverview() {
     QStringList details{
         QStringLiteral("当前索引目录："),
         roots_.isEmpty() ? QStringLiteral("  <未设置>") : QStringLiteral("  ") + roots_.join(QStringLiteral("\n  ")),
+        QStringLiteral("周期更新间隔：%1 分钟").arg(periodic_minutes_),
         QStringLiteral("当前搜索文件夹：%1").arg(folder_scope_.isEmpty() ? QStringLiteral("<全部已索引目录>") : folder_scope_),
         QStringLiteral("当前搜索范围：%1").arg(scope_combo_->currentText()),
         QStringLiteral("匹配路径：%1").arg(match_path_check_->isChecked() ? QStringLiteral("是") : QStringLiteral("否")),

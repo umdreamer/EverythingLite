@@ -1,5 +1,6 @@
 #pragma once
 #include "core/update_policy.h"
+#include "core/deferred_updates.h"
 
 #include "core/file_record.h"
 #include "platform/file_watcher.h"
@@ -116,6 +117,8 @@ private:
     QStringList roots_;
     int periodic_minutes_=15;
     std::vector<UpdateRule> update_rules_;
+    std::unique_ptr<DeferredUpdates> deferred_updates_;
+    QTimer* deferred_timer_ = nullptr;
     std::unique_ptr<FileWatcher> watcher_;
     SearchWorker* search_worker_ = nullptr;
     QThread* search_thread_ = nullptr;
@@ -257,8 +260,10 @@ private:
     void processPendingEvents();
     void dispatchSyncJobs();
     void processDueRetries();
+    void armDeferredTimer();
+    void processDeferredUpdates();
     void armRetryTimer();
-    void reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error);
+    void reportSyncOutcome(const QString& root, const QString& path, bool rescan, const QString& error, bool retry = true);
     QString rootForPath(const QString& path) const;
     void setBusy(bool busy, const QString& message = {});
     void startWorker(std::function<void()> job, const QString& start_message, bool refresh_search_on_finish = true,

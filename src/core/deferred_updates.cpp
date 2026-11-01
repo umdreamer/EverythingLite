@@ -91,4 +91,9 @@ bool DeferredUpdates::acknowledge(const DeferredUpdate& value) {
     bindValue(db_,stmt.get(),1,value.root);bindValue(db_,stmt.get(),2,value.path);sqlite3_bind_int64(stmt.get(),3,value.generation);
     if(sqlite3_step(stmt.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db_));return sqlite3_changes(db_)!=0;
 }
+void DeferredUpdates::postpone(const std::string& root,const std::string& path,std::int64_t due_ms) {
+    auto stmt=prepare(db_,"UPDATE pending SET due_ms=MAX(due_ms,?) WHERE root=? AND path=?");
+    sqlite3_bind_int64(stmt.get(),1,due_ms);bindValue(db_,stmt.get(),2,root);bindValue(db_,stmt.get(),3,path);
+    if(sqlite3_step(stmt.get())!=SQLITE_DONE)throw std::runtime_error(sqlite3_errmsg(db_));
+}
 }

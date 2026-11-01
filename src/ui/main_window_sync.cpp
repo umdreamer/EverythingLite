@@ -5,6 +5,8 @@
 #include "ui/open_history_store.h"
 
 #include <QDir>
+#include <QDateTime>
+#include <QFileInfo>
 #include <QLabel>
 #include <QMetaObject>
 #include <QStatusBar>
@@ -45,10 +47,27 @@ void MainWindow::scheduleFileEvent(const FileEvent& event) {
     const auto own_open_history = QDir::cleanPath(OpenHistoryStore::defaultPath());
     if (normalized_path == own_open_history || normalized_path.startsWith(own_open_history + QLatin1Char('-'))) return;
     const auto own_database = QDir::cleanPath(db_path_);
+    const auto deferred_database=own_database+QStringLiteral(".deferred.sqlite");
     if (!event.needs_full_rescan &&
-        (normalized_path == own_database || normalized_path.startsWith(own_database + QLatin1Char('-')))) return;
+        (normalized_path == own_database || normalized_path.startsWith(own_database + QLatin1Char('-')) ||
+         normalized_path == deferred_database || normalized_path.startsWith(deferred_database + QLatin1Char('-')))) return;
     const auto root = rootForPath(path);
     if (root.isEmpty()) return;
+    if(!event.needs_full_rescan && normalized_path!=QDir::cleanPath(root)) {
+        try {
+            const UpdatePolicy policy(normalizePath(native(QDir::homePath())),update_rules_,{});
+            if(policy.classify(normalizePath(native(normalized_path)))==UpdateCadence::Periodic) {
+                if(!deferred_updates_)deferred_updates_=std::make_unique<DeferredUpdates>(native(deferred_database));
+                const auto parent=QFileInfo(normalized_path).absolutePath();
+                const auto scope=pathIsWithin(native(parent),native(root))?parent:normalized_path;
+                deferred_updates_->enqueue(normalizePath(native(root)),normalizePath(native(scope)),
+                    QDateTime::currentMSecsSinceEpoch()+static_cast<qint64>(periodic_minutes_)*60000);
+                armDeferredTimer();return;
+            }
+        } catch(const std::exception& error) {
+            statusBar()->showMessage(QStringLiteral("周期队列不可用，正在直接更新：%1").arg(QString::fromUtf8(error.what())),15000);
+        }
+    }
     if (event.needs_full_rescan && error.isEmpty()) {
         watcher_error_.clear();
         watcher_error_label_->setText(QStringLiteral("目录监听正常"));
@@ -123,6 +142,66 @@ void MainWindow::processPendingEvents() {
     event_timer_->stop();
     normal_events_due_ = true;
     dispatchSyncJobs();
+}
+
+void MainWindow::armDeferredTimer() {
+    if(!deferred_timer_ || closing_)return;
+    deferred_timer_->stop();
+    if(!deferred_updates_)return;
+    try {
+        const auto all=deferred_updates_->due(std::numeric_limits<std::int64_t>::max());
+        const auto now=QDateTime::currentMSecsSinceEpoch();
+        for(const auto& item:all) {
+            const bool configured=std::any_of(roots_.begin(),roots_.end(),[&](const QString& root){return normalizePath(native(root))==item.root;});
+            if(!configured)continue;
+            const auto delay=std::max<qint64>(0,item.due_ms-now);
+            deferred_timer_->start(static_cast<int>(std::min<qint64>(delay,std::numeric_limits<int>::max())));return;
+        }
+    } catch(const std::exception& error) {
+        statusBar()->showMessage(QStringLiteral("无法读取周期队列：%1").arg(QString::fromUtf8(error.what())),15000);
+    }
+}
+
+void MainWindow::processDeferredUpdates() {
+    if(closing_ || !deferred_updates_)return;
+    if(worker_thread_ || storage_maintenance_) {deferred_timer_->start(1000);return;}
+    std::vector<DeferredUpdate> jobs;
+    try {
+        for(const auto& item:deferred_updates_->due(QDateTime::currentMSecsSinceEpoch())) {
+            const bool configured=std::any_of(roots_.begin(),roots_.end(),[&](const QString& root){return normalizePath(native(root))==item.root;});
+            if(configured)jobs.push_back(item);
+            if(jobs.size()>=64)break;
+        }
+    } catch(const std::exception& error) {
+        statusBar()->showMessage(QStringLiteral("无法读取周期队列：%1").arg(QString::fromUtf8(error.what())),15000);return;
+    }
+    if(jobs.empty()){armDeferredTimer();return;}
+    const auto db_path=db_path_;const auto interval=static_cast<qint64>(periodic_minutes_)*60000;
+    startWorker([this,db_path,jobs,interval] {
+        DeferredUpdates queue(native(db_path+QStringLiteral(".deferred.sqlite")));
+        IndexManager manager(native(db_path));
+        for(const auto& job:jobs) {
+            QString error;
+            try {
+                const auto stats=job.root==job.path?manager.rebuildRoots({job.root}):manager.applyPathChange(job.root,job.path);
+                if(!stats.completed)error=stats.cancelled?QStringLiteral("同步已取消"):
+                    stats.error.empty()?QStringLiteral("扫描未完整完成"):QString::fromUtf8(stats.error.c_str());
+                if(error.isEmpty()) {
+                    if(!queue.acknowledge(job))queue.postpone(job.root,job.path,QDateTime::currentMSecsSinceEpoch()+interval);
+                } else queue.postpone(job.root,job.path,QDateTime::currentMSecsSinceEpoch()+interval);
+            } catch(const std::exception& failure) {
+                error=QString::fromUtf8(failure.what());
+                queue.postpone(job.root,job.path,QDateTime::currentMSecsSinceEpoch()+interval);
+            }
+            const auto root=QString::fromUtf8(job.root.c_str()),path=QString::fromUtf8(job.path.c_str());
+            QMetaObject::invokeMethod(this,[this,root,path,error] {if(!closing_)reportSyncOutcome(root,path,false,error,false);},Qt::QueuedConnection);
+        }
+    },{},false,[this,interval](const QString& error) {
+        if(!error.isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("周期更新未完成：%1").arg(error),15000);
+            deferred_timer_->start(static_cast<int>(std::min<qint64>(interval,std::numeric_limits<int>::max())));
+        } else armDeferredTimer();
+    });
 }
 
 void MainWindow::armRetryTimer() {
@@ -220,7 +299,7 @@ void MainWindow::dispatchSyncJobs() {
     }, {}, false);
 }
 
-void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool requested_rescan, const QString& error) {
+void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool requested_rescan, const QString& error, bool retry) {
     // A root-sized applyPathChange also scans the complete source. It shares
     // one canonical scope/budget with explicit full rescans and manual rebuilds.
     const bool rescan = requested_rescan || (pathIsWithin(native(path), native(root))
@@ -260,16 +339,18 @@ void MainWindow::reportSyncOutcome(const QString& root, const QString& path, boo
     } else {
         sync_errors_[key] = QStringLiteral("%1：%2").arg(path, error);
         sync_failure_scopes_[key] = {root, rescan ? root : path, rescan};
-        const auto attempts = ++sync_attempts_[key];
-        if (attempts < 3) {
+        const auto attempts = retry ? ++sync_attempts_[key] : (sync_attempts_[key]=3);
+        if (retry && attempts < 3) {
             ready_sync_retries_.remove(key);
             retry_deadlines_.insert(key, QDeadlineTimer(sync_retry_base_ms_ * attempts, Qt::PreciseTimer));
         } else {
             newly_exhausted = attempts == 3;
             retry_deadlines_.remove(key);
             ready_sync_retries_.remove(key);
-            if (rescan) dormant_rescan_roots_.insert(root);
-            else dormant_paths_.insert(path);
+            if (retry) {
+                if (rescan) dormant_rescan_roots_.insert(root);
+                else dormant_paths_.insert(path);
+            }
         }
     }
     armRetryTimer();

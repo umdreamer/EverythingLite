@@ -9,6 +9,7 @@
 #include "ui/exclusion_settings_dialog.h"
 #include "ui/root_settings_dialog.h"
 #include "core/index_manager.h"
+#include "core/deferred_updates.h"
 #include <QAction>
 #include <QAbstractButton>
 #include <QApplication>
@@ -26,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <optional>
+#include <limits>
 #include <sqlite3.h>
 #include <QFile>
 #include <QFileDialog>
@@ -173,6 +175,86 @@ class UiTest : public QObject {
         });
         reopened.editRoots();
     }
+    void periodicEventsAreDurableAndRunWhenDue() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const auto root=dir.filePath("root");
+        QVERIFY(QDir().mkpath(root+"/.cache"));
+        const auto db_path=dir.filePath("index.db"); IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QFile hidden(root+"/.cache/new-hidden.txt"); QVERIFY(hidden.open(QIODevice::WriteOnly)); hidden.close();
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",old);window.watcher_->stop();
+        window.scheduleFileEvent({hidden.fileName().toStdString(),false,{}});
+        QVERIFY(window.pending_paths_.isEmpty());QVERIFY(!window.event_timer_->isActive());
+        DeferredUpdates store((db_path+".deferred.sqlite").toStdString());
+        QCOMPARE(store.due(std::numeric_limits<std::int64_t>::max()).size(),std::size_t{1});
+        QVERIFY(manager.database().search("new-hidden").empty());
+        sqlite3* raw=nullptr;QCOMPARE(sqlite3_open((db_path+".deferred.sqlite").toUtf8().constData(),&raw),SQLITE_OK);
+        QCOMPARE(sqlite3_exec(raw,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(raw);
+        auto* timer=window.findChild<QTimer*>("deferredTimer");QVERIFY(timer);
+        QVERIFY(QMetaObject::invokeMethod(timer,"timeout",Qt::DirectConnection));
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QCOMPARE(manager.database().search("new-hidden").size(),std::size_t{1});
+        QVERIFY(store.due(std::numeric_limits<std::int64_t>::max()).empty());
+    }
+    void periodicEventsRecoverAfterWindowRestart() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());const auto root=dir.filePath("root"),db_path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(root+"/.cache"));IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        {
+            MainWindow window;window.watcher_->stop();
+            window.scheduleFileEvent({(root+"/.cache/new.txt").toStdString(),false,{}});
+            QVERIFY(window.deferred_timer_->isActive());
+        }
+        MainWindow reopened;qputenv("EVERYTHING_LITE_DB",old);reopened.watcher_->stop();
+        QVERIFY(reopened.deferred_timer_->isActive());
+        DeferredUpdates store((db_path+".deferred.sqlite").toStdString());
+        QCOMPARE(store.due(std::numeric_limits<std::int64_t>::max()).size(),std::size_t{1});
+    }
+    void directoryOverridesControlEventCadence() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto root=dir.filePath("root"),db_path=dir.filePath("index.db");
+        QVERIFY(QDir().mkpath(root));IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",old);window.watcher_->stop();
+        window.update_rules_={{(root+"/.cache/urgent").toStdString(),UpdateCadence::Realtime},
+                              {(root+"/generated").toStdString(),UpdateCadence::Periodic}};
+        window.scheduleFileEvent({(root+"/.cache/urgent/one.txt").toStdString(),false,{}});
+        QVERIFY(window.pending_paths_.contains(root+"/.cache/urgent/one.txt"));
+        window.scheduleFileEvent({(root+"/generated/two.txt").toStdString(),false,{}});
+        DeferredUpdates store((db_path+".deferred.sqlite").toStdString());
+        const auto queued=store.due(std::numeric_limits<std::int64_t>::max());
+        QCOMPARE(queued.size(),std::size_t{1});QCOMPARE(QString::fromStdString(queued.front().path),root+"/generated");
+    }
+#if !defined(_WIN32)
+    void periodicFailureKeepsScopeUntilRecovery() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto root=dir.filePath("root"),db_path=dir.filePath("index.db"),blocked=root+"/.blocked";
+        QVERIFY(QDir().mkpath(blocked));IndexManager manager(db_path.toStdString());
+        QVERIFY(manager.rebuildRoot(root.toStdString()).completed);
+        QFile file(blocked+"/new.txt");QVERIFY(file.open(QIODevice::WriteOnly));file.close();
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{root});
+        const auto old=qgetenv("EVERYTHING_LITE_DB");qputenv("EVERYTHING_LITE_DB",db_path.toUtf8());
+        MainWindow window;qputenv("EVERYTHING_LITE_DB",old);window.watcher_->stop();
+        window.scheduleFileEvent({file.fileName().toStdString(),false,{}});
+        QVERIFY(QFile::setPermissions(blocked,{}));
+        auto forceDue=[&] {sqlite3* raw=nullptr;QCOMPARE(sqlite3_open((db_path+".deferred.sqlite").toUtf8().constData(),&raw),SQLITE_OK);
+            QCOMPARE(sqlite3_exec(raw,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(raw);
+            QVERIFY(QMetaObject::invokeMethod(window.deferred_timer_,"timeout",Qt::DirectConnection));};
+        forceDue();QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QTRY_VERIFY(!window.sync_errors_.isEmpty());
+        DeferredUpdates store((db_path+".deferred.sqlite").toStdString());
+        QCOMPARE(store.due(std::numeric_limits<std::int64_t>::max()).size(),std::size_t{1});
+        QVERIFY(store.due(QDateTime::currentMSecsSinceEpoch()).empty());
+        QVERIFY(QFile::setPermissions(blocked,QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
+        forceDue();QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QTRY_VERIFY(window.sync_errors_.isEmpty());
+        QVERIFY(store.due(std::numeric_limits<std::int64_t>::max()).empty());
+        QCOMPARE(manager.database().search("new.txt").size(),std::size_t{1});
+    }
+#endif
     void init() {
         auto settings = makeAppSettings();
         settings.setValue("index/syncRetryBaseMs", 1500);

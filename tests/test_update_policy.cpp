@@ -79,6 +79,11 @@ int main() {
     assert(policy.classify("/synthetic/home/project/build-output-old/x")==UpdateCadence::Realtime);
     bool rejected=false;try {UpdatePolicy invalid("/synthetic/home",{{"relative",UpdateCadence::Realtime}},{});} catch(const std::invalid_argument&) {rejected=true;}
     assert(rejected);
+    for(const auto& invalid:{"relative","/synthetic//home","/synthetic/./home","/synthetic/../home","/synthetic/home/"}) {
+        bool rejected_path=false;try{policy.classify(invalid);}catch(const std::invalid_argument&){rejected_path=true;}assert(rejected_path);
+    }
+    assert(policy.classify("/synthetic/home/Documents/.a")==UpdateCadence::Periodic);
+    assert(policy.classify("/synthetic/home/Documents/a.b")==UpdateCadence::Realtime);
     assert(policy.shouldDescend("/synthetic/home/.cache"));
     assert(!policy.shouldDescend("/synthetic/home/Documents/generated"));
     const auto base=fs::temp_directory_path()/("everything-lite-tiered-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

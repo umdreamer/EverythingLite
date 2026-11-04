@@ -15,6 +15,7 @@ public:
 private:
     bool include_periodic_=false;
     std::string home_;
+    std::string library_;
     std::vector<UpdateRule> overrides_;
     std::vector<std::string> own_directories_;
 };

@@ -339,7 +339,7 @@ void MainWindow::processDeferredUpdates() {
             statusBar()->showMessage(QStringLiteral("周期更新未完成：%1").arg(error),15000);
             deferred_timer_->start(static_cast<int>(std::min<qint64>(interval,std::numeric_limits<int>::max())));
         } else armDeferredTimer();
-    });
+    },false);
 }
 
 void MainWindow::armRetryTimer() {
@@ -419,6 +419,7 @@ void MainWindow::dispatchSyncJobs() {
         catch(const std::exception& error) {statusBar()->showMessage(QStringLiteral("无法读取周期队列：%1").arg(QString::fromUtf8(error.what())),15000);}
     }
     const auto complete=complete_scan_generations_;const auto rules=update_rules_;
+    const bool refresh_statistics=std::any_of(jobs.begin(),jobs.end(),[&](const auto& job){return complete.value(job.root)>0;});
     const auto home=normalizePath(native(QDir::homePath()));
     startWorker([this, db_path, jobs, pending,complete,rules,home] {
         std::unique_ptr<DeferredUpdates> queue;
@@ -458,7 +459,7 @@ void MainWindow::dispatchSyncJobs() {
     }, {}, false,[this](const QString& error) {
         if(!error.isEmpty())status_label_->setText(QStringLiteral("索引任务未完成：%1").arg(error));
         armDeferredTimer();
-    });
+    },refresh_statistics);
 }
 
 void MainWindow::reportSyncOutcome(const QString& root, const QString& path, bool requested_rescan, const QString& error, bool retry) {

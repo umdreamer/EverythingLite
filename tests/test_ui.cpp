@@ -65,10 +65,13 @@ namespace everything_lite {
 namespace {
 std::atomic_bool audit_settings_counts{false};
 std::atomic_int settings_gui_counts{0};
+std::atomic_int settings_worker_counts{0};
 int countSettingsSql(unsigned,void*,void* statement,void*) {
-    if(!audit_settings_counts || QThread::currentThread()!=QCoreApplication::instance()->thread())return 0;
+    if(!audit_settings_counts)return 0;
     const char* query=sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
-    if(query && (std::string(query).find("COUNT(*) FROM files")!=std::string::npos || std::string(query).find("COUNT(*) FROM file_entries")!=std::string::npos))++settings_gui_counts;
+    if(query && (std::string(query).find("COUNT(*) FROM files")!=std::string::npos || std::string(query).find("COUNT(*) FROM file_entries")!=std::string::npos)) {
+        if(QThread::currentThread()==QCoreApplication::instance()->thread())++settings_gui_counts;else ++settings_worker_counts;
+    }
     return 0;
 }
 #if defined(__APPLE__)
@@ -85,7 +88,7 @@ int registerSettingsSqlTrace(sqlite3* db,char**,const sqlite3_api_routines*) {
 }
 #endif
 struct SettingsCountAudit {
-    SettingsCountAudit() {settings_gui_counts=0;audit_settings_counts=true;
+    SettingsCountAudit() {settings_gui_counts=0;settings_worker_counts=0;audit_settings_counts=true;
 #if !defined(__APPLE__)
         sqlite3_auto_extension(reinterpret_cast<void(*)()>(registerSettingsSqlTrace));
 #endif
@@ -307,6 +310,28 @@ class UiTest : public QObject {
         settings_gui_counts=0;
         window.applyRootConfiguration(window.roots_,60,window.update_rules_);window.watcher_->stop();
         QCOMPARE(settings_gui_counts.load(),0);
+    }
+    void backgroundEventsDoNotRecountWholeIndex() {
+        auto settings=makeAppSettings();settings.setValue("index/roots",QStringList{fixture_root});
+        MainWindow window;window.watcher_->stop();
+        QTRY_VERIFY(!window.worker_thread_ && !window.catalog_timer_->isActive() && !window.event_timer_->isActive());
+        window.update_rules_={{fixture_root.toStdString(),UpdateCadence::Realtime}};
+        SettingsCountAudit audit;
+        Database(window.db_path_.toStdString()).totalFileCount();QVERIFY(settings_gui_counts.load()>0);
+        window.scheduleFileEvent({(fixture_root+"/alpha.txt").toStdString(),false,{}});
+        QTRY_VERIFY(window.visibility_pending_.isEmpty() && window.pending_paths_.isEmpty() && !window.event_timer_->isActive() && !window.worker_thread_);
+        QCOMPARE(settings_worker_counts.load(),0);
+        const auto periodic=fixture_root+"/.periodic-count-test";QVERIFY(QDir().mkpath(periodic));
+        window.update_rules_.push_back({periodic.toStdString(),UpdateCadence::Periodic});
+        QFile file(periodic+"/event.txt");QVERIFY(file.open(QIODevice::WriteOnly));file.close();
+        window.scheduleFileEvent({file.fileName().toStdString(),false,{}});QVERIFY(window.deferred_updates_);
+        sqlite3* queue=nullptr;QCOMPARE(sqlite3_open((window.db_path_+".deferred.sqlite").toUtf8().constData(),&queue),SQLITE_OK);
+        QCOMPARE(sqlite3_exec(queue,"UPDATE pending SET due_ms=0",nullptr,nullptr,nullptr),SQLITE_OK);sqlite3_close(queue);
+        window.processDeferredUpdates();QTRY_VERIFY(!window.worker_thread_);
+        QCOMPARE(settings_worker_counts.load(),0);
+        window.scheduleFileEvent({fixture_root.toStdString(),true,{}});
+        QTRY_VERIFY_WITH_TIMEOUT(settings_worker_counts.load()>0,10000);
+        QTRY_VERIFY(!window.worker_thread_);
     }
     void hiddenSettingsLogDoesNotRefreshUntilShown() {
         MainWindow window;window.watcher_->stop();window.showSettingsPage("logs");

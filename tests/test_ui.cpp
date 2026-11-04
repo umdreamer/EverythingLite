@@ -2560,7 +2560,10 @@ class UiTest : public QObject {
         QVERIFY(!window.watcher_error_label_->isHidden());
     }
     void cliAndGuiShareExclusionPolicy() {
-        MainWindow window;
+        MainWindow window;window.watcher_->stop();
+        const auto idle=[&]{return !window.worker_thread_ && !window.catalog_timer_->isActive() &&
+            !window.event_timer_->isActive() && window.visibility_pending_.isEmpty();};
+        QTRY_VERIFY(idle());
         auto cli=[&](const QStringList& args) {
             QProcess process;
             QStringList command{QStringLiteral("--db"),window.db_path_}; command.append(args);
@@ -2571,13 +2574,15 @@ class UiTest : public QObject {
         QCOMPARE(cli({"excludes","set","--file",fixture_root+"/alpha.txt"}),0);
         Database db(window.db_path_.toStdString());
         QCOMPARE(db.exclusionPolicy().rules().files.size(),std::size_t(1));
-        window.rebuildIndex(); QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QTRY_VERIFY(idle());window.rebuildIndex();QVERIFY(window.worker_thread_);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
         window.search_edit_->setText("alpha"); window.runSearch();
         QTRY_VERIFY(!window.search_in_flight_); QCOMPARE(window.model_->rowCount(),0);
         QVERIFY(db.search("alpha").empty());
         QCOMPARE(cli({"excludes","clear"}),0);
         QVERIFY(db.search("alpha").empty()); // loosening alone cannot resurrect rows
-        window.rebuildIndex(); QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
+        QTRY_VERIFY(idle());window.rebuildIndex();QVERIFY(window.worker_thread_);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.worker_thread_,10000);
         window.runSearch(); QTRY_COMPARE(window.model_->rowCount(),1);
         QCOMPARE(window.model_->nameAt(0),QStringLiteral("alpha.txt"));
     }

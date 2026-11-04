@@ -303,6 +303,9 @@ int main(int argc,char** argv) {
         assert(paths(db.searchReliable("",count+100))==original);
         auto filtered=parseSearchQuery("aa"); filtered.source_id=source;
         assert(paths(db.search(filtered,4,1))==paths(db.searchReliable(filtered,4,1)));
+        SearchOptions sparse;sparse.source_roots={"/synthetic/other"};sparse.source_roots_resolved=true;
+        captured.str("");captured.clear();assert(service.search("工匠",50,0,sparse).empty());
+        assert(traceSteps(captured.str()," vm_steps=")<1000 && "A tiny configured source must not scan the entire retained name index");
         assert(sqlite3_open(path.c_str(),&raw)==SQLITE_OK);
         execute(raw,"DROP INDEX idx_files_search_name");
         SearchOptions fallback;fallback.source_roots={"/synthetic/source"};fallback.source_roots_resolved=true;

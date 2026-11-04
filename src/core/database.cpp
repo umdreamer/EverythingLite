@@ -780,7 +780,18 @@ std::vector<SearchResult> runSearch(sqlite3* db,
        !query.extension && !query.min_size && !query.max_size && !query.modified_after &&
        std::any_of(query.terms.begin(),query.terms.end(),[](const auto& term){return utf8CodepointCount(term)<3;})) {
         auto index=prepare(db,"SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='files' AND name='idx_files_search_name'");
-        ordered_name_scan=sqlite3_step(index.get())==SQLITE_ROW;
+        if(sqlite3_step(index.get())==SQLITE_ROW) {
+            // A small enabled source should retain its selective source index.
+            // These are cached root summaries, never a COUNT of file records.
+            std::string roots;
+            for(std::size_t i=0;i<query.source_roots.size();++i)roots+=i?",?":"?";
+            auto population=prepare(db,"SELECT coalesce(sum(file_count),0),coalesce(sum(CASE WHEN root IN ("+roots+") THEN file_count ELSE 0 END),0) FROM roots");
+            for(std::size_t i=0;i<query.source_roots.size();++i)bindText(population.get(),static_cast<int>(i)+1,query.source_roots[i]);
+            if(sqlite3_step(population.get())==SQLITE_ROW) {
+                const auto total=sqlite3_column_int64(population.get(),0),selected=sqlite3_column_int64(population.get(),1);
+                ordered_name_scan=total>0 && selected>=total/2+total%2;
+            }
+        }
     }
     std::ostringstream sql;
     if (use_fts) {

@@ -771,12 +771,25 @@ std::vector<SearchResult> runSearch(sqlite3* db,
         if (query.extension) searchTrace("Database", "extension=\"" + *query.extension + "\"");
     }
 
+    // Source-root joins otherwise encourage a source-first scan and a full
+    // sort of short matches. Read the narrow ordered name index first; SQLite
+    // can reject names before fetching wide file records or source metadata.
+    bool ordered_name_scan=false;
+    if(!use_fts && !compact && !query.match_path && !query.path_term && !query.folder_scope &&
+       !query.source_roots.empty() && !query.source_id && !query.source_status &&
+       !query.extension && !query.min_size && !query.max_size && !query.modified_after &&
+       std::any_of(query.terms.begin(),query.terms.end(),[](const auto& term){return utf8CodepointCount(term)<3;})) {
+        auto index=prepare(db,"SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='files' AND name='idx_files_search_name'");
+        ordered_name_scan=sqlite3_step(index.get())==SQLITE_ROW;
+    }
     std::ostringstream sql;
     if (use_fts) {
         sql << "SELECT files.path,files.parent_path,files.name,files.ext,files.root,files.size,files.modified_time,files.is_dir,files.scan_generation,files.source_id,files.relative_path,files.cloud_copy,sources.label,sources.type,sources.status,sources.last_check,sources.last_success "
                "FROM files_name_fts JOIN files ON files.id=files_name_fts.rowid JOIN sources ON sources.id=files.source_id";
     } else {
-        sql << "SELECT files.path,files.parent_path,files.name,files.ext,files.root,files.size,files.modified_time,files.is_dir,files.scan_generation,files.source_id,files.relative_path,files.cloud_copy,sources.label,sources.type,sources.status,sources.last_check,sources.last_success FROM files JOIN sources ON sources.id=files.source_id";
+        sql << "SELECT files.path,files.parent_path,files.name,files.ext,files.root,files.size,files.modified_time,files.is_dir,files.scan_generation,files.source_id,files.relative_path,files.cloud_copy,sources.label,sources.type,sources.status,sources.last_check,sources.last_success FROM files";
+        sql << (ordered_name_scan ? " INDEXED BY idx_files_search_name CROSS JOIN sources ON sources.id=files.source_id"
+                                  : " JOIN sources ON sources.id=files.source_id");
     }
 
     std::vector<std::string> where;

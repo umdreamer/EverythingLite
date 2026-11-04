@@ -268,6 +268,30 @@ int main(int argc,char** argv) {
                 sqlite3_close(raw); assert(fts && "selective long terms must retain FTS access");
             }
         }
+        // Source filtering must not turn a short search into a full source
+        // scan and global sort. Cover the actual GUI options and SQL plan.
+        for(const auto& term:{"z","aa","工匠"}) {
+            SearchOptions options;options.source_roots={"/synthetic/source","/synthetic/other"};
+            options.source_roots_resolved=true;
+            captured.str("");captured.clear();
+            const auto results=service.search(term,7,1,options);
+            const auto text=captured.str();const auto start=text.find("SQL=SELECT files.path,");
+            assert(start!=std::string::npos);
+            const auto actual=text.substr(start+4,text.find('\n',start)-start-4);
+            sqlite3* connection=nullptr;assert(sqlite3_open(path.c_str(),&connection)==SQLITE_OK);
+            bool ordered_names=false;
+            for(const auto& entry:plan(connection,actual))
+                if(entry.find("idx_files_search_name")!=std::string::npos)ordered_names=true;
+            assert(ordered_names && "Configured-source short queries must scan the ordered name index");
+            auto expected=std::string("SELECT path FROM files WHERE instr(search_name,'")+term+
+                "')>0 AND source_id IN ("+std::to_string(source)+","+std::to_string(second)+
+                ") ORDER BY search_name,parent_path COLLATE NOCASE,id LIMIT 7 OFFSET 1";
+            sqlite3_stmt* check=nullptr;assert(sqlite3_prepare_v2(connection,expected.c_str(),-1,&check,nullptr)==SQLITE_OK);
+            std::vector<std::string> expected_paths;
+            while(sqlite3_step(check)==SQLITE_ROW)expected_paths.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(check,0)));
+            sqlite3_finalize(check);sqlite3_close(connection);assert(paths(results)==expected_paths);
+            if(std::string(term)=="z")assert(traceSteps(text," vm_steps=")<count/2 && "A full first page must stop early instead of sorting all source rows");
+        }
         // Compare complete ordering with the former SQLite NOCASE expression,
         // including ASCII case ties, parent paths and non-ASCII byte sequences.
         sqlite3* raw=nullptr; assert(sqlite3_open(path.c_str(),&raw)==SQLITE_OK);
@@ -279,6 +303,11 @@ int main(int argc,char** argv) {
         assert(paths(db.searchReliable("",count+100))==original);
         auto filtered=parseSearchQuery("aa"); filtered.source_id=source;
         assert(paths(db.search(filtered,4,1))==paths(db.searchReliable(filtered,4,1)));
+        assert(sqlite3_open(path.c_str(),&raw)==SQLITE_OK);
+        execute(raw,"DROP INDEX idx_files_search_name");
+        SearchOptions fallback;fallback.source_roots={"/synthetic/source"};fallback.source_roots_resolved=true;
+        assert(!service.search("aa",50,0,fallback).empty());
+        execute(raw,"CREATE INDEX idx_files_search_name ON files(search_name)");sqlite3_close(raw);
     }
     if(mode=="all" || mode=="initialize") {
         // Keep the writer lock throughout actual initialize and SearchService

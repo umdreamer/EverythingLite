@@ -1,4 +1,16 @@
-# 测试范围与验证记录（截至 0.6.0）
+# 测试范围与验证记录（截至 0.6.1）
+
+## Mac 0.6.1 本地核验（2026-11-04）
+
+维护者已确认本次为纯 Bug 修复，只发布 tag。最终版本下 GUI Debug CTest 29/29（Qt UI 127 passed、0 failed）、Core Debug CTest 22/22 通过；Mac Release 构建成功。应用包短版本与构建版本均为 0.6.1，合成数据库的 CLI 索引/范围查询及三秒 offscreen GUI 启动通过。
+
+命令：`cmake --preset gui-debug -DCMAKE_PREFIX_PATH="$(brew --prefix qtbase)"`、`cmake --build --preset gui-debug --parallel 4`、`QT_QPA_PLATFORM=offscreen ctest --preset gui-debug`；然后依次执行 `cmake --preset core-debug`、`cmake --build --preset core-debug --parallel 4`、`ctest --preset core-debug` 及 `BUILD_DIR=build-macos ./scripts/build-macos.sh`。未并发运行固定临时夹具的测试。首轮 GUI 中 CLI/GUI 排除用例失败，单项通过；增加启动任务空闲等待及重建确实启动的断言后，目标用例和完整回归通过。
+
+新增回归先复现带来源过滤的短词查询丢失名称排序索引、只启用小来源时全局扫描退化、未选来源统计缺失/零的退化，再验证修复。结果与独立 SQL 对照排序和分页；缺失名称索引保留回退。后台统计回归先复现每次普通事件后的全库计数，修复后同时证明普通实时/周期任务不计数、明确完整任务仍计数。路径边界、Finder 隐藏、传统/紧凑存储和活动搜索保持均通过。独立只读审查未发现剩余 P1/P2。
+
+性能对照使用同一 100002 条合成数据库、相同 Debug 核心库配置和同一外部 C++17 测量程序，每次加载 50 条。三次顺序运行的中位数：常见短词由 27.28 ms 降至 0.39 ms；罕见短词由 24.62 ms 降至 3.69 ms。10 万次同路径分类由 444.52 ms 降至 21.94 ms。数据只代表该合成夹具和热点，不代表真实索引或整次 GUI 响应的固定加速倍数。
+
+日常数据库只做受限只读诊断，未迁移、压缩或重建。未对真实大型索引做修复版写入/交互验收，未验收 NAS/外设现场、Linux、独立 Qt 部署、签名和公证。网络推送及标签状态以 Issue #19、#20 的交付记录为准。
 
 ## Mac 0.6.0 发布核验（2026-11-01）
 

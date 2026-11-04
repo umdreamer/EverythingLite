@@ -785,11 +785,14 @@ std::vector<SearchResult> runSearch(sqlite3* db,
             // These are cached root summaries, never a COUNT of file records.
             std::string roots;
             for(std::size_t i=0;i<query.source_roots.size();++i)roots+=i?",?":"?";
-            auto population=prepare(db,"SELECT coalesce(sum(file_count),0),coalesce(sum(CASE WHEN root IN ("+roots+") THEN file_count ELSE 0 END),0) FROM roots");
-            for(std::size_t i=0;i<query.source_roots.size();++i)bindText(population.get(),static_cast<int>(i)+1,query.source_roots[i]);
+            auto population=prepare(db,"SELECT coalesce(sum(r.file_count),0),coalesce(sum(CASE WHEN s.root IN ("+roots+") THEN r.file_count ELSE 0 END),0),coalesce(sum(CASE WHEN s.root IN ("+roots+") OR r.file_count>0 THEN 0 ELSE 1 END),0) FROM sources s LEFT JOIN roots r ON r.root=s.root");
+            for(std::size_t i=0;i<query.source_roots.size();++i) {
+                bindText(population.get(),static_cast<int>(i)+1,query.source_roots[i]);
+                bindText(population.get(),static_cast<int>(query.source_roots.size()+i)+1,query.source_roots[i]);
+            }
             if(sqlite3_step(population.get())==SQLITE_ROW) {
                 const auto total=sqlite3_column_int64(population.get(),0),selected=sqlite3_column_int64(population.get(),1);
-                ordered_name_scan=total>0 && selected>=total/2+total%2;
+                ordered_name_scan=sqlite3_column_int64(population.get(),2)==0 && total>0 && selected>=total/2+total%2;
             }
         }
     }

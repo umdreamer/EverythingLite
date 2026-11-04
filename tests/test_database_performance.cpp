@@ -307,6 +307,13 @@ int main(int argc,char** argv) {
         captured.str("");captured.clear();assert(service.search("工匠",50,0,sparse).empty());
         assert(traceSteps(captured.str()," vm_steps=")<1000 && "A tiny configured source must not scan the entire retained name index");
         assert(sqlite3_open(path.c_str(),&raw)==SQLITE_OK);
+        execute(raw,"CREATE TEMP TABLE saved_root AS SELECT * FROM roots WHERE root='/synthetic/source'");
+        for(const auto& change:{"UPDATE roots SET file_count=0 WHERE root='/synthetic/source'","DELETE FROM roots WHERE root='/synthetic/source'"}) {
+            execute(raw,change);captured.str("");captured.clear();
+            assert(service.search("工匠",50,0,sparse).empty());
+            assert(traceSteps(captured.str()," vm_steps=")<1000 && "An uncounted retained source must not force a global name scan");
+        }
+        execute(raw,"INSERT INTO roots SELECT * FROM saved_root");
         execute(raw,"DROP INDEX idx_files_search_name");
         SearchOptions fallback;fallback.source_roots={"/synthetic/source"};fallback.source_roots_resolved=true;
         assert(!service.search("aa",50,0,fallback).empty());
